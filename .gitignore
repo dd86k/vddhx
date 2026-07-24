@@ -1,0 +1,33 @@
+# Project input: Source files
+.dub
+docs.json
+__dummy.html
+docs/
+dub.selections.json
+
+# Project output: Executables, debug info, docs, etc.
+/vddhx
+vddhx-test-*
+*.dll
+*.exe
+*.pdb
+*.o
+*.obj
+*.lst
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+
+# Dependencies
+/SDL/
+/SDL_ttf/
+/install/
+
+# Archives
+*.zip
+*.gz
+
+# Personal
+/TODO
