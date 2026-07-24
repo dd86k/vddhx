@@ -5,7 +5,7 @@ copyright "Copyright © 2026, dd86k <dd@dax.moe>"
 license "proprietary"
 
 dependency "bindbc-sdl" version="~>2.4.2"
-dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="d9952c6f170bfa2167d48ed387bd75f4d1421a10"
+dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="a70e43e45ceec730a34c5f49f6d3cdb43094b7ab"
 dependency "ddlogger" repository="git+https://github.com/dd86k/ddlogger.git" version="653364f91d3febed0116eb792a3a899418f49927"
 dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="3ffdac461a0cba77551fcc8ee228c2dcfe4d46d1"
 
