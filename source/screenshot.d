@@ -70,11 +70,14 @@ int screenshot_run(string[] args)
     void frame() { mu_begin(&ctx); ui_frame(&ctx, W, H); mu_end(&ctx); }
 
     // Locate a drawn label so scripted clicks do not hardcode layout maths.
+    // Iterate in z-index order with mu_get_next_command and pull the string out
+    // of the per-frame arena; the command only carries an offset into it.
     mu_Vec2 find(const(char)* label)
     {
-        foreach (ref mu_Command cmd; mu_command_range(&ctx))
+        mu_Command* cmd;
+        while (mu_get_next_command(&ctx, &cmd))
             if (cmd.type == MU_COMMAND_TEXT &&
-                strncmp(cmd.text.str.ptr, label, cast(int) strlen(label)) == 0)
+                strncmp(mu_command_text(&ctx, cmd), label, cast(int) strlen(label)) == 0)
                 return cmd.text.pos;
         return mu_Vec2(-1, -1);
     }
@@ -96,6 +99,11 @@ int screenshot_run(string[] args)
         render_commands(renderer, &ctx);
         return screenshot_save(renderer, path);
     }
+
+    // Scenario 0 (debug): open a multi-row file so offsets past 0x0F appear.
+    ui_open("/tmp/mid.bin");
+    frame();
+    shot("shot-rows.bmp");
 
     // Scenario 1: fresh startup.
     frame();

@@ -36,6 +36,16 @@ private __gshared int minimapOn = 1;
 private __gshared char[4096] pendingPath;
 private shared bool pendingReady;
 
+/// Ditto, for the async Save As dialog. The callback does no GC work, so the
+/// chosen path is stashed here and the actual write happens on the main thread.
+private __gshared char[4096] pendingSavePath;
+private shared bool pendingSaveReady;
+
+/// Disk path backing the open document, empty for the in-memory scratch buffer.
+/// Set on Open (and once a scratch buffer is first saved through Save As), it is
+/// the target an in-place Save writes to.
+private __gshared string loadedPath;
+
 /// Hand the UI the window handle before the first frame. Also spins up an empty
 /// editor and wires the panel to it, so the blank panel is editable from the
 /// outset: a file can be built from scratch before anything is ever opened.
@@ -152,6 +162,10 @@ private void wireEditor(IDocumentEditor ed)
 /// the panel is left untouched (the sample keeps showing) and the error logged.
 void ui_open(string path)
 {
+    // Loading replaces the live document, so resolve any unsaved edits first.
+    if (ui_confirm_discard("Open another file") != Confirm.proceed)
+        return;
+
     try
     {
         IDocument doc = new FileDocument(path); // read-only by default
@@ -163,6 +177,7 @@ void ui_open(string path)
         if (editor)
             editor.close();
         editor         = ed;
+        loadedPath     = path; // in-place Save now has a target
         wireEditor(ed);
         hex.dataSize   = ed.size();
         hex.baseAddress = 0;
@@ -175,6 +190,138 @@ void ui_open(string path)
     }
     catch (Exception e)
         logWarn("open failed: %s", e.msg);
+}
+
+/// Write the open document's current contents to `path` and mark it saved.
+///
+/// Uses the document's "replace" strategy: stream the edited view into a temp
+/// file alongside the target, then atomically rename it over the target. The
+/// read-only source handle stays valid across the rename (it keeps referencing
+/// the original inode), so the editor and its undo history survive without a
+/// reopen. Returns false, and leaves the file untouched, if the write fails.
+private bool saveTo(string path)
+{
+    import std.stdio : File;
+    import std.file : rename, exists, remove;
+
+    if (editor is null)
+        return false;
+
+    long docsize = editor.size();
+    string tmp = path ~ ".vddhx-tmp"; // same directory, so rename is atomic
+    try
+    {
+        {
+            File fout = File(tmp, "wb");
+            scope(exit) fout.close();
+            ubyte[64 * 1024] buffer = void;
+            long pos;
+            while (pos < docsize)
+            {
+                ubyte[] chunk = editor.view(pos, buffer);
+                if (chunk.length == 0) // nothing more readable; avoid spinning
+                    break;
+                fout.rawWrite(chunk);
+                pos += chunk.length;
+            }
+            fout.flush();
+        }
+        rename(tmp, path);
+    }
+    catch (Exception e)
+    {
+        try { if (exists(tmp)) remove(tmp); }
+        catch (Exception) {} // best-effort cleanup; report the original cause
+        logWarn("save failed: %s", e.msg);
+        return false;
+    }
+
+    editor.markSaved();
+    logInfo("saved %s (%s bytes)", path, docsize);
+    return true;
+}
+
+/// Save As dialog callback. Like ui_on_file_picked it may run off-thread, so it
+/// only copies the chosen path out and flags it for the next frame to write.
+extern (C) private void ui_on_save_picked(void* user, const(char*)* fileList, int filter) nothrow
+{
+    if (fileList is null || *fileList is null)
+        return;
+    const(char)* path = *fileList;
+    size_t n;
+    while (path[n] && n + 1 < pendingSavePath.length)
+    {
+        pendingSavePath[n] = path[n];
+        ++n;
+    }
+    pendingSavePath[n] = 0;
+    atomicStore(pendingSaveReady, true);
+}
+
+/// Save the open document. With a known path it writes in place and reports
+/// whether that succeeded. With none (a scratch buffer built from nothing) there
+/// is nowhere to write yet, so it opens a native Save As dialog and returns
+/// false: the write lands later, on the main thread, once a path is chosen.
+bool ui_save()
+{
+    if (loadedPath.length)
+        return saveTo(loadedPath);
+
+    SDL_ShowSaveFileDialog(&ui_on_save_picked, null, uiWindow, null, 0, null);
+    return false;
+}
+
+/// Outcome of the unsaved-changes prompt.
+private enum Confirm { proceed, cancel }
+
+/// Button ids for the prompt, kept distinct from the unset -1 sentinel.
+private enum { btnSave = 1, btnDontSave = 2, btnCancel = 3 }
+
+/// Resolve unsaved edits before an action that would discard them (quitting or
+/// loading another file). With no edits pending it proceeds silently; otherwise
+/// it puts up a native Save / Don't Save / Cancel prompt titled `title`.
+/// Returns Confirm.proceed when the caller may go ahead (saved or discarded) and
+/// Confirm.cancel when the user backed out, a chosen save has yet to finish, or
+/// the prompt itself failed (fail safe: never lose data on an error).
+private Confirm ui_confirm_discard(const(char)* title)
+{
+    if ((editor && editor.edited()) == false)
+        return Confirm.proceed;
+
+    static immutable SDL_MessageBoxButtonData[3] buttons = [
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, btnSave,     "Save" },
+        { cast(SDL_MessageBoxButtonFlags) 0,       btnDontSave, "Don't Save" },
+        { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, btnCancel,   "Cancel" },
+    ];
+    SDL_MessageBoxData data = {
+        flags:      SDL_MESSAGEBOX_WARNING,
+        window:     uiWindow,
+        title:      title,
+        message:    "The document has unsaved changes.",
+        numButtons: buttons.length,
+        buttons:    buttons.ptr,
+    };
+
+    int clicked = -1;
+    if (SDL_ShowMessageBox(&data, &clicked) == false)
+    {
+        logWarn("message box failed: %s", SDL_GetError().fromStringz);
+        return Confirm.cancel;
+    }
+
+    switch (clicked)
+    {
+    case btnSave:     return ui_save() ? Confirm.proceed : Confirm.cancel;
+    case btnDontSave: return Confirm.proceed;
+    default:          return Confirm.cancel; // Cancel, or the window was closed
+    }
+}
+
+/// Ask the user to resolve unsaved edits before quitting. True to go ahead.
+/// main calls this on every quit route so the window keeps running on Cancel.
+bool ui_may_quit()
+{
+    return ui_confirm_discard("Quit vddhx") == Confirm.proceed;
 }
 
 /// Build one frame of UI. Call between mu_begin and mu_end.
@@ -208,6 +355,16 @@ void ui_frame(mu_Context* ctx, int width, int height)
         {
             atomicStore(pendingReady, false);
             ui_open(pendingPath.ptr.fromStringz.idup);
+        }
+
+        // Likewise a Save As destination: write there, and adopt it as the
+        // document's home so later saves land in place without asking again.
+        if (atomicLoad(pendingSaveReady))
+        {
+            atomicStore(pendingSaveReady, false);
+            string dest = pendingSavePath.ptr.fromStringz.idup;
+            if (saveTo(dest))
+                loadedPath = dest;
         }
 
         ui_menubar(ctx);
@@ -274,8 +431,15 @@ private void ui_menubar(mu_Context* ctx)
         // next frame to open. null filters means "all files", single-select.
         if (mu_menu_item(ctx, "Open"))
             SDL_ShowOpenFileDialog(&ui_on_file_picked, null, uiWindow, null, 0, null, false);
-        if (mu_menu_item(ctx, "Save")) writeln("TODO: File > Save");
-        if (mu_menu_item(ctx, "Quit")) writeln("TODO: File > Quit");
+        if (mu_menu_item(ctx, "Save")) ui_save();
+        // Route Quit through SDL's own event queue so main stays the single
+        // owner of the loop flag; the existing SDL_EVENT_QUIT case ends the loop.
+        if (mu_menu_item(ctx, "Quit"))
+        {
+            SDL_Event quit; // .init zeroes the union
+            quit.type = SDL_EVENT_QUIT;
+            SDL_PushEvent(&quit);
+        }
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }

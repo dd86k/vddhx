@@ -108,7 +108,11 @@ void main(string[] args)
             switch (event.type)
             {
             case SDL_EVENT_QUIT:
-                running = false;
+                // Single choke point for every quit route (window close, the
+                // File > Quit menu and Ctrl+Q both push this). Let the UI clear
+                // any unsaved changes before the loop ends.
+                if (ui_may_quit())
+                    running = false;
                 break;
             case SDL_EVENT_MOUSE_MOTION:
                 mu_input_mousemove(ctx, cast(int) event.motion.x, cast(int) event.motion.y);
@@ -118,6 +122,12 @@ void main(string[] args)
                 break;
             case SDL_EVENT_TEXT_INPUT:
                 mu_input_text(ctx, event.text.text);
+                break;
+            case SDL_EVENT_DROP_FILE:
+                // A file was dropped onto the window: open it. SDL3 owns the
+                // path string (no free), so copy it before it goes away.
+                if (event.drop.data)
+                    ui_open(event.drop.data.fromStringz.idup);
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_EVENT_MOUSE_BUTTON_UP:
                 int btn = mouseButton(event.button.button);
@@ -130,6 +140,18 @@ void main(string[] args)
                     mu_input_mouseup(ctx, x, y, btn);
                 break;
             case SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP:
+                // Ctrl+Q quits, mirroring the File > Quit menu entry. Push the
+                // quit event rather than ending the loop here, so it flows
+                // through the SDL_EVENT_QUIT unsaved-changes check like the rest.
+                if (event.type == SDL_EVENT_KEY_DOWN &&
+                    event.key.key == SDLK_Q &&
+                    event.key.mod & SDL_KMOD_CTRL)
+                {
+                    SDL_Event quit; // .init zeroes the union
+                    quit.type = SDL_EVENT_QUIT;
+                    SDL_PushEvent(&quit);
+                    break;
+                }
                 version (Screenshot)
                 {
                     // Ctrl+Shift+F12 grabs the current frame. Chosen to dodge
