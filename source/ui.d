@@ -8,9 +8,10 @@ import ddlogger;
 import ddui;
 import ddhx.document : FileDocument, IDocument;
 import ddhx.editor : IDocumentEditor, spawnEditor;
+import about : about_open, about_frame;
 import hexview;
 import render : render_font_mono;
-import std.stdio : writeln;
+import std.array : Appender, appender;
 import std.format : sformat;
 
 /// Persisted hex panel state (selection lives here across frames). The caret is
@@ -275,8 +276,251 @@ bool ui_save()
     if (loadedPath.length)
         return saveTo(loadedPath);
 
-    SDL_ShowSaveFileDialog(&ui_on_save_picked, null, uiWindow, null, 0, null);
+    ui_save_as();
     return false;
+}
+
+/// Put up the native Save As dialog, whatever path the document already has.
+/// Async like the Open dialog: ui_on_save_picked stashes the destination and the
+/// next frame writes there, then adopts it as the document's home so a later
+/// in-place Save follows it.
+void ui_save_as()
+{
+    SDL_ShowSaveFileDialog(&ui_on_save_picked, null, uiWindow, null, 0, null);
+}
+
+/// Bytes one Copy will format. The text runs three characters per byte, so this
+/// caps the clipboard string near 48 MB; a larger selection is refused outright
+/// rather than quietly spending the memory (and the time) on it.
+private enum COPY_MAX = 16 * 1024 * 1024;
+
+/// Resolve the byte range Copy and Cut act on, clamped to the document. Returns
+/// false when there is nothing to act on: no document, no caret placed yet, or
+/// the caret parked on the append slot past the last byte. A bare caret gives a
+/// single byte, matching what the status bar reports and what Delete removes.
+private bool ui_selection(out size_t low, out size_t high)
+{
+    if (editor is null || hex.active == false)
+        return false;
+
+    size_t total = hex_total(hex);
+    low  = hex_sel_low(hex);
+    high = hex_sel_high(hex);
+    if (total == 0 || low >= total)
+        return false;
+    if (high >= total)
+        high = total - 1;
+    return true;
+}
+
+/// Copy the selected bytes to the clipboard as hex text, lower case and wrapped
+/// at the panel's column count:
+/// ---
+/// de ad be ef ...
+/// ---
+/// Text, so it drops into any editor or chat window as a readable dump, and
+/// ui_paste reads the same shape back in. Returns whether the bytes reached the
+/// clipboard, so ui_cut only removes what it managed to copy.
+bool ui_copy()
+{
+    size_t low, high;
+    if (ui_selection(low, high) == false)
+        return false;
+
+    size_t len = high - low + 1;
+    if (len > COPY_MAX)
+    {
+        logWarn("copy refused: %s bytes selected, over the %s byte limit", len, COPY_MAX);
+        return false;
+    }
+
+    static immutable string digits = "0123456789abcdef";
+    int cols = hex.columns > 0 ? hex.columns : 16;
+    Appender!(char[]) text = appender!(char[]);
+    text.reserve(len * 3 + 1); // two digits and a separator each, plus the terminator
+
+    // Pull the run out of the editor a chunk at a time; the selection can be
+    // large and only the bytes being formatted need to be held.
+    ubyte[64 * 1024] buffer = void;
+    size_t done;
+    while (done < len)
+    {
+        size_t want = len - done;
+        if (want > buffer.length) want = buffer.length;
+        ubyte[] chunk = editor.view(cast(long)(low + done), buffer[0 .. want]);
+        if (chunk.length == 0)
+            break; // nothing more readable; avoid spinning
+        foreach (i, ubyte b; chunk)
+        {
+            size_t at = done + i;
+            if (at)
+                text.put(at % cols == 0 ? '\n' : ' '); // break rows like the panel does
+            text.put(digits[b >> 4]);
+            text.put(digits[b & 0x0f]);
+        }
+        done += chunk.length;
+    }
+    text.put('\0'); // SDL takes a C string
+
+    if (SDL_SetClipboardText(text.data.ptr) == false)
+    {
+        logWarn("copy failed: %s", SDL_GetError().fromStringz);
+        return false;
+    }
+    logInfo("copied %s byte(s) from %#x", done, low);
+    return true;
+}
+
+/// Copy the selected bytes, then remove them from the document. The clipboard is
+/// written first and the removal only follows a copy that took, so a refused or
+/// failed copy leaves the bytes where they are. A bare caret cuts the byte under
+/// it, the same one Delete would drop.
+void ui_cut()
+{
+    size_t low, high;
+    if (ui_selection(low, high) == false)
+        return;
+    if (ui_copy() == false)
+        return;
+
+    try
+        editor.remove(cast(long) low, cast(long)(high - low + 1));
+    catch (Exception e)
+    {
+        logWarn("cut failed: %s", e.msg);
+        return;
+    }
+
+    hex.dataSize = editor.size();
+    hex_set_caret(hex, low); // the caret closes onto the gap the cut left
+}
+
+/// Paste hex text from the clipboard at the caret.
+///
+/// Reads back what ui_copy writes, plus the usual variations: whitespace, commas,
+/// semicolons and colons all separate bytes, and a 0x prefix on a token is
+/// skipped, so "de ad", "DEAD" and "0xde, 0xad" all land the same two bytes. Each
+/// token must hold whole bytes (an even run of digits); anything else refuses the
+/// paste whole, leaving the document untouched, rather than guessing at a nibble.
+///
+/// Where the bytes land follows the panel's entry mode, the way typing digits
+/// does: overwrite replaces the bytes at the caret (growing the document when the
+/// paste runs past EOF), insert splices them in. A selection wider than a single
+/// byte is what the paste replaces, in either mode.
+void ui_paste()
+{
+    if (editor is null)
+        return;
+
+    char* clip = SDL_GetClipboardText(); // caller frees; an empty string on failure
+    if (clip is null)
+    {
+        logWarn("paste failed: %s", SDL_GetError().fromStringz);
+        return;
+    }
+    scope(exit) SDL_free(clip);
+
+    ubyte[] bytes = parseHexText(clip);
+    if (bytes.length == 0)
+    {
+        logWarn("paste refused: the clipboard does not hold hex byte pairs");
+        return;
+    }
+
+    size_t total = hex_total(hex);
+    size_t low   = hex.active ? hex_sel_low(hex) : 0;
+    size_t high  = hex.active ? hex_sel_high(hex) : 0;
+    if (low > total) low = total;   // a caret left stale by an outside change
+    if (high > total) high = total;
+    long pos = cast(long) low;
+
+    bool ok;
+    try
+    {
+        // A selection is what the paste replaces, so drop it first and splice the
+        // bytes into the gap; the entry mode only decides how a bare caret takes
+        // them. The remove and the insert are separate history entries, so undoing
+        // a paste over a selection takes two steps.
+        bool replacing = high > low;
+        if (replacing)
+        {
+            long cut = cast(long)(high - low + 1);
+            if (high >= total) cut = cast(long) total - pos; // clamp off the append slot
+            if (cut > 0) editor.remove(pos, cut);
+            else replacing = false;
+        }
+        // Past EOF there is nothing to overwrite, so append there whatever the mode.
+        if (replacing || hex.insertMode || low >= total)
+            editor.insert(pos, bytes.ptr, bytes.length);
+        else
+            editor.replace(pos, bytes.ptr, bytes.length);
+        ok = true;
+    }
+    catch (Exception e)
+        logWarn("paste failed: %s", e.msg);
+
+    // The document may have moved even on a failed insert-after-remove, so refresh
+    // the panel and put the caret past the pasted run either way.
+    hex.dataSize = editor.size();
+    hex_set_caret(hex, ok ? low + bytes.length : low);
+    if (ok)
+        logInfo("pasted %s byte(s) at %#x", bytes.length, low);
+}
+
+/// Parse clipboard text into the bytes it spells out. Returns null when the text
+/// holds anything but separated runs of hex digit pairs, so an unrelated paste is
+/// refused rather than half-applied. See ui_paste for the accepted shapes.
+private ubyte[] parseHexText(const(char)* text)
+{
+    static bool separator(char c)
+    {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+               c == ',' || c == ';'  || c == ':';
+    }
+
+    Appender!(ubyte[]) bytes = appender!(ubyte[]);
+    for (const(char)* p = text; *p; )
+    {
+        if (separator(*p))
+        {
+            ++p;
+            continue;
+        }
+
+        // A token: an optional 0x prefix, then hex digits taken two at a time.
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X') && hex_nibble(p[2]) >= 0)
+            p += 2;
+
+        size_t pairs;
+        while (hex_nibble(*p) >= 0)
+        {
+            int hi = hex_nibble(*p++);
+            int lo = hex_nibble(*p);
+            if (lo < 0)
+                return null; // a lone digit: refuse rather than guess the other half
+            ++p;
+            bytes.put(cast(ubyte)((hi << 4) | lo));
+            ++pairs;
+        }
+        if (pairs == 0)
+            return null; // neither separator nor hex digit: not a hex dump
+    }
+    return bytes.data;
+}
+
+unittest
+{
+    assert(parseHexText("de ad be ef") == [ 0xde, 0xad, 0xbe, 0xef ]);
+    assert(parseHexText("DEADBEEF")    == [ 0xde, 0xad, 0xbe, 0xef ]); // one run
+    assert(parseHexText("0xde, 0xAD")  == [ 0xde, 0xad ]);             // C-ish source
+    assert(parseHexText("de ad\nbe ef") == [ 0xde, 0xad, 0xbe, 0xef ]); // wrapped copy
+    assert(parseHexText("de:ad;be")    == [ 0xde, 0xad, 0xbe ]);
+    assert(parseHexText("  ").length == 0);   // separators alone spell no bytes
+    assert(parseHexText("").length == 0);
+    assert(parseHexText("de a") is null);     // half a byte
+    assert(parseHexText("dead beefs") is null); // stray letter past 'f'
+    assert(parseHexText("hello") is null);
+    assert(parseHexText("0x") is null);       // a prefix with no digits behind it
 }
 
 /// Outcome of the unsaved-changes prompt.

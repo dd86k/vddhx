@@ -15,8 +15,8 @@ version (Screenshot):
 import core.stdc.string : strncmp, strlen;
 import bindbc.sdl;
 import ddui;
-import hexview : HEX_KEY_HOME, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
-    HEX_KEY_LEFT, HEX_KEY_RIGHT;
+import hexview : HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
+    HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_DOWN;
 import render;
 import ui;
 
@@ -158,6 +158,75 @@ int screenshot_run(string[] args)
     shot("shot-nibble-low.bmp");
     tap(HEX_KEY_LEFT);
     shot("shot-nibble-high.bmp");
+
+    // Scenario 7: clipboard round-trip. Select the first four bytes (Home, then
+    // Right three times with Shift held so the anchor stays put), copy them, jump
+    // to EOF with Ctrl+End and paste: the same four bytes should reappear there.
+    tap(HEX_KEY_HOME);
+    mu_input_keydown(&ctx, MU_KEY_SHIFT);
+    tap(HEX_KEY_RIGHT); tap(HEX_KEY_RIGHT); tap(HEX_KEY_RIGHT);
+    mu_input_keyup(&ctx, MU_KEY_SHIFT);
+    frame();
+    shot("shot-clip-sel.bmp");
+    ui_copy();
+    chord(MU_KEY_CTRL, HEX_KEY_END);
+    ui_paste();
+    frame();
+    shot("shot-clip-paste.bmp");
+
+    // Same four bytes pasted onto a bare caret mid-document: OVR is on, so they
+    // overwrite the head of row 0x10 in place and the document keeps its size.
+    chord(MU_KEY_CTRL, HEX_KEY_HOME);
+    tap(HEX_KEY_DOWN);
+    ui_paste();
+    frame();
+    shot("shot-clip-ovr.bmp");
+
+    // And onto a two-byte selection (the pair at 0x24, Shift+Right once): the
+    // selection goes and the four bytes take its place, growing the document by
+    // the two bytes of difference.
+    tap(HEX_KEY_DOWN);
+    mu_input_keydown(&ctx, MU_KEY_SHIFT);
+    tap(HEX_KEY_RIGHT);
+    mu_input_keyup(&ctx, MU_KEY_SHIFT);
+    ui_paste();
+    frame();
+    shot("shot-clip-replace.bmp");
+
+    // Scenario 8: cut. Take back the four bytes just pasted at 0x24 and drop them
+    // onto the clipboard and out of the document; the row closes over the gap and
+    // the caret lands where they were. The previous paste left the caret at 0x28,
+    // and an unshifted Left walks a nibble at a time while editing, so eight taps
+    // step the four bytes back to 0x24; the shifted Rights that follow move whole
+    // bytes, selecting the run. Pasting after the cut lands the bytes back at that
+    // same offset, though on a bare caret in OVR mode they overwrite the four that
+    // closed the gap rather than restoring what was there before the cut.
+    foreach (i; 0 .. 8) tap(HEX_KEY_LEFT);
+    mu_input_keydown(&ctx, MU_KEY_SHIFT);
+    tap(HEX_KEY_RIGHT); tap(HEX_KEY_RIGHT); tap(HEX_KEY_RIGHT);
+    mu_input_keyup(&ctx, MU_KEY_SHIFT);
+    ui_cut();
+    frame();
+    shot("shot-clip-cut.bmp");
+    ui_paste();
+    frame();
+    shot("shot-clip-cut-undone.bmp");
+
+    // Scenario 9: Help > About. Walk the menu the way a user would, so the
+    // dialog is captured with the placement the menu route gives it.
+    mu_Vec2 help = find("Help");
+    click(help.x + 3, help.y + 3);
+    frame(); frame();
+    mu_Vec2 about = find("About");
+    click(about.x + 3, about.y + 3);
+    frame();
+    shot("shot-about.bmp");
+
+    // And again with the cursor on the homepage link, which should light up and
+    // underline it.
+    mu_Vec2 link = find("https://");
+    mu_input_mousemove(&ctx, link.x + 3, link.y + 3); frame(); frame();
+    shot("shot-about-link.bmp");
 
     return 0;
 }

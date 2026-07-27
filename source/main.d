@@ -140,17 +140,52 @@ void main(string[] args)
                     mu_input_mouseup(ctx, x, y, btn);
                 break;
             case SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP:
-                // Ctrl+Q quits, mirroring the File > Quit menu entry. Push the
-                // quit event rather than ending the loop here, so it flows
-                // through the SDL_EVENT_QUIT unsaved-changes check like the rest.
-                if (event.type == SDL_EVENT_KEY_DOWN &&
-                    event.key.key == SDLK_Q &&
-                    event.key.mod & SDL_KMOD_CTRL)
+                // Menu chords: the File and Edit entries, keyed the way every GUI
+                // toolkit keys them. SDL sends no text-input event for a Ctrl
+                // chord, so the panel never sees these as typed hex digits;
+                // swallow them here either way.
+                if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)
                 {
-                    SDL_Event quit; // .init zeroes the union
-                    quit.type = SDL_EVENT_QUIT;
-                    SDL_PushEvent(&quit);
-                    break;
+                    // Quit goes through SDL's own event queue rather than ending
+                    // the loop here, so it meets the same unsaved-changes check as
+                    // the window close button and the File > Quit entry.
+                    if (event.key.key == SDLK_Q)
+                    {
+                        SDL_Event quit; // .init zeroes the union
+                        quit.type = SDL_EVENT_QUIT;
+                        SDL_PushEvent(&quit);
+                        break;
+                    }
+                    if (event.key.key == SDLK_O)
+                    {
+                        ui_open_dialog();
+                        break;
+                    }
+                    // Shift forces the Save As dialog; plain Ctrl+S writes in
+                    // place, falling back to the dialog when there is no path yet.
+                    if (event.key.key == SDLK_S)
+                    {
+                        if (event.key.mod & SDL_KMOD_SHIFT)
+                            ui_save_as();
+                        else
+                            ui_save();
+                        break;
+                    }
+                    if (event.key.key == SDLK_X)
+                    {
+                        ui_cut();
+                        break;
+                    }
+                    if (event.key.key == SDLK_C)
+                    {
+                        ui_copy();
+                        break;
+                    }
+                    if (event.key.key == SDLK_V)
+                    {
+                        ui_paste();
+                        break;
+                    }
                 }
                 version (Screenshot)
                 {

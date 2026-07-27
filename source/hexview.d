@@ -157,6 +157,10 @@ struct HexView
     // Leftover wheel pixels below one row height, carried between frames so a slow
     // wheel still advances when a notch is shorter than a row.
     int wheelAccum;
+    // Rows that fit on screen, measured by hex_view each frame. Kept here so a
+    // caret move driven from outside a frame (hex_set_caret) can scroll to it
+    // without the caller knowing the panel's geometry.
+    int visRows = 1;
 
     // Nibble sub-position within the caret byte: false means the next hex digit
     // is the byte's high nibble (a fresh byte), true its low nibble. Reset on any
@@ -220,6 +224,46 @@ size_t hex_sel_low(ref const(HexView) v)
 size_t hex_sel_high(ref const(HexView) v)
 {
     return v.cursor > v.anchor ? v.cursor : v.anchor;
+}
+
+/// Map a hex digit to its 0-15 value, or -1 when the character is not a hex
+/// digit. The panel folds typed digits in through this; it is public so a caller
+/// reading hex text of its own (a clipboard paste, say) agrees on what a digit is.
+int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+unittest
+{
+    assert(hex_nibble('0') == 0);
+    assert(hex_nibble('9') == 9);
+    assert(hex_nibble('a') == 10);
+    assert(hex_nibble('f') == 15);
+    assert(hex_nibble('A') == 10);  // upper case folds to the same value
+    assert(hex_nibble('F') == 15);
+    assert(hex_nibble('g') == -1);  // past 'f'
+    assert(hex_nibble('/') == -1);  // just below '0'
+    assert(hex_nibble(' ') == -1);
+}
+
+/// Drop the caret on `pos`, collapsing the selection onto it and scrolling it
+/// into view. For callers that change the document from outside the panel - a
+/// paste, say - and need the caret to follow the result. Set dataSize first so
+/// the clamp sees the new size.
+void hex_set_caret(ref HexView v, size_t pos)
+{
+    size_t total = hex_total(v);
+    if (pos > total) // the append slot past the last byte is a valid caret
+        pos = total;
+    v.cursor  = pos;
+    v.anchor  = pos;
+    v.active  = true;
+    v.editLow = false; // an outside edit ends any half-typed byte
+    hex_reveal(v, pos, v.columns > 0 ? v.columns : 16, v.visRows);
 }
 
 unittest
@@ -330,6 +374,7 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
         int visibleRows = body.h / rowH;
         if (visibleRows < 1) visibleRows = 1;
         long maxTop = rows > visibleRows ? rows - visibleRows : 0;
+        v.visRows = visibleRows; // for hex_set_caret, between frames
 
         // Carve the scroll strip off the right edge; the grid takes the rest.
         int stripW = v.minimap ? MINIMAP_WIDTH : SCROLLBAR_WIDTH;
@@ -746,28 +791,6 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
 bool hex_editable(ref const(HexView) v)
 {
     return v.replaceFn && v.insertFn && v.removeFn;
-}
-
-// Map a hex digit to its 0-15 value, or -1 when the character is not a hex digit.
-int hex_nibble(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-unittest
-{
-    assert(hex_nibble('0') == 0);
-    assert(hex_nibble('9') == 9);
-    assert(hex_nibble('a') == 10);
-    assert(hex_nibble('f') == 15);
-    assert(hex_nibble('A') == 10);  // upper case folds to the same value
-    assert(hex_nibble('F') == 15);
-    assert(hex_nibble('g') == -1);  // past 'f'
-    assert(hex_nibble('/') == -1);  // just below '0'
-    assert(hex_nibble(' ') == -1);
 }
 
 // Apply one typed hex nibble at the caret, overwriting or inserting per the mode.
