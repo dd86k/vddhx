@@ -158,6 +158,14 @@ private void wireEditor(IDocumentEditor ed)
     hex.data      = null;
 }
 
+/// Put up the native Open dialog. It runs async: ui_on_file_picked stashes the
+/// chosen path and the next frame opens it. Null filters means "all files", and
+/// the trailing false keeps it single-select.
+void ui_open_dialog()
+{
+    SDL_ShowOpenFileDialog(&ui_on_file_picked, null, uiWindow, null, 0, null, false);
+}
+
 /// Open `path` through a fresh ddhx editor and point the panel at it. On failure
 /// the panel is left untouched (the sample keeps showing) and the error logged.
 void ui_open(string path)
@@ -406,6 +414,9 @@ void ui_frame(mu_Context* ctx, int width, int height)
 
         mu_end_window(ctx);
     }
+
+    // Help > About, as its own root container so it floats over the main window.
+    about_frame(ctx, width, height);
 }
 
 /// Draw the top menubar. Each menu opens a dropdown of actions that print to
@@ -424,17 +435,33 @@ private void ui_menubar(mu_Context* ctx)
     int basePadding = ctx.style.padding;
     int itemPadding = basePadding + 4;
 
+    // A dropdown takes its width from style.menu_width alone, so a label and a
+    // right-aligned shortcut overlap once they outgrow the stock 160px (as
+    // "Save As..." and Ctrl+Shift+S do). Measure the widest pair drawn below and
+    // give the dropdowns room for it, rather than pinning a pixel count that a
+    // change of font - or a longer shortcut - would quietly break again.
+    int itemWidth(const(char)* label, const(char)* shortcut)
+    {
+        // One padding inset on each side, plus two more as the gap between the
+        // label and the shortcut, so they never touch.
+        return ctx.text_width(ctx.style.font, label, -1) +
+               ctx.text_width(ctx.style.font, shortcut, -1) + itemPadding * 4;
+    }
+    int baseMenuWidth = ctx.style.menu_width;
+    ctx.style.menu_width = mu_max(baseMenuWidth, itemWidth("Save As...", "Ctrl+Shift+S"));
+    scope(exit) ctx.style.menu_width = baseMenuWidth;
+
     if (mu_begin_menu(ctx, "File"))
     {
         ctx.style.padding = itemPadding;
-        // Native async file picker; ui_on_file_picked stashes the result for the
-        // next frame to open. null filters means "all files", single-select.
-        if (mu_menu_item(ctx, "Open"))
-            SDL_ShowOpenFileDialog(&ui_on_file_picked, null, uiWindow, null, 0, null, false);
-        if (mu_menu_item(ctx, "Save")) ui_save();
+        // The ellipsis marks the entries that put up a dialog before doing
+        // anything, the way every desktop toolkit marks them.
+        if (mu_menu_item_ex(ctx, "Open...",    "Ctrl+O",       0, 0)) ui_open_dialog();
+        if (mu_menu_item_ex(ctx, "Save",       "Ctrl+S",       0, 0)) ui_save();
+        if (mu_menu_item_ex(ctx, "Save As...", "Ctrl+Shift+S", 0, 0)) ui_save_as();
         // Route Quit through SDL's own event queue so main stays the single
         // owner of the loop flag; the existing SDL_EVENT_QUIT case ends the loop.
-        if (mu_menu_item(ctx, "Quit"))
+        if (mu_menu_item_ex(ctx, "Quit", "Ctrl+Q", 0, 0))
         {
             SDL_Event quit; // .init zeroes the union
             quit.type = SDL_EVENT_QUIT;
@@ -447,8 +474,9 @@ private void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "Edit"))
     {
         ctx.style.padding = itemPadding;
-        if (mu_menu_item(ctx, "Copy"))  writeln("TODO: Edit > Copy");
-        if (mu_menu_item(ctx, "Paste")) writeln("TODO: Edit > Paste");
+        if (mu_menu_item_ex(ctx, "Cut",   "Ctrl+X", 0, 0)) ui_cut();
+        if (mu_menu_item_ex(ctx, "Copy",  "Ctrl+C", 0, 0)) ui_copy();
+        if (mu_menu_item_ex(ctx, "Paste", "Ctrl+V", 0, 0)) ui_paste();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }
@@ -456,7 +484,7 @@ private void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "Help"))
     {
         ctx.style.padding = itemPadding;
-        if (mu_menu_item(ctx, "About")) writeln("TODO: Help > About");
+        if (mu_menu_item(ctx, "About")) about_open();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }
