@@ -61,6 +61,7 @@ int screenshot_run(string[] args)
     ctx.text_width  = &render_text_width;
     ctx.text_height = &render_text_height;
     ctx.style.font  = render_font_ui();
+    ui_style(&ctx);
 
     // Wire up the editor so scripted editing scenarios have a document to write
     // to; the live app does this in main before the loop.
@@ -115,10 +116,11 @@ int screenshot_run(string[] args)
     frame(); frame(); // let the autosizing popup settle
     shot("shot-menu.bmp");
 
-    // Scenario 3: modal editing on the blank panel. Click into the grid to focus
-    // it, then type hex digits to build a file from scratch (insert at EOF), and
-    // capture the bytes the panel now shows.
-    click(100, 140);
+    // Scenario 3: modal editing. Click into the grid to focus it, then type hex
+    // digits and capture the bytes the panel now shows. The click has to clear
+    // the File dropdown scenario 2 left open, which covers the left ~200px, so
+    // it lands to the right of it (and dismisses it on the way).
+    click(400, 160);
     mu_input_text(&ctx, "deadbeefcafe");
     frame();
     shot("shot-edit.bmp");
@@ -227,6 +229,31 @@ int screenshot_run(string[] args)
     mu_Vec2 link = find("https://");
     mu_input_mousemove(&ctx, link.x + 3, link.y + 3); frame(); frame();
     shot("shot-about-link.bmp");
+
+    // Scenario 10: tabs. Close the dialog, then open a second file and add a
+    // scratch buffer: the strip should show three tabs, the first carrying the
+    // unsaved dot the scenarios above earned it, the scratch in front.
+    mu_Vec2 close = find("Close");
+    click(close.x + 3, close.y + 3);
+    ui_open("/tmp/other.bin");
+    ui_new_tab();
+    frame();
+    shot("shot-tabs.bmp");
+
+    // Clicking a tab brings its document back, bytes, caret and all.
+    mu_Vec2 tab = find("mid.bin");
+    click(tab.x + 3, tab.y + 3);
+    frame();
+    shot("shot-tabs-select.bmp");
+
+    // Middle-clicking one closes it: the shortest route through the close path
+    // without guessing where inside the tab its close box sits. other.bin has no
+    // unsaved edits, so it goes without a prompt (which would need a display).
+    mu_Vec2 other = find("other.bin");
+    mu_input_mousemove(&ctx, other.x + 3, other.y + 3); frame(); frame();
+    mu_input_mousedown(&ctx, other.x + 3, other.y + 3, MU_MOUSE_MIDDLE); frame();
+    mu_input_mouseup(&ctx, other.x + 3, other.y + 3, MU_MOUSE_MIDDLE); frame();
+    shot("shot-tabs-closed.bmp");
 
     return 0;
 }

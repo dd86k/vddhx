@@ -106,6 +106,12 @@ struct HexView
     /// Whether a caret / selection exists yet. Set on the first click or key.
     bool active;
 
+    /// Set to hand the panel keyboard focus on the next frame it draws, without
+    /// the user having to click into the grid first. For callers that put a
+    /// document in front from outside a frame - opening a file, switching tabs -
+    /// after which typing should land in the bytes. Cleared once honoured.
+    bool takeFocus;
+
     /// Optional per-byte colour scheme. Null falls back to hex_classify.
     HexColorFn colorFn;
     /// Opaque pointer forwarded to colorFn.
@@ -540,6 +546,13 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     int head = -1;
     mu_layout_row(ctx, 1, &head, rowH);
     mu_Rect r = mu_layout_next(ctx);
+
+    // The header labels the grid, so it belongs to the grid's surface rather
+    // than to whatever the caller's window is painted in: take the same canvas
+    // the panel body below gets. A transparent canvas draws nothing, leaving the
+    // window's own colour showing, as before.
+    mu_draw_rect(ctx, r, ctx.style.colors[MU_COLOR_PANELBG]);
+
     mu_push_clip_rect(ctx, r);
 
     mu_Color dim = mu_Color(140, 140, 150, 255);
@@ -615,6 +628,14 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     ref const(HexLayout) lay, mu_Rect body, int rowH, int cols, int visibleRows)
 {
     mu_Id id = mu_get_id(ctx, name, cast(int) hex_strlen(name));
+    // A caller can hand the panel focus between frames (see takeFocus); claim it
+    // before mu_update_control, which is what reports the focus as still live
+    // this frame and keeps ddui from dropping it at frame end.
+    if (v.takeFocus)
+    {
+        v.takeFocus = false;
+        mu_set_focus(ctx, id);
+    }
     // Hold focus so the caret keeps taking keys after the click is released,
     // and join the tab ring so the panel is reachable without a mouse.
     mu_update_control(ctx, id, body, MU_OPT_HOLDFOCUS | MU_OPT_TABSTOP);

@@ -86,15 +86,17 @@ void main(string[] args)
     ctx.text_width  = &render_text_width;
     ctx.text_height = &render_text_height;
     ctx.style.font  = render_font_ui(); // TTF_Font* handle carried on every text command
+    ui_style(ctx);
 
     // Give the UI the window so File > Open can parent its native dialog to it.
     ui_init(window);
 
-    // Open the file named on the command line, if any. With no argument we start
-    // on a blank panel rather than viewing our own executable. A failure here
-    // just leaves the panel empty (ui_open logs the reason).
-    if (args.length > 1)
-        ui_open(args[1]);
+    // Open the files named on the command line, one tab each. With no argument
+    // we start on a blank panel rather than viewing our own executable; the
+    // first file takes over that blank tab. A failure here just leaves the tab
+    // out (ui_open logs the reason).
+    foreach (string path; args[1 .. $])
+        ui_open(path);
 
     logDebugging("Starting loop");
 
@@ -159,6 +161,23 @@ void main(string[] args)
                     if (event.key.key == SDLK_O)
                     {
                         ui_open_dialog();
+                        break;
+                    }
+                    // Tabs: new, close, and cycling either way. Ctrl+Tab is
+                    // caught here so it never reaches ddui as a focus step.
+                    if (event.key.key == SDLK_T)
+                    {
+                        ui_new_tab();
+                        break;
+                    }
+                    if (event.key.key == SDLK_W)
+                    {
+                        ui_close_current_tab();
+                        break;
+                    }
+                    if (event.key.key == SDLK_TAB)
+                    {
+                        ui_cycle_tab(event.key.mod & SDL_KMOD_SHIFT ? -1 : 1);
                         break;
                     }
                     // Shift forces the Save As dialog; plain Ctrl+S writes in

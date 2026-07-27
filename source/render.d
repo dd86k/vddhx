@@ -100,6 +100,12 @@ bool render_init(SDL_Renderer* renderer)
     if (engine is null)
         return false;
 
+    // Honour the alpha channel of every colour ddui hands us. Without this the
+    // renderer writes fills as-is: a translucent tint (the minimap's viewport
+    // marker) comes out solid, and the fully transparent MU_COLOR_PANELBG paints
+    // an opaque black rectangle over whatever the panel sits on.
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+
     fontUI = openFirst(uiPaths);
     if (fontUI is null)
         return false;
@@ -153,6 +159,10 @@ TTF_Font* render_font_mono() => fontMono;
 extern (C) int render_text_width(mu_Font font, const(char)* str, int len)
 {
     if (len < 0) len = cast(int) strlen(str);
+    // TTF_GetStringSize reads a zero length as "the string is NUL-terminated",
+    // which would run off the end of a caller's slice; an empty string measures
+    // zero either way, so answer that here rather than handing it over.
+    if (len == 0) return 0;
     TTF_Font* f = cast(TTF_Font*) font;
     if (f is null) f = fontUI;
     int w;
@@ -233,6 +243,8 @@ void addFallback(const(string)[] paths)
 
 void draw_rect(SDL_Renderer* renderer, mu_Rect rect, mu_Color color)
 {
+    if (color.a == 0) // fully transparent: blending would leave the target as-is
+        return;
     SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
     SDL_FRect dst = SDL_FRect(rect.x, rect.y, rect.w, rect.h);
     SDL_RenderFillRect(renderer, &dst);

@@ -2,7 +2,7 @@
 module ui;
 
 import core.atomic : atomicLoad, atomicStore;
-import std.string : fromStringz;
+import std.string : fromStringz, toStringz;
 import bindbc.sdl;
 import ddlogger;
 import ddui;
@@ -10,23 +10,79 @@ import ddhx.document : FileDocument, IDocument;
 import ddhx.editor : IDocumentEditor, spawnEditor;
 import about : about_open, about_frame;
 import hexview;
+import tabbar;
 import render : render_font_mono;
 import std.array : Appender, appender;
-import std.format : sformat;
+import std.format : format, sformat;
+import std.path : baseName;
 
-/// Persisted hex panel state (selection lives here across frames). The caret is
-/// active from the outset so it sits ready on the blank panel, letting a file be
-/// built from scratch through ddhx's editor before anything is opened.
-private __gshared HexView hex = { active: true };
+/// One open document: the ddhx editor that owns the bytes, where they live on
+/// disk, and the panel state viewing them. One tab shows one of these.
+private struct Document
+{
+    /// The editor backing the panel. It owns the document and all the
+    /// piece-table/undo machinery; the panel only ever reads through it.
+    IDocumentEditor editor;
 
-/// The ddhx editor backing the panel once a file is open. It owns the document
-/// and all the piece-table/undo machinery; the panel only ever reads through it.
-private __gshared IDocumentEditor editor;
-/// Set once a file is open, so the sample fallback stays out of the way.
-private __gshared bool loaded;
+    /// Disk path backing the document, empty for an in-memory scratch buffer.
+    /// Set on Open (and once a scratch buffer is first saved through Save As),
+    /// it is the target an in-place Save writes to.
+    string path;
+
+    /// What the tab shows: the file's base name, or "untitled" for a scratch.
+    string title;
+
+    /// Persisted hex panel state (the selection lives here across frames). The
+    /// caret is active from the outset so it sits ready on a blank panel,
+    /// letting a file be built from scratch before anything is opened.
+    HexView hex = { active: true };
+}
+
+/// Every open document, one per tab, and the index of the one on screen.
+///
+/// Never empty: startup opens a scratch buffer and closing the last tab leaves
+/// a fresh one behind, so the panel - and every action below - always has a
+/// document to work on.
+private __gshared Document[] docs;
+/// Ditto.
+private __gshared size_t current;
+
+/// Tab strip state, and the item slice handed to it. The slice is reused across
+/// frames so drawing the strip allocates nothing once the tabs settle.
+private __gshared TabBar tabstrip;
+/// Ditto.
+private __gshared TabItem[] tabItems;
+
+/// Scratch buffers are numbered in creation order: "untitled", "untitled 2"...
+private __gshared uint untitled;
+
+/// The document the tab strip has in front. Every action below acts on it.
+private ref Document doc()
+{
+    return docs[current];
+}
 
 /// The main window, for parenting the native Open dialog. main sets it up front.
 private __gshared SDL_Window* uiWindow;
+
+/// Colour behind the hex grid. Dark on purpose: the byte colours - the dimmed
+/// padding zeros above all - are picked to read against something near black,
+/// and lose most of their contrast on a mid grey.
+private enum mu_Color CANVAS = mu_Color(0, 0, 0, 255);
+
+/// Apply the application's own style over ddui's defaults. Call once after
+/// mu_init, before the first frame.
+///
+/// ddui leaves MU_COLOR_PANELBG fully transparent, so the hex panel would take
+/// whatever it sits on - the window's grey. It used to come out black anyway,
+/// because the renderer ignored the alpha channel; now that it honours it, the
+/// canvas has to be asked for. The tab strip is told the same colour so the
+/// active tab reads as joined to the grid below it.
+void ui_style(mu_Context* ctx)
+{
+    ctx.style.colors[MU_COLOR_PANELBG] = CANVAS;
+    tabstrip.content = CANVAS;
+}
 
 /// Minimap toolbar toggle (int for mu_checkbox); pushed onto hex.minimap.
 private __gshared int minimapOn = 1;
@@ -42,21 +98,175 @@ private shared bool pendingReady;
 private __gshared char[4096] pendingSavePath;
 private shared bool pendingSaveReady;
 
-/// Disk path backing the open document, empty for the in-memory scratch buffer.
-/// Set on Open (and once a scratch buffer is first saved through Save As), it is
-/// the target an in-place Save writes to.
-private __gshared string loadedPath;
+/// The editor the open Save As dialog was raised for. Tabs can be switched or
+/// closed while a non-modal dialog is up, so the destination is matched back to
+/// the document that asked for it rather than to whatever is in front when it
+/// returns - saving one file's bytes under another's name would lose both.
+private __gshared IDocumentEditor pendingSaveTarget;
 
-/// Hand the UI the window handle before the first frame. Also spins up an empty
-/// editor and wires the panel to it, so the blank panel is editable from the
-/// outset: a file can be built from scratch before anything is ever opened.
+/// Hand the UI the window handle before the first frame. Also opens the first
+/// tab, an empty editable scratch buffer, so a file can be built from scratch
+/// before anything is ever opened.
 void ui_init(SDL_Window* window)
 {
     uiWindow = window;
+    ui_new_tab();
+}
 
-    editor = spawnEditor(); // no document: a zero-length, in-memory scratch buffer
-    wireEditor(editor);
-    hex.dataSize = 0;
+/// Open a fresh scratch document in a new tab and bring it to the front: a
+/// zero-length in-memory buffer with no path, editable from the outset, which
+/// gets a name the first time it is saved.
+void ui_new_tab()
+{
+    ++untitled;
+
+    Document d;
+    d.editor = spawnEditor(); // no document: a zero-length, in-memory buffer
+    d.title  = untitled == 1 ? "untitled" : format("untitled %u", untitled);
+
+    docs ~= d;
+    current = docs.length - 1;
+    wireEditor(docs[current]);
+    doc.hex.takeFocus = true; // ready to take bytes without a click first
+}
+
+/// Bring the tab at `index` to the front. Out-of-range indices are ignored, so
+/// a stale index from a strip built before a close cannot strand the panel.
+void ui_select_tab(size_t index)
+{
+    if (index >= docs.length)
+        return;
+    current = index;
+    doc.hex.takeFocus = true; // typing follows the tab that came forward
+}
+
+/// Step `delta` tabs along from the current one, wrapping at either end.
+void ui_cycle_tab(int delta)
+{
+    if (docs.length <= 1)
+        return;
+
+    long count = cast(long) docs.length;
+    long at = (cast(long) current + delta) % count;
+    if (at < 0)
+        at += count;
+    ui_select_tab(cast(size_t) at);
+}
+
+/// Close the tab at `index`, resolving unsaved edits first (the document is
+/// brought to the front for the prompt, and a cancel leaves it open). Closing
+/// the last one closes the editor too, the way a tabbed application does.
+void ui_close_tab(size_t index)
+{
+    if (index >= docs.length)
+        return;
+    if (ui_confirm_discard(index, "Close document") != Confirm.proceed)
+        return;
+
+    if (docs[index].editor)
+        docs[index].editor.close();
+    docs = docs[0 .. index] ~ docs[index + 1 .. $];
+
+    if (docs.length == 0)
+    {
+        // Out of documents: quit, through SDL's own event queue so it meets the
+        // same route as the window close button. That lands next frame, and the
+        // rest of this one still has a panel to draw, so put a scratch buffer up
+        // meanwhile - it has no edits, so it cannot hold the quit up.
+        ui_new_tab(); // it sets current itself
+        SDL_Event quit; // .init zeroes the union
+        quit.type = SDL_EVENT_QUIT;
+        SDL_PushEvent(&quit);
+        return;
+    }
+
+    // Closing a tab left of the front one shifts it down; closing the front one
+    // keeps the index, which now names its right-hand neighbour (or the new last
+    // tab, when the front one was the last).
+    if (index < current)
+        --current;
+    if (current >= docs.length)
+        current = docs.length - 1;
+    doc.hex.takeFocus = true; // the tab that took its place is ready to type in
+}
+
+/// Close the tab on screen. The Ctrl+W and File > Close Tab route.
+void ui_close_current_tab()
+{
+    ui_close_tab(current);
+}
+
+/// The title text last handed to SDL, NUL-terminated, and its length. Kept so
+/// the per-frame refresh can tell when nothing has changed and skip the call.
+private __gshared char[512] titleShown;
+private __gshared size_t titleShownLen;
+
+/// Keep the window title naming the document in front, with a marker while it
+/// has unsaved edits. Called every frame: the text is composed into a stack
+/// buffer and compared, so a steady document costs a memcmp rather than a
+/// window-manager round trip.
+private void ui_window_title()
+{
+    if (uiWindow is null)
+        return;
+
+    char[512] buf = void;
+    char[] text = ui_title_text(buf, doc.title, doc.editor && doc.editor.edited());
+    if (text.length == titleShownLen && text == titleShown[0 .. titleShownLen])
+        return;
+
+    titleShown[0 .. text.length] = text;
+    titleShown[text.length] = 0; // SDL takes a C string
+    titleShownLen = text.length;
+    SDL_SetWindowTitle(uiWindow, titleShown.ptr);
+}
+
+/// Compose "name * - vddhx" into `buf` and return the slice written. A name too
+/// long for the buffer is cut back, on a UTF-8 boundary so the title never
+/// carries half a character. `buf` must have room for the fixed parts.
+private char[] ui_title_text(char[] buf, string name, bool dirty)
+{
+    enum string DIRTY  = " *";
+    enum string SUFFIX = " - vddhx";
+    assert(buf.length > DIRTY.length + SUFFIX.length);
+
+    size_t room = buf.length - DIRTY.length - SUFFIX.length;
+    if (name.length > room)
+    {
+        size_t cut = room;
+        while (cut > 0 && (name[cut] & 0xc0) == 0x80) // the cut landed mid-character
+            --cut;
+        name = name[0 .. cut];
+    }
+
+    size_t n = name.length;
+    buf[0 .. n] = name;
+    if (dirty)
+    {
+        buf[n .. n + DIRTY.length] = DIRTY;
+        n += DIRTY.length;
+    }
+    buf[n .. n + SUFFIX.length] = SUFFIX;
+    return buf[0 .. n + SUFFIX.length];
+}
+
+unittest
+{
+    char[32] buf = void;
+    assert(ui_title_text(buf, "mid.bin", false) == "mid.bin - vddhx");
+    assert(ui_title_text(buf, "mid.bin", true)  == "mid.bin * - vddhx");
+    assert(ui_title_text(buf, "", false)        == " - vddhx");
+
+    // 32 bytes of buffer, 10 of them spoken for by the fixed parts, so a name is
+    // cut back to 22 bytes.
+    assert(ui_title_text(buf, "123456789012345678901234", false) ==
+        "1234567890123456789012 - vddhx");
+    // 22 bytes exactly, the last two being "é": nothing to cut.
+    assert(ui_title_text(buf, "12345678901234567890é", false) ==
+        "12345678901234567890é - vddhx");
+    // One byte over, with the cut falling inside that "é": it goes whole.
+    assert(ui_title_text(buf, "123456789012345678901é", false) ==
+        "123456789012345678901 - vddhx");
 }
 
 /// SDL Open-dialog callback. May fire on another thread, so it does no GC work:
@@ -118,7 +328,8 @@ private void hexRemove(long pos, long len, void* user)
 
 /// ddui-side history hooks: step the editor's undo/redo and hand back where the
 /// change landed so the panel can chase it with the caret. The editor's size can
-/// jump either way here, so refresh the panel's copy before returning.
+/// jump either way here, so refresh the panel's copy before returning. Only the
+/// panel on screen takes input, so the size to refresh is the front document's.
 private long hexUndo(void* user)
 {
     IDocumentEditor ed = cast(IDocumentEditor) user;
@@ -127,7 +338,7 @@ private long hexUndo(void* user)
         at = ed.undo();
     catch (Exception e)
         logWarn("undo failed: %s", e.msg);
-    hex.dataSize = ed.size();
+    doc.hex.dataSize = ed.size();
     return at;
 }
 /// Ditto.
@@ -139,24 +350,25 @@ private long hexRedo(void* user)
         at = ed.redo();
     catch (Exception e)
         logWarn("redo failed: %s", e.msg);
-    hex.dataSize = ed.size();
+    doc.hex.dataSize = ed.size();
     return at;
 }
 
-/// Point the panel's read, write and history hooks at `ed`. Called with the
-/// initial empty editor and again on every Open, so editing always targets the
-/// live document.
-private void wireEditor(IDocumentEditor ed)
+/// Point a document's panel at its own editor: read, write and history hooks,
+/// plus the size the panel starts from. Called on every new tab and every Open,
+/// so editing always targets the document the tab holds.
+private void wireEditor(ref Document d)
 {
-    hex.readFn    = &hexRead;
-    hex.readUser  = cast(void*) ed;
-    hex.replaceFn = &hexReplace;
-    hex.insertFn  = &hexInsert;
-    hex.removeFn  = &hexRemove;
-    hex.undoFn    = &hexUndo;
-    hex.redoFn    = &hexRedo;
-    hex.writeUser = cast(void*) ed;
-    hex.data      = null;
+    d.hex.readFn    = &hexRead;
+    d.hex.readUser  = cast(void*) d.editor;
+    d.hex.replaceFn = &hexReplace;
+    d.hex.insertFn  = &hexInsert;
+    d.hex.removeFn  = &hexRemove;
+    d.hex.undoFn    = &hexUndo;
+    d.hex.redoFn    = &hexRedo;
+    d.hex.writeUser = cast(void*) d.editor;
+    d.hex.data      = null;
+    d.hex.dataSize  = d.editor ? d.editor.size() : 0;
 }
 
 /// Put up the native Open dialog. It runs async: ui_on_file_picked stashes the
@@ -167,38 +379,60 @@ void ui_open_dialog()
     SDL_ShowOpenFileDialog(&ui_on_file_picked, null, uiWindow, null, 0, null, false);
 }
 
-/// Open `path` through a fresh ddhx editor and point the panel at it. On failure
-/// the panel is left untouched (the sample keeps showing) and the error logged.
+/// Open `path` through a fresh ddhx editor and give it a tab.
+///
+/// The file lands in a new tab, unless the one in front is an untouched scratch
+/// buffer - the state the app starts in - which it takes over rather than
+/// leaving an empty tab behind. On failure nothing changes and the error is
+/// logged, so a bad path never disturbs what is already open.
 void ui_open(string path)
 {
-    // Loading replaces the live document, so resolve any unsaved edits first.
-    if (ui_confirm_discard("Open another file") != Confirm.proceed)
-        return;
-
+    IDocumentEditor ed;
     try
     {
-        IDocument doc = new FileDocument(path); // read-only by default
-        IDocumentEditor ed = spawnEditor();     // null picks the default backend
-        ed.open(doc);
-
-        // Built the new editor without throwing; now release the old one (if any)
-        // and its file handle before swapping it in.
-        if (editor)
-            editor.close();
-        editor         = ed;
-        loadedPath     = path; // in-place Save now has a target
-        wireEditor(ed);
-        hex.dataSize   = ed.size();
-        hex.baseAddress = 0;
-        hex.active     = true; // show the caret right away on the first byte
-        hex.cursor     = 0;
-        hex.anchor     = 0;
-        hex_reset_scroll(hex); // and scroll to the top so that first byte is visible
-        loaded         = true;
-        logInfo("opened %s (%s bytes)", path, hex.dataSize);
+        IDocument document = new FileDocument(path); // read-only by default
+        ed = spawnEditor();                          // the default backend
+        ed.open(document);
     }
     catch (Exception e)
+    {
         logWarn("open failed: %s", e.msg);
+        return;
+    }
+
+    // Built the editor without throwing, so the tab it goes in is settled now.
+    if (scratchEmpty(doc))
+    {
+        if (doc.editor)
+            doc.editor.close(); // release the placeholder and its handle
+    }
+    else
+    {
+        docs ~= Document.init;
+        current = docs.length - 1;
+    }
+
+    Document* d = &docs[current];
+    d.editor = ed;
+    d.path   = path; // in-place Save now has a target
+    d.title  = baseName(path);
+    wireEditor(*d);
+    d.hex.baseAddress = 0;
+    d.hex.active = true;    // show the caret right away on the first byte
+    d.hex.takeFocus = true; // and let it take keys without a click first
+    d.hex.cursor = 0;
+    d.hex.anchor = 0;
+    hex_reset_scroll(d.hex); // and scroll to the top so that first byte is visible
+    logInfo("opened %s (%s bytes)", path, d.hex.dataSize);
+}
+
+/// Whether `d` is a scratch buffer nothing has been done to: no path, no edits
+/// and no bytes. That is what a fresh tab (and the app itself) starts as, and
+/// what an Open takes over instead of stacking a tab on top of it.
+private bool scratchEmpty(ref Document d)
+{
+    return d.path.length == 0 && d.editor &&
+        d.editor.edited() == false && d.editor.size() == 0;
 }
 
 /// Write the open document's current contents to `path` and mark it saved.
@@ -208,14 +442,15 @@ void ui_open(string path)
 /// read-only source handle stays valid across the rename (it keeps referencing
 /// the original inode), so the editor and its undo history survive without a
 /// reopen. Returns false, and leaves the file untouched, if the write fails.
-private bool saveTo(string path)
+private bool saveTo(ref Document d, string path)
 {
     import std.stdio : File;
     import std.file : rename, exists, remove;
 
-    if (editor is null)
+    if (d.editor is null)
         return false;
 
+    IDocumentEditor editor = d.editor;
     long docsize = editor.size();
     string tmp = path ~ ".vddhx-tmp"; // same directory, so rename is atomic
     try
@@ -273,8 +508,8 @@ extern (C) private void ui_on_save_picked(void* user, const(char*)* fileList, in
 /// false: the write lands later, on the main thread, once a path is chosen.
 bool ui_save()
 {
-    if (loadedPath.length)
-        return saveTo(loadedPath);
+    if (doc.path.length)
+        return saveTo(doc, doc.path);
 
     ui_save_as();
     return false;
@@ -286,7 +521,28 @@ bool ui_save()
 /// in-place Save follows it.
 void ui_save_as()
 {
+    pendingSaveTarget = doc.editor;
     SDL_ShowSaveFileDialog(&ui_on_save_picked, null, uiWindow, null, 0, null);
+}
+
+/// Write the document the Save As dialog was raised for to `dest` and adopt it
+/// as that document's home, so a later in-place Save follows it. The document is
+/// found again by the editor the dialog was opened for, not by tab index: both
+/// can have moved while the dialog was up. A closed one drops the write.
+private void ui_save_pending(string dest)
+{
+    foreach (ref Document d; docs)
+    {
+        if (d.editor !is pendingSaveTarget)
+            continue;
+        if (saveTo(d, dest))
+        {
+            d.path  = dest;
+            d.title = baseName(dest);
+        }
+        return;
+    }
+    logWarn("save as: the document was closed before a destination was chosen");
 }
 
 /// Bytes one Copy will format. The text runs three characters per byte, so this
@@ -300,12 +556,12 @@ private enum COPY_MAX = 16 * 1024 * 1024;
 /// single byte, matching what the status bar reports and what Delete removes.
 private bool ui_selection(out size_t low, out size_t high)
 {
-    if (editor is null || hex.active == false)
+    if (doc.editor is null || doc.hex.active == false)
         return false;
 
-    size_t total = hex_total(hex);
-    low  = hex_sel_low(hex);
-    high = hex_sel_high(hex);
+    size_t total = hex_total(doc.hex);
+    low  = hex_sel_low(doc.hex);
+    high = hex_sel_high(doc.hex);
     if (total == 0 || low >= total)
         return false;
     if (high >= total)
@@ -335,7 +591,7 @@ bool ui_copy()
     }
 
     static immutable string digits = "0123456789abcdef";
-    int cols = hex.columns > 0 ? hex.columns : 16;
+    int cols = doc.hex.columns > 0 ? doc.hex.columns : 16;
     Appender!(char[]) text = appender!(char[]);
     text.reserve(len * 3 + 1); // two digits and a separator each, plus the terminator
 
@@ -347,7 +603,7 @@ bool ui_copy()
     {
         size_t want = len - done;
         if (want > buffer.length) want = buffer.length;
-        ubyte[] chunk = editor.view(cast(long)(low + done), buffer[0 .. want]);
+        ubyte[] chunk = doc.editor.view(cast(long)(low + done), buffer[0 .. want]);
         if (chunk.length == 0)
             break; // nothing more readable; avoid spinning
         foreach (i, ubyte b; chunk)
@@ -384,15 +640,15 @@ void ui_cut()
         return;
 
     try
-        editor.remove(cast(long) low, cast(long)(high - low + 1));
+        doc.editor.remove(cast(long) low, cast(long)(high - low + 1));
     catch (Exception e)
     {
         logWarn("cut failed: %s", e.msg);
         return;
     }
 
-    hex.dataSize = editor.size();
-    hex_set_caret(hex, low); // the caret closes onto the gap the cut left
+    doc.hex.dataSize = doc.editor.size();
+    hex_set_caret(doc.hex, low); // the caret closes onto the gap the cut left
 }
 
 /// Paste hex text from the clipboard at the caret.
@@ -409,7 +665,7 @@ void ui_cut()
 /// byte is what the paste replaces, in either mode.
 void ui_paste()
 {
-    if (editor is null)
+    if (doc.editor is null)
         return;
 
     char* clip = SDL_GetClipboardText(); // caller frees; an empty string on failure
@@ -427,9 +683,10 @@ void ui_paste()
         return;
     }
 
-    size_t total = hex_total(hex);
-    size_t low   = hex.active ? hex_sel_low(hex) : 0;
-    size_t high  = hex.active ? hex_sel_high(hex) : 0;
+    IDocumentEditor editor = doc.editor;
+    size_t total = hex_total(doc.hex);
+    size_t low   = doc.hex.active ? hex_sel_low(doc.hex) : 0;
+    size_t high  = doc.hex.active ? hex_sel_high(doc.hex) : 0;
     if (low > total) low = total;   // a caret left stale by an outside change
     if (high > total) high = total;
     long pos = cast(long) low;
@@ -450,7 +707,7 @@ void ui_paste()
             else replacing = false;
         }
         // Past EOF there is nothing to overwrite, so append there whatever the mode.
-        if (replacing || hex.insertMode || low >= total)
+        if (replacing || doc.hex.insertMode || low >= total)
             editor.insert(pos, bytes.ptr, bytes.length);
         else
             editor.replace(pos, bytes.ptr, bytes.length);
@@ -461,8 +718,8 @@ void ui_paste()
 
     // The document may have moved even on a failed insert-after-remove, so refresh
     // the panel and put the caret past the pasted run either way.
-    hex.dataSize = editor.size();
-    hex_set_caret(hex, ok ? low + bytes.length : low);
+    doc.hex.dataSize = editor.size();
+    hex_set_caret(doc.hex, ok ? low + bytes.length : low);
     if (ok)
         logInfo("pasted %s byte(s) at %#x", bytes.length, low);
 }
@@ -529,27 +786,36 @@ private enum Confirm { proceed, cancel }
 /// Button ids for the prompt, kept distinct from the unset -1 sentinel.
 private enum { btnSave = 1, btnDontSave = 2, btnCancel = 3 }
 
-/// Resolve unsaved edits before an action that would discard them (quitting or
-/// loading another file). With no edits pending it proceeds silently; otherwise
-/// it puts up a native Save / Don't Save / Cancel prompt titled `title`.
+/// Resolve unsaved edits in the document at `index` before an action that would
+/// discard them (closing its tab, or quitting). With no edits pending it
+/// proceeds silently; otherwise it brings that document to the front - so the
+/// prompt is about what is on screen, and a Save As raised from here lands on
+/// it - and puts up a native Save / Don't Save / Cancel prompt titled `title`.
 /// Returns Confirm.proceed when the caller may go ahead (saved or discarded) and
 /// Confirm.cancel when the user backed out, a chosen save has yet to finish, or
 /// the prompt itself failed (fail safe: never lose data on an error).
-private Confirm ui_confirm_discard(const(char)* title)
+private Confirm ui_confirm_discard(size_t index, const(char)* title)
 {
-    if ((editor && editor.edited()) == false)
+    if (index >= docs.length)
         return Confirm.proceed;
+    if ((docs[index].editor && docs[index].editor.edited()) == false)
+        return Confirm.proceed;
+
+    current = index;
 
     static immutable SDL_MessageBoxButtonData[3] buttons = [
         { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, btnSave,     "Save" },
         { cast(SDL_MessageBoxButtonFlags) 0,       btnDontSave, "Don't Save" },
         { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, btnCancel,   "Cancel" },
     ];
+    // Name the document: with several tabs open, "the document" is not enough
+    // to tell the user which one they are about to lose.
+    string message = format("%s has unsaved changes.", docs[index].title);
     SDL_MessageBoxData data = {
         flags:      SDL_MESSAGEBOX_WARNING,
         window:     uiWindow,
         title:      title,
-        message:    "The document has unsaved changes.",
+        message:    message.toStringz,
         numButtons: buttons.length,
         buttons:    buttons.ptr,
     };
@@ -571,9 +837,14 @@ private Confirm ui_confirm_discard(const(char)* title)
 
 /// Ask the user to resolve unsaved edits before quitting. True to go ahead.
 /// main calls this on every quit route so the window keeps running on Cancel.
+/// Every open tab is asked about in turn, each prompt naming its own document,
+/// and the first cancel stops the quit with the rest left untouched.
 bool ui_may_quit()
 {
-    return ui_confirm_discard("Quit vddhx") == Confirm.proceed;
+    foreach (size_t i, ref Document d; docs)
+        if (ui_confirm_discard(i, "Quit vddhx") != Confirm.proceed)
+            return false;
+    return true;
 }
 
 /// Build one frame of UI. Call between mu_begin and mu_end.
@@ -602,6 +873,15 @@ void ui_frame(mu_Context* ctx, int width, int height)
         mu_Container* win = mu_get_current_container(ctx);
         win.rect = mu_Rect(0, 0, width, height);
 
+        // Rows in this window abut. ddui leaves a gap between rows, painted in
+        // the window's own colour, which stripes the chrome (menubar, toolbar,
+        // tabs) and the grid (column header, bytes) with pale seams instead of
+        // letting each read as one surface. Restored on the way out, so the
+        // About dialog keeps the stock spacing.
+        int spacing = ctx.style.spacing;
+        ctx.style.spacing = 0;
+        scope(exit) ctx.style.spacing = spacing;
+
         // Pick up a file the async Open dialog chose since the last frame.
         if (atomicLoad(pendingReady))
         {
@@ -614,30 +894,46 @@ void ui_frame(mu_Context* ctx, int width, int height)
         if (atomicLoad(pendingSaveReady))
         {
             atomicStore(pendingSaveReady, false);
-            string dest = pendingSavePath.ptr.fromStringz.idup;
-            if (saveTo(dest))
-                loadedPath = dest;
+            ui_save_pending(pendingSavePath.ptr.fromStringz.idup);
         }
 
         ui_menubar(ctx);
 
         // Quick toolbar: the minimap toggle. Off falls back to a fat scrollbar.
-        static immutable int[1] bar = [ 120 ];
-        mu_layout_row(ctx, 1, bar.ptr, 0);
+        // It sits above the tabs, with the menubar, because it is a view setting
+        // for the whole application rather than one document's: every tab draws
+        // through the same panel and reads the same flag.
+        // ddui paints nothing behind a plain layout row, so the toolbar would
+        // show the window's pale grey between the dark menubar and tab strip.
+        // Take the row, fill it in the same chrome colour, then put the widget
+        // back inside it; an absolute rect is handed straight back by the layout
+        // without advancing it.
+        int toolbarH = ctx.style.size.y + ctx.style.padding * 2; // the menubar's
+        static immutable int[1] full = [ -1 ];
+        mu_layout_row(ctx, 1, full.ptr, toolbarH);
+        mu_Rect toolbar = mu_layout_next(ctx);
+        mu_draw_rect(ctx, toolbar, ctx.style.colors[MU_COLOR_TITLEBG]);
+        mu_layout_set_next(ctx, mu_Rect(toolbar.x + ctx.style.padding, toolbar.y,
+            120, toolbar.h), 0);
         mu_checkbox(ctx, "Minimap", &minimapOn);
-        hex.minimap = minimapOn != 0;
+
+        // Tabs last, so the strip sits directly on top of the document it names.
+        ui_tabs(ctx);
+        doc.hex.minimap = minimapOn != 0;
 
         // The editor's size shifts as inserts and deletes land, so refresh the
         // panel's copy each frame before it draws; the panel keeps it live within
         // a frame, this keeps it authoritative across them.
-        if (editor)
-            hex.dataSize = editor.size();
+        if (doc.editor)
+            doc.hex.dataSize = doc.editor.size();
 
         // The panel takes the rest of the window, save a strip at the bottom
-        // reserved for the status bar. Feed it the monospace face.
+        // reserved for the status bar. Feed it the monospace face. Every tab
+        // draws through this one panel - only one is ever on screen - so its
+        // ddui container is shared and the per-document state lives in HexView.
         int statusH = ctx.text_height(ctx.style.font) + 6;
         // Check return with `& MU_RES_CHANGE`
-        cast(void)hex_view(ctx, "hexpanel", hex, render_font_mono(), statusH);
+        cast(void)hex_view(ctx, "hexpanel", doc.hex, render_font_mono(), statusH);
 
         // Status bar: edit mode, a dirty marker, caret offset and selection length,
         // echoing what the panel reports back through its state. Pinned to the
@@ -647,20 +943,53 @@ void ui_frame(mu_Context* ctx, int width, int height)
         mu_Rect sr = mu_layout_next(ctx);
         mu_draw_rect(ctx, sr, mu_Color(30, 30, 40, 255));
         char[80] statusbuf = void;
-        size_t selLen = hex_total(hex) ? hex_sel_high(hex) - hex_sel_low(hex) + 1 : 0;
-        string mode  = hex.insertMode ? "INS" : "OVR";
-        string dirty = (editor && editor.edited()) ? " *" : "";
+        size_t selLen = hex_total(doc.hex) ?
+            hex_sel_high(doc.hex) - hex_sel_low(doc.hex) + 1 : 0;
+        string mode  = doc.hex.insertMode ? "INS" : "OVR";
+        string dirty = (doc.editor && doc.editor.edited()) ? " *" : "";
         char[] status = sformat(statusbuf, "%s%s  offset %08X  selected %u byte(s)",
-            mode, dirty, hex.cursor, selLen);
+            mode, dirty, doc.hex.cursor, selLen);
         int th = ctx.text_height(ctx.style.font);
         mu_draw_text(ctx, ctx.style.font, cast(string) status,
             mu_Vec2(sr.x + 4, sr.y + (sr.h - th) / 2), mu_Color(170, 170, 185, 255));
+
+        // Name the document in the title bar last, so it agrees with the status
+        // bar above: both then report the state this frame's input left behind,
+        // rather than the title trailing an edit by a frame.
+        ui_window_title();
 
         mu_end_window(ctx);
     }
 
     // Help > About, as its own root container so it floats over the main window.
     about_frame(ctx, width, height);
+}
+
+/// Draw the tab strip and act on what was clicked: one tab per open document,
+/// showing its name and an unsaved-changes dot, plus the trailing + button.
+///
+/// The item slice is rebuilt every frame from `docs` (titles and dirty flags
+/// both move under us) into storage that only ever grows, so a steady tab count
+/// costs no allocation. Actions land straight away: a close can drop the
+/// document the rest of this frame would have drawn, which is why everything
+/// below the strip reads through `doc` rather than holding a reference.
+private void ui_tabs(mu_Context* ctx)
+{
+    if (tabItems.length < docs.length)
+        tabItems.length = docs.length;
+    foreach (size_t i, ref Document d; docs)
+        tabItems[i] = TabItem(d.title, d.editor && d.editor.edited());
+
+    int index;
+    TabAction action = tab_bar(ctx, "tabs", tabstrip, tabItems[0 .. docs.length],
+        cast(int) current, index);
+    switch (action)
+    {
+    case TabAction.select: ui_select_tab(index); break;
+    case TabAction.close:  ui_close_tab(index);  break;
+    case TabAction.add:    ui_new_tab();         break;
+    default:
+    }
 }
 
 /// Draw the top menubar. Each menu opens a dropdown of actions that print to
@@ -700,9 +1029,13 @@ private void ui_menubar(mu_Context* ctx)
         ctx.style.padding = itemPadding;
         // The ellipsis marks the entries that put up a dialog before doing
         // anything, the way every desktop toolkit marks them.
+        if (mu_menu_item_ex(ctx, "New Tab",    "Ctrl+T",       0, 0)) ui_new_tab();
         if (mu_menu_item_ex(ctx, "Open...",    "Ctrl+O",       0, 0)) ui_open_dialog();
+        mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Save",       "Ctrl+S",       0, 0)) ui_save();
         if (mu_menu_item_ex(ctx, "Save As...", "Ctrl+Shift+S", 0, 0)) ui_save_as();
+        mu_menu_separator(ctx);
+        if (mu_menu_item_ex(ctx, "Close Tab",  "Ctrl+W",       0, 0)) ui_close_current_tab();
         // Route Quit through SDL's own event queue so main stays the single
         // owner of the loop flag; the existing SDL_EVENT_QUIT case ends the loop.
         if (mu_menu_item_ex(ctx, "Quit", "Ctrl+Q", 0, 0))
