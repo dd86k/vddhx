@@ -153,6 +153,31 @@ void main(string[] args)
                 mu_input_scroll(ctx, 0, cast(int)(event.wheel.y * -30));
                 break;
             case SDL_EVENT_TEXT_INPUT:
+                // Bookmarks step on the bare brackets, as they do in ddhx. They
+                // are bound to the character typed rather than to a keycode
+                // because on most layouts outside the US ANSI one they are not a
+                // key of their own: fr-ca puts them behind AltGr, which SDL
+                // reports as a right Alt held down (and as Ctrl+Alt on Windows),
+                // and gives the key its unshifted keycode, which is not a
+                // bracket at all. The character SDL hands back here is what the
+                // layout actually produced, whatever it took to type it.
+                //
+                // The grid takes typed text as hex digits and ignores the rest,
+                // so a bracket means nothing else here; the omnibar is a text
+                // box, though, so it keeps what is typed into it.
+                if (ui_omni_active() == false && event.text.text && event.text.text[0] && event.text.text[1] == 0)
+                {
+                    if (event.text.text[0] == ']')
+                    {
+                        ui_mark_step(1);
+                        break;
+                    }
+                    if (event.text.text[0] == '[')
+                    {
+                        ui_mark_step(-1);
+                        break;
+                    }
+                }
                 mu_input_text(ctx, event.text.text);
                 break;
             case SDL_EVENT_DROP_FILE:
@@ -312,23 +337,6 @@ void main(string[] args)
                     if (event.key.key == SDLK_B)
                     {
                         ui_mark_toggle();
-                        break;
-                    }
-                }
-                // Bookmarks step on the bare brackets, as they do in ddhx. The
-                // grid takes typed text as hex digits and ignores the rest, so
-                // these two are free to mean this without a modifier.
-                if (event.type == SDL_EVENT_KEY_DOWN &&
-                    (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT)) == 0)
-                {
-                    if (event.key.key == SDLK_RIGHTBRACKET)
-                    {
-                        ui_mark_step(1);
-                        break;
-                    }
-                    if (event.key.key == SDLK_LEFTBRACKET)
-                    {
-                        ui_mark_step(-1);
                         break;
                     }
                 }
