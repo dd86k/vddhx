@@ -6,7 +6,16 @@
 ///
 ///   (nothing)  the open documents, to switch tab
 ///   >          commands, the actions the menus carry
+///   :          an offset to go to, ddhx's own goto syntax
+///   /          a pattern to find in the document
+///   =          the bytes at the caret, read as every type they could be
+///   @          the document's bookmarks
 ///   ?          the shortcut sheet, there to be read rather than run
+///
+/// A mode whose answer is computed rather than picked - ':' is the first of them
+/// - hands in a single pinned row instead of a list: the query never filters it
+/// out, so the caller can keep rewriting it into a live preview of what taking
+/// it would do.
 ///
 /// The widget owns the box, the matching and the selection. The caller owns the
 /// rows: it asks omni_mode what the box is currently after and rebuilds the
@@ -37,6 +46,14 @@ enum
 /// The character that opens each mode, typed as the first thing in the box.
 enum char OMNI_COMMAND = '>';
 /// Ditto.
+enum char OMNI_ADDRESS = ':';
+/// Ditto.
+enum char OMNI_FIND    = '/';
+/// Ditto.
+enum char OMNI_INSPECT = '=';
+/// Ditto.
+enum char OMNI_BOOKMARK = '@';
+/// Ditto.
 enum char OMNI_HELP    = '?';
 
 /// What the box is currently searching, as told by its first character.
@@ -44,6 +61,10 @@ enum OmniMode
 {
     switcher, /// No prefix: whatever the caller offers by default (the open tabs).
     command,  /// '>': runnable actions.
+    address,  /// ':': a document offset, read out of the query itself.
+    find,     /// '/': a byte pattern, likewise read out of the query.
+    inspect,  /// '=': the bytes at the caret, one row per type.
+    bookmark, /// '@': the document's bookmarks.
     help,     /// '?': the shortcut sheet.
 }
 
@@ -68,6 +89,10 @@ struct OmniItem
     int id = -1;
     /// Draw the unsaved-changes dot, as the tab strip does.
     bool marked;
+    /// A row the query never filters out, sorted above the rest. For a mode whose
+    /// answer is computed from the query rather than picked out of a list: the
+    /// caller rewrites the label each frame and the box just shows it.
+    bool pinned;
 }
 
 /// Persistent omnibar state; keep one across frames.
@@ -136,6 +161,24 @@ void omni_toggle(ref Omnibar o, char prefix = 0)
 OmniMode omni_mode(ref const(Omnibar) o)
 {
     return omni_prefix_mode(o.text[0]);
+}
+
+/// The text being searched for: everything past the mode's prefix character,
+/// with the blanks after it dropped so ": 20" finds what ":20" does.
+///
+/// The box does its own matching, so a list mode has no reason to read this; it
+/// is here for the modes that compute their row from the query - and for acting
+/// on one once it is taken. The slice is into the box's own buffer, so it is
+/// good until the next keystroke reaches it.
+const(char)[] omni_query(ref const(Omnibar) o)
+{
+    size_t at = omni_prefix_mode(o.text[0]) == OmniMode.switcher ? 0 : 1;
+    while (at < o.text.length && o.text[at] == ' ')
+        ++at;
+    size_t end = at;
+    while (end < o.text.length && o.text[end])
+        ++end;
+    return o.text[at .. end];
 }
 
 /// Draw the box and drive it. Call once per frame from the frame builder, after
@@ -301,7 +344,7 @@ enum string TITLE = "omnibar";
 enum string QUERY = "query";
 
 /// Placeholder, and what stands in for the list when nothing matched.
-enum string HINT  = "type to switch tabs   >  commands   ?  shortcuts";
+enum string HINT  = "tabs   >  commands   :  go to   /  find   =  inspect   @  bookmarks   ?  keys";
 /// Ditto.
 enum string EMPTY = "no matches";
 
@@ -335,22 +378,13 @@ OmniMode omni_prefix_mode(char prefix)
     switch (prefix)
     {
     case OMNI_COMMAND: return OmniMode.command;
+    case OMNI_ADDRESS: return OmniMode.address;
+    case OMNI_FIND:    return OmniMode.find;
+    case OMNI_INSPECT: return OmniMode.inspect;
+    case OMNI_BOOKMARK: return OmniMode.bookmark;
     case OMNI_HELP:    return OmniMode.help;
     default:           return OmniMode.switcher;
     }
-}
-
-/// The text being searched for: everything past the mode's prefix character,
-/// with the blanks after it dropped so "> save" finds what ">save" does.
-const(char)[] omni_query(ref const(Omnibar) o)
-{
-    size_t at = omni_prefix_mode(o.text[0]) == OmniMode.switcher ? 0 : 1;
-    while (at < o.text.length && o.text[at] == ' ')
-        ++at;
-    size_t end = at;
-    while (end < o.text.length && o.text[end])
-        ++end;
-    return o.text[at .. end];
 }
 
 /// Cut `items` down to what matches the query, best match first. Equal scores
@@ -368,12 +402,19 @@ const(OmniItem)[] omni_filter(ref Omnibar o, const(OmniItem)[] items)
     size_t n;
     foreach (ref const(OmniItem) it; items)
     {
-        int score = omni_score(it.label, query);
-        // A hit in the detail column counts too - typing a directory should find
-        // the file under it - but at half weight, so a name match outranks it.
-        int alt = omni_score(it.detail, query);
-        if (alt > 0 && alt / 2 > score)
-            score = alt / 2;
+        int score = void;
+        if (it.pinned)
+            score = int.max; // stays, and stays on top, whatever was typed
+        else
+        {
+            score = omni_score(it.label, query);
+            // A hit in the detail column counts too - typing a directory should
+            // find the file under it - but at half weight, so a name match
+            // outranks it.
+            int alt = omni_score(it.detail, query);
+            if (alt > 0 && alt / 2 > score)
+                score = alt / 2;
+        }
         if (score < 0)
             continue;
 

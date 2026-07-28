@@ -6,7 +6,8 @@ import ddlogger;
 import bindbc.sdl;
 import ddui;
 import hexview;
-import omnibar : OMNI_COMMAND, OMNI_KEY_UP, OMNI_KEY_DOWN;
+import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
+    OMNI_KEY_UP, OMNI_KEY_DOWN;
 import render;
 import ui;
 version (Screenshot) import screenshot;
@@ -160,9 +161,10 @@ void main(string[] args)
                         break;
                     }
                 }
-                // The omnibar next: Ctrl+E raises it on the tab switcher
-                // and Ctrl+Shift+P straight on the command list, and either key
-                // puts away the mode it opens.
+                // The omnibar next: Ctrl+E raises it on the tab switcher, and a
+                // key per prefixed mode raises it straight on that one. Each key
+                // puts away the mode it opens. Ctrl+G and Ctrl+F are what ddhx
+                // binds its own goto and find to; Alt+I its inspector.
                 if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)
                 {
                     if (event.key.key == SDLK_E)
@@ -175,6 +177,22 @@ void main(string[] args)
                         ui_omni_toggle(OMNI_COMMAND);
                         break;
                     }
+                    if (event.key.key == SDLK_G)
+                    {
+                        ui_omni_toggle(OMNI_ADDRESS);
+                        break;
+                    }
+                    if (event.key.key == SDLK_F)
+                    {
+                        ui_omni_toggle(OMNI_FIND);
+                        break;
+                    }
+                }
+                if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_ALT &&
+                    event.key.key == SDLK_I)
+                {
+                    ui_omni_toggle(OMNI_INSPECT);
+                    break;
                 }
                 // While it is up it owns the keyboard: it is a text box, so the
                 // panel's chords and hex digits would fight what is being typed
@@ -257,6 +275,34 @@ void main(string[] args)
                     if (event.key.key == SDLK_V)
                     {
                         ui_paste();
+                        break;
+                    }
+                    // Repeat the last search, forward or back.
+                    if (event.key.key == SDLK_N)
+                    {
+                        ui_find_repeat((event.key.mod & SDL_KMOD_SHIFT) != 0);
+                        break;
+                    }
+                    if (event.key.key == SDLK_B)
+                    {
+                        ui_mark_toggle();
+                        break;
+                    }
+                }
+                // Bookmarks step on the bare brackets, as they do in ddhx. The
+                // grid takes typed text as hex digits and ignores the rest, so
+                // these two are free to mean this without a modifier.
+                if (event.type == SDL_EVENT_KEY_DOWN &&
+                    (event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT)) == 0)
+                {
+                    if (event.key.key == SDLK_RIGHTBRACKET)
+                    {
+                        ui_mark_step(1);
+                        break;
+                    }
+                    if (event.key.key == SDLK_LEFTBRACKET)
+                    {
+                        ui_mark_step(-1);
                         break;
                     }
                 }

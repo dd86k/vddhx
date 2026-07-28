@@ -17,7 +17,8 @@ import bindbc.sdl;
 import ddui;
 import hexview : HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_DOWN;
-import omnibar : OMNI_COMMAND, OMNI_HELP, OMNI_KEY_DOWN;
+import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
+    OMNI_BOOKMARK, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
 import ui;
 
@@ -298,6 +299,130 @@ int screenshot_run(string[] args)
     tap(MU_KEY_RETURN);
     frame();
     shot("shot-omni-switched.bmp");
+
+    // Scenario 12: ':' reads an offset instead of filtering a list, so its one
+    // row is a live readout of where Enter would land. Back on mid.bin for it,
+    // since a jump wants a document with somewhere to jump to.
+    ui_omni_toggle();
+    frame();
+    mu_input_text(&ctx, "mid");
+    frame(); frame();
+    tap(MU_KEY_RETURN);
+    frame();
+
+    ui_omni_toggle(OMNI_ADDRESS);
+    frame(); frame();
+    shot("shot-omni-goto-empty.bmp"); // nothing typed yet: the syntax it wants
+
+    mu_input_text(&ctx, "0x40");
+    frame(); frame();
+    shot("shot-omni-goto.bmp");
+
+    tap(MU_KEY_RETURN);
+    frame();
+    shot("shot-omni-goto-done.bmp"); // caret on 0x40, the view scrolled onto it
+
+    // Relative and percentage forms, from where that jump left the caret.
+    ui_omni_toggle(OMNI_ADDRESS);
+    frame();
+    mu_input_text(&ctx, "+16");
+    frame(); frame();
+    shot("shot-omni-goto-relative.bmp");
+    ui_omni_close();
+    frame();
+
+    ui_omni_toggle(OMNI_ADDRESS);
+    frame();
+    mu_input_text(&ctx, "%50");
+    frame(); frame();
+    shot("shot-omni-goto-percent.bmp");
+    ui_omni_close();
+    frame();
+
+    // Scenario 13: find. The document is random bytes, so the scenario writes
+    // its own needle first: caret to the top, four bytes typed over what is
+    // there, then the caret sent to the far end so the search has to walk the
+    // whole document (and wrap) to come back to them.
+    chord(MU_KEY_CTRL, HEX_KEY_HOME);
+    mu_input_text(&ctx, "cafebabe");
+    frame();
+    chord(MU_KEY_CTRL, HEX_KEY_END);
+    frame();
+
+    ui_omni_toggle(OMNI_FIND);
+    frame();
+    mu_input_text(&ctx, "0xcafebabe");
+    frame(); frame();
+    shot("shot-omni-find.bmp"); // the bytes the pattern comes to, before running it
+    tap(MU_KEY_RETURN);
+    frame();
+    shot("shot-omni-find-hit.bmp"); // match selected, scrolled onto, reported below
+
+    // A pattern that is nowhere in the document says so rather than going quiet.
+    ui_omni_toggle(OMNI_FIND);
+    frame();
+    mu_input_text(&ctx, "no such text here");
+    frame(); frame();
+    tap(MU_KEY_RETURN);
+    frame();
+    shot("shot-omni-find-miss.bmp");
+
+    // Scenario 14: the inspector. Every reading of the bytes at the caret, both
+    // byte orders, filterable by typing part of a type name.
+    ui_omni_toggle(OMNI_INSPECT);
+    frame(); frame();
+    shot("shot-omni-inspect.bmp");
+    mu_input_text(&ctx, "32");
+    frame(); frame();
+    shot("shot-omni-inspect-filter.bmp");
+    ui_omni_close();
+    frame();
+
+    // Scenario 15: bookmarks. Mark the byte under the caret, step down two rows,
+    // select four bytes and mark the run, then list them; the panel tints every
+    // byte of both, grid and minimap.
+    ui_mark_toggle();
+    frame();
+    shot("shot-mark-set.bmp");
+    tap(HEX_KEY_DOWN); tap(HEX_KEY_DOWN);
+    chord(MU_KEY_SHIFT, HEX_KEY_RIGHT);
+    chord(MU_KEY_SHIFT, HEX_KEY_RIGHT);
+    chord(MU_KEY_SHIFT, HEX_KEY_RIGHT);
+    ui_mark_toggle();
+    frame();
+    shot("shot-mark-range.bmp");
+    ui_omni_toggle(OMNI_BOOKMARK);
+    frame(); frame();
+    shot("shot-omni-marks.bmp");
+    tap(MU_KEY_RETURN);
+    frame();
+    shot("shot-omni-marks-jump.bmp");
+
+    // A command that puts the box back up on another prefix, rather than doing
+    // something and going away: the palette's own route into the inspector.
+    ui_omni_toggle(OMNI_COMMAND);
+    frame();
+    mu_input_text(&ctx, "inspect");
+    frame(); frame();
+    tap(MU_KEY_RETURN);
+    frame(); frame();
+    shot("shot-omni-command-reopen.bmp");
+    ui_omni_close();
+    frame();
+
+    // Clearing them the way a user would reach it: by name, out of the command
+    // list. An empty list then says what sets one.
+    ui_omni_toggle(OMNI_COMMAND);
+    frame();
+    mu_input_text(&ctx, "clear book");
+    frame(); frame();
+    tap(MU_KEY_RETURN);
+    frame();
+    ui_omni_toggle(OMNI_BOOKMARK);
+    frame(); frame();
+    shot("shot-omni-marks-empty.bmp");
+    ui_omni_close();
+    frame();
 
     // A click anywhere outside puts it away without taking a row, the way every
     // quick-open box behaves: here, into the grid it was floating over.
