@@ -104,13 +104,39 @@ void main(string[] args)
 
     logDebugging("Starting loop");
 
+    // Frames still owed to the last input. One is not always enough: the UI is
+    // immediate mode, so state only reaches the screen by drawing, and a click
+    // that opens a popup or moves focus lands on the frame after the one that
+    // read it. Draw a few, then let the loop go back to sleep.
+    enum FRAMES_PER_INPUT = 3;
+
     bool running = true;
+    int frames = FRAMES_PER_INPUT; // the first frame is owed to nothing: draw it
     version (Screenshot) bool wantShot;
     while (running)
     {
+        // Idle: sleep in SDL until the next event instead of redrawing on the
+        // display refresh. This is an editor, not a game - a window nobody is
+        // touching has nothing to animate, and adaptive vsync alone still woke
+        // the process sixty times a second to rebuild an identical frame.
+        // Everything that changes what is on screen arrives as an event; the
+        // async file dialogs answer on their own thread, so their callbacks
+        // push one (ui_wakeup) to get themselves drawn.
+        //
+        // The event is left in the queue (that is what the null does) so the
+        // drain below can treat it like any other.
+        if (frames <= 0 && SDL_WaitEvent(null) == false)
+        {
+            // Only ever false on error, and a broken queue does not heal: going
+            // back to sleep on it would spin the loop at full speed instead.
+            logCritical("SDL_WaitEvent: ", SDL_GetError().fromStringz);
+            break;
+        }
+
         SDL_Event event = void;
         while (SDL_PollEvent(&event))
         {
+            frames = FRAMES_PER_INPUT;
             switch (event.type)
             {
             case SDL_EVENT_QUIT:
@@ -344,6 +370,7 @@ void main(string[] args)
         }
 
         SDL_RenderPresent(renderer);
+        --frames;
     }
 }
 

@@ -331,6 +331,19 @@ extern (C) private void ui_on_file_picked(void* user, const(char*)* fileList, in
     }
     pendingPath[n] = 0;
     atomicStore(pendingReady, true);
+    ui_wakeup();
+}
+
+/// Nudge the event loop into drawing a frame. It sleeps between events, so a
+/// change made from anywhere but an event - the dialog callbacks above and
+/// below, which SDL answers on its own thread - would sit unseen until the next
+/// keystroke or mouse move. SDL's queue is the wakeup: pushing to it is safe
+/// from any thread, and the loop ignores the event itself.
+private void ui_wakeup() nothrow
+{
+    SDL_Event wake; // .init zeroes the union
+    wake.type = SDL_EVENT_USER;
+    SDL_PushEvent(&wake);
 }
 
 /// ddui-side byte source: hand the panel's window request straight to the editor,
@@ -564,6 +577,7 @@ extern (C) private void ui_on_save_picked(void* user, const(char*)* fileList, in
     }
     pendingSavePath[n] = 0;
     atomicStore(pendingSaveReady, true);
+    ui_wakeup();
 }
 
 /// Save the open document. With a known path it writes in place and reports
@@ -965,9 +979,25 @@ private immutable Entry[] COMMANDS = [
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT),
 ];
 
-/// The '?' sheet: every key the application answers to, in the order they come
-/// up - the omnibar itself, then the window, then the caret and the bytes under
-/// it. Nothing here runs; it is the sheet you open to remember a chord.
+/// The head of the '?' sheet: the omnibar's own prefixes, the characters that
+/// pick what the box is searching. They are as much a shortcut as any chord, and
+/// the only ones with nowhere else to be advertised, so the sheet opens on them.
+/// The characters come from the omnibar's own enums, so the sheet cannot drift
+/// from what the box actually answers to.
+private immutable Entry[] PREFIXES = [
+    Entry("Omnibar: switch tab",             "(no prefix)"),
+    Entry("Omnibar: run a command",          "" ~ OMNI_COMMAND),
+    Entry("Omnibar: go to an offset",        "" ~ OMNI_ADDRESS),
+    Entry("Omnibar: find a pattern",         "" ~ OMNI_FIND),
+    Entry("Omnibar: inspect bytes at caret", "" ~ OMNI_INSPECT),
+    Entry("Omnibar: list bookmarks",         "" ~ OMNI_BOOKMARK),
+    Entry("Omnibar: this sheet",             "" ~ OMNI_HELP),
+];
+
+/// The rest of the '?' sheet: every key the application answers to, in the order
+/// they come up - the omnibar itself, then the window, then the caret and the
+/// bytes under it. Nothing here runs; it is the sheet you open to remember a
+/// chord.
 private immutable Entry[] SHORTCUTS = [
     Entry("Omnibar",                      "Ctrl+E"),
     Entry("Omnibar, on commands",         "Ctrl+Shift+P"),
@@ -1091,6 +1121,10 @@ private const(OmniItem)[] ui_omni_items()
         }
         break;
     case OmniMode.help:
+        // The prefixes first, then the chords: equal scores keep this order, so
+        // an unfiltered sheet reads as the two lists it is.
+        foreach (ref immutable Entry e; PREFIXES)
+            put(e.label, e.keys, e.id);
         foreach (ref immutable Entry e; SHORTCUTS)
             put(e.label, e.keys, e.id);
         break;
