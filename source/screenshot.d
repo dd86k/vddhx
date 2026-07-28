@@ -17,6 +17,7 @@ import bindbc.sdl;
 import ddui;
 import hexview : HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_DOWN;
+import omnibar : OMNI_COMMAND, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
 import ui;
 
@@ -254,6 +255,57 @@ int screenshot_run(string[] args)
     mu_input_mousedown(&ctx, other.x + 3, other.y + 3, MU_MOUSE_MIDDLE); frame();
     mu_input_mouseup(&ctx, other.x + 3, other.y + 3, MU_MOUSE_MIDDLE); frame();
     shot("shot-tabs-closed.bmp");
+
+    // Scenario 11: the omnibar. Ctrl+E is a main-loop chord, so the scripted
+    // driver calls the entry point that key does, then types into the box the
+    // way SDL's text input would. The list is matched against the query as it
+    // stood when the frame began, so a frame typing and a frame showing the
+    // result are two different frames.
+    ui_omni_toggle();
+    frame();
+    shot("shot-omni.bmp");
+
+    mu_input_text(&ctx, "mid");
+    frame(); frame();
+    shot("shot-omni-filter.bmp");
+
+    // Down walks the list; with one match left it wraps back onto it.
+    tap(OMNI_KEY_DOWN);
+    shot("shot-omni-down.bmp");
+
+    // The two prefixed modes. Toggling to a mode the box is not in switches it
+    // rather than closing, so these two calls swap the list under the same box.
+    ui_omni_toggle(OMNI_COMMAND);
+    frame(); frame();
+    shot("shot-omni-command.bmp");
+
+    ui_omni_toggle(OMNI_HELP);
+    frame(); frame();
+    shot("shot-omni-help.bmp");
+
+    // Enter takes the highlighted row: the shortcut sheet has nothing to run, so
+    // this is the route that just puts the box away and hands the bytes back.
+    tap(MU_KEY_RETURN);
+    frame();
+    shot("shot-omni-closed.bmp");
+
+    // And the switcher doing its job: name a tab, take it, and the panel behind
+    // is showing that document with the strip following.
+    ui_omni_toggle();
+    frame();
+    mu_input_text(&ctx, "unt");
+    frame(); frame();
+    tap(MU_KEY_RETURN);
+    frame();
+    shot("shot-omni-switched.bmp");
+
+    // A click anywhere outside puts it away without taking a row, the way every
+    // quick-open box behaves: here, into the grid it was floating over.
+    ui_omni_toggle();
+    frame();
+    click(400, 400);
+    frame();
+    shot("shot-omni-dismissed.bmp");
 
     return 0;
 }

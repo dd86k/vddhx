@@ -10,6 +10,7 @@ import ddhx.document : FileDocument, IDocument;
 import ddhx.editor : IDocumentEditor, spawnEditor;
 import about : about_open, about_frame;
 import hexview;
+import omnibar;
 import tabbar;
 import render : render_font_mono;
 import std.array : Appender, appender;
@@ -55,6 +56,12 @@ private __gshared TabItem[] tabItems;
 
 /// Scratch buffers are numbered in creation order: "untitled", "untitled 2"...
 private __gshared uint untitled;
+
+/// Omnibar state, and the candidate rows handed to it. Like the tab strip's, the
+/// row storage is rebuilt each frame into an array that only ever grows.
+private __gshared Omnibar omni;
+/// Ditto.
+private __gshared OmniItem[] omniItems;
 
 /// The document the tab strip has in front. Every action below acts on it.
 private ref Document doc()
@@ -847,6 +854,172 @@ bool ui_may_quit()
     return true;
 }
 
+/// One row of the omnibar's command list or shortcut sheet: what it is called,
+/// the keys that reach it, and - for a command - the code ui_omni_run acts on.
+private struct Entry
+{
+    string label;
+    string keys;
+    int id = -1;
+}
+
+/// Commands the omnibar's '>' mode offers. The menus' own actions, so anything
+/// reachable by mouse is reachable by typing its name; ddhx's document-level
+/// commands (go to offset, search, ...) join this table as ddhx exposes them.
+private enum
+{
+    CMD_NEW_TAB, CMD_OPEN, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
+    CMD_CUT, CMD_COPY, CMD_PASTE, CMD_MINIMAP, CMD_ABOUT, CMD_QUIT,
+}
+
+/// Ditto.
+private immutable Entry[] COMMANDS = [
+    Entry("New Tab",          "Ctrl+T",       CMD_NEW_TAB),
+    Entry("Open File...",     "Ctrl+O",       CMD_OPEN),
+    Entry("Save",             "Ctrl+S",       CMD_SAVE),
+    Entry("Save As...",       "Ctrl+Shift+S", CMD_SAVE_AS),
+    Entry("Close Tab",        "Ctrl+W",       CMD_CLOSE_TAB),
+    Entry("Cut",              "Ctrl+X",       CMD_CUT),
+    Entry("Copy",             "Ctrl+C",       CMD_COPY),
+    Entry("Paste",            "Ctrl+V",       CMD_PASTE),
+    Entry("Toggle Minimap",   "",             CMD_MINIMAP),
+    Entry("About vddhx",      "",             CMD_ABOUT),
+    Entry("Quit",             "Ctrl+Q",       CMD_QUIT),
+];
+
+/// The '?' sheet: every key the application answers to, in the order they come
+/// up - the omnibar itself, then the window, then the caret and the bytes under
+/// it. Nothing here runs; it is the sheet you open to remember a chord.
+private immutable Entry[] SHORTCUTS = [
+    Entry("Omnibar",                      "Ctrl+E"),
+    Entry("Omnibar, on commands",         "Ctrl+Shift+P"),
+    Entry("Close the omnibar",            "Esc"),
+    Entry("New tab",                      "Ctrl+T"),
+    Entry("Open file",                    "Ctrl+O"),
+    Entry("Save",                         "Ctrl+S"),
+    Entry("Save as",                      "Ctrl+Shift+S"),
+    Entry("Close tab",                    "Ctrl+W"),
+    Entry("Next / previous tab",          "Ctrl+Tab / Ctrl+Shift+Tab"),
+    Entry("Quit",                         "Ctrl+Q"),
+    Entry("Cut / copy / paste bytes",     "Ctrl+X / C / V"),
+    Entry("Undo / redo",                  "Ctrl+Z / Ctrl+Y"),
+    Entry("Move the caret",               "Arrows"),
+    Entry("Extend the selection",         "Shift+Arrows"),
+    Entry("Row start / row end",          "Home / End"),
+    Entry("File start / file end",        "Ctrl+Home / Ctrl+End"),
+    Entry("Page up / page down",          "PgUp / PgDn"),
+    Entry("Overwrite or insert",          "Insert"),
+    Entry("Delete a byte, back / forward", "Backspace / Delete"),
+    Entry("Type a byte",                  "0-9 a-f"),
+];
+
+/// Whether the omnibar has the keyboard. main asks before routing a key, since
+/// the box takes text where the panel would take hex digits and chords.
+bool ui_omni_active()
+{
+    return omni_shown(omni);
+}
+
+/// Raise the omnibar on the mode `prefix` opens, or put it away when it is
+/// already on that mode (see omni_toggle). The Ctrl+E and Ctrl+Shift+P route.
+void ui_omni_toggle(char prefix = 0)
+{
+    omni_toggle(omni, prefix);
+    if (omni_shown(omni) == false)
+        doc.hex.takeFocus = true; // typing goes back to the bytes
+}
+
+/// Put the omnibar away, whatever it was showing. The Esc route.
+void ui_omni_close()
+{
+    if (omni_shown(omni) == false)
+        return;
+    omni_hide(omni);
+    doc.hex.takeFocus = true;
+}
+
+/// Fill the omnibar's row list for the mode it is currently in. Rebuilt every
+/// frame: titles, dirty flags and the tab count all move under us.
+private const(OmniItem)[] ui_omni_items()
+{
+    size_t n;
+    void put(string label, string detail, int id, bool marked = false)
+    {
+        if (n >= omniItems.length)
+            omniItems.length = n + 16;
+        omniItems[n++] = OmniItem(label, detail, id, marked);
+    }
+
+    final switch (omni_mode(omni))
+    {
+    case OmniMode.switcher:
+        // The path is what tells two same-named files apart, so it is both the
+        // detail column and, through the omnibar's matching, searchable itself.
+        foreach (size_t i, ref Document d; docs)
+            put(d.title, d.path.length ? d.path : "not saved yet", cast(int) i,
+                d.editor && d.editor.edited());
+        break;
+    case OmniMode.command:
+        foreach (ref immutable Entry e; COMMANDS)
+            put(e.label, e.keys, e.id);
+        break;
+    case OmniMode.help:
+        foreach (ref immutable Entry e; SHORTCUTS)
+            put(e.label, e.keys, e.id);
+        break;
+    }
+    return omniItems[0 .. n];
+}
+
+/// Act on the row the omnibar took, in the mode it was showing when the list was
+/// built (which is not necessarily the mode its text spells out now: a prefix
+/// typed this frame only reaches the list on the next one).
+private void ui_omni_accept(OmniMode mode, int id)
+{
+    final switch (mode)
+    {
+    case OmniMode.switcher:
+        if (id >= 0)
+            ui_select_tab(cast(size_t) id); // hands the panel focus itself
+        break;
+    case OmniMode.command:
+        ui_omni_run(id);
+        break;
+    case OmniMode.help:
+        doc.hex.takeFocus = true; // nothing to run: the sheet is there to be read
+        break;
+    }
+}
+
+/// Run one command from the '>' list. Everything here is an entry point the
+/// menubar already calls, so a command and its menu item cannot drift apart.
+private void ui_omni_run(int id)
+{
+    switch (id)
+    {
+    case CMD_NEW_TAB:   ui_new_tab();          break;
+    case CMD_OPEN:      ui_open_dialog();      break;
+    case CMD_SAVE:      ui_save();             break;
+    case CMD_SAVE_AS:   ui_save_as();          break;
+    case CMD_CLOSE_TAB: ui_close_current_tab(); break;
+    case CMD_CUT:       ui_cut();              break;
+    case CMD_COPY:      ui_copy();             break;
+    case CMD_PASTE:     ui_paste();            break;
+    case CMD_MINIMAP:   minimapOn = minimapOn ? 0 : 1; break;
+    case CMD_ABOUT:     about_open();          break;
+    case CMD_QUIT:
+        // Through SDL's own queue, so it meets the same unsaved-changes check as
+        // the window close button and File > Quit.
+        SDL_Event quit; // .init zeroes the union
+        quit.type = SDL_EVENT_QUIT;
+        SDL_PushEvent(&quit);
+        return;
+    default:
+        return;
+    }
+    doc.hex.takeFocus = true; // whatever it was, the bytes take keys again after
+}
+
 /// Build one frame of UI. Call between mu_begin and mu_end.
 /// Params:
 ///     ctx = ddui context.
@@ -963,6 +1136,20 @@ void ui_frame(mu_Context* ctx, int width, int height)
 
     // Help > About, as its own root container so it floats over the main window.
     about_frame(ctx, width, height);
+
+    // The omnibar goes last, over everything: it is the one thing that can be up
+    // while the rest of the window carries on drawing behind it. The mode is read
+    // before the box runs, so accepting acts on the list that was actually shown
+    // rather than on one a prefix typed this same frame would have swapped in.
+    OmniMode mode = omni_mode(omni);
+    int chosen;
+    const(OmniItem)[] rows = ui_omni_active() ? ui_omni_items() : null;
+    final switch (omni_frame(ctx, omni, rows, width, height, chosen))
+    {
+    case OmniAction.none:    break;
+    case OmniAction.accept:  ui_omni_accept(mode, chosen); break;
+    case OmniAction.dismiss: doc.hex.takeFocus = true;     break;
+    }
 }
 
 /// Draw the tab strip and act on what was clicked: one tab per open document,

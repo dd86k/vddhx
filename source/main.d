@@ -6,6 +6,7 @@ import ddlogger;
 import bindbc.sdl;
 import ddui;
 import hexview;
+import omnibar : OMNI_COMMAND, OMNI_KEY_UP, OMNI_KEY_DOWN;
 import render;
 import ui;
 version (Screenshot) import screenshot;
@@ -86,6 +87,8 @@ void main(string[] args)
     ctx.text_width  = &render_text_width;
     ctx.text_height = &render_text_height;
     ctx.style.font  = render_font_ui(); // TTF_Font* handle carried on every text command
+    ctx.get_clipboard = &clipboardGet;  // so the omnibar's box takes Ctrl+C / X / V
+    ctx.set_clipboard = &clipboardSet;
     ui_style(ctx);
 
     // Give the UI the window so File > Open can parent its native dialog to it.
@@ -142,6 +145,57 @@ void main(string[] args)
                     mu_input_mouseup(ctx, x, y, btn);
                 break;
             case SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP:
+                version (Screenshot)
+                {
+                    // Ctrl+Shift+F12 grabs the current frame. Chosen to dodge
+                    // both desktop-environment PrintScreen capture and the Linux
+                    // Ctrl+Alt+F* virtual-terminal switch. First of everything, so
+                    // a frame can be captured whatever else has the keyboard.
+                    if (event.type == SDL_EVENT_KEY_DOWN &&
+                        event.key.key == SDLK_F12 &&
+                        event.key.mod & SDL_KMOD_CTRL &&
+                        event.key.mod & SDL_KMOD_SHIFT)
+                    {
+                        wantShot = true;
+                        break;
+                    }
+                }
+                // The omnibar next: Ctrl+E raises it on the tab switcher
+                // and Ctrl+Shift+P straight on the command list, and either key
+                // puts away the mode it opens.
+                if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)
+                {
+                    if (event.key.key == SDLK_E)
+                    {
+                        ui_omni_toggle();
+                        break;
+                    }
+                    if (event.key.key == SDLK_P && event.key.mod & SDL_KMOD_SHIFT)
+                    {
+                        ui_omni_toggle(OMNI_COMMAND);
+                        break;
+                    }
+                }
+                // While it is up it owns the keyboard: it is a text box, so the
+                // panel's chords and hex digits would fight what is being typed
+                // into it. Its keys go through ddui's text-editing map rather
+                // than the panel's, which reads the same bits as other keys.
+                if (ui_omni_active())
+                {
+                    if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)
+                    {
+                        ui_omni_close();
+                        break;
+                    }
+                    int okey = omniKey(event.key.key);
+                    if (okey == 0)
+                        break;
+                    if (event.type == SDL_EVENT_KEY_DOWN)
+                        mu_input_keydown(ctx, okey);
+                    else
+                        mu_input_keyup(ctx, okey);
+                    break;
+                }
                 // Menu chords: the File and Edit entries, keyed the way every GUI
                 // toolkit keys them. SDL sends no text-input event for a Ctrl
                 // chord, so the panel never sees these as typed hex digits;
@@ -206,20 +260,6 @@ void main(string[] args)
                         break;
                     }
                 }
-                version (Screenshot)
-                {
-                    // Ctrl+Shift+F12 grabs the current frame. Chosen to dodge
-                    // both desktop-environment PrintScreen capture and the Linux
-                    // Ctrl+Alt+F* virtual-terminal switch.
-                    if (event.type == SDL_EVENT_KEY_DOWN &&
-                        event.key.key == SDLK_F12 &&
-                        event.key.mod & SDL_KMOD_CTRL &&
-                        event.key.mod & SDL_KMOD_SHIFT)
-                    {
-                        wantShot = true;
-                        break;
-                    }
-                }
                 int key = muiKey(event.key.key);
                 if (key == 0)
                     break;
@@ -259,6 +299,74 @@ void main(string[] args)
 
         SDL_RenderPresent(renderer);
     }
+}
+
+/// Map an SDL3 keycode for the omnibar's text box (0 if unmapped).
+///
+/// The panel's map below sends the arrows and paging keys as HEX_KEY_* bits,
+/// several of which land on ddui's own editing keys (HEX_KEY_HOME shares a bit
+/// with MU_KEY_DELETE, and so on): right for the grid, wrong for a text box. So
+/// while the omnibar is up, keys come through here instead, as the ddui bits a
+/// textbox reads, plus the two the omnibar adds for walking its list.
+///
+/// Copy / cut / paste / select-all are mapped from the bare letters: ddui only
+/// honours those bits while Ctrl is held, so they cannot be confused with typing.
+private int omniKey(SDL_KeyCode key)
+{
+    switch (key)
+    {
+    case SDLK_RETURN, SDLK_KP_ENTER: return MU_KEY_RETURN;
+    case SDLK_BACKSPACE:             return MU_KEY_BACKSPACE;
+    case SDLK_LSHIFT, SDLK_RSHIFT:   return MU_KEY_SHIFT;
+    case SDLK_LCTRL, SDLK_RCTRL:     return MU_KEY_CTRL;
+    case SDLK_LALT, SDLK_RALT:       return MU_KEY_ALT;
+    case SDLK_LEFT:                  return MU_KEY_LEFT;
+    case SDLK_RIGHT:                 return MU_KEY_RIGHT;
+    case SDLK_HOME:                  return MU_KEY_HOME;
+    case SDLK_END:                   return MU_KEY_END;
+    case SDLK_DELETE:                return MU_KEY_DELETE;
+    case SDLK_C:                     return MU_KEY_COPY;      // with Ctrl
+    case SDLK_X:                     return MU_KEY_CUT;       // ditto
+    case SDLK_V:                     return MU_KEY_PASTE;     // ditto
+    case SDLK_A:                     return MU_KEY_SELECTALL; // ditto
+    case SDLK_UP:                    return OMNI_KEY_UP;
+    case SDLK_DOWN:                  return OMNI_KEY_DOWN;
+    default:                         return 0;
+    }
+}
+
+/// ddui clipboard hooks, for the omnibar's text box (the hex panel does its own
+/// clipboard work in ui.d, since bytes are not text). SDL hands out a copy the
+/// caller has to free, and ddui's callback returns a borrowed pointer it reads
+/// straight away, so the text is parked in a static buffer and SDL's copy is
+/// released before returning. Text too long for the buffer is cut back on a
+/// UTF-8 boundary, so a paste never carries half a character.
+extern (C) private const(char)* clipboardGet(mu_Context* ctx) nothrow
+{
+    __gshared char[4096] buffer;
+
+    char* text = SDL_GetClipboardText(); // an empty string when there is nothing
+    if (text is null)
+        return null;
+    scope(exit) SDL_free(text);
+
+    size_t n;
+    while (text[n] && n + 1 < buffer.length)
+    {
+        buffer[n] = text[n];
+        ++n;
+    }
+    if (text[n]) // cut short: step back off any partial character
+        while (n > 0 && (buffer[n] & 0xc0) == 0x80)
+            --n;
+    buffer[n] = 0;
+    return buffer.ptr;
+}
+
+/// Ditto.
+extern (C) private void clipboardSet(mu_Context* ctx, const(char)* str) nothrow
+{
+    SDL_SetClipboardText(str);
 }
 
 /// Map an SDL3 mouse button to a ddui mouse flag (0 if unmapped).

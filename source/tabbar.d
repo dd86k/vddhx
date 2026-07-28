@@ -10,6 +10,7 @@ module tabbar;
 
 import core.stdc.string : strlen;
 import ddui;
+import uitext : ui_elide;
 
 /// One tab's presentation. The strip is drawn from a slice of these, which the
 /// caller rebuilds each frame from whatever it has open.
@@ -217,7 +218,7 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
         if (textW > 0)
         {
             char[256] scratch = void;
-            string label = tab_elide(ctx, it.label, textW, scratch);
+            string label = ui_elide(ctx, it.label, textW, scratch);
             if (label.length)
                 mu_draw_text(ctx, font, label,
                     mu_Vec2(textX, r.y + top + (r.h - top - th) / 2), ink);
@@ -268,73 +269,3 @@ int tab_width(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     return mu_clamp(tw + closeW + inset * 3 + TAB_GAP, bar.minWidth, bar.maxWidth);
 }
 
-// Fit `label` into `maxW` pixels, cutting it back to an ellipsis when it does
-// not fit. The cut lands on a UTF-8 boundary, so a multi-byte character is never
-// split down the middle. Returns `label` itself when it already fits, a slice of
-// `buf` when it had to be cut, and null when not even one character and the
-// ellipsis would fit.
-string tab_elide(mu_Context* ctx, string label, int maxW, char[] buf)
-{
-    enum string ELLIPSIS = "…"; // …
-
-    if (label.length == 0)
-        return label;
-
-    mu_Font font = ctx.style.font;
-    if (ctx.text_width(font, label.ptr, cast(int) label.length) <= maxW)
-        return label;
-
-    int ew = ctx.text_width(font, ELLIPSIS.ptr, cast(int) ELLIPSIS.length);
-    size_t n = label.length;
-    if (n > buf.length - ELLIPSIS.length)
-        n = buf.length - ELLIPSIS.length;
-    while (n > 0)
-    {
-        if (ctx.text_width(font, label.ptr, cast(int) n) + ew <= maxW)
-            break;
-        --n;
-        while (n > 0 && (label[n] & 0xc0) == 0x80) // step back onto a lead byte
-            --n;
-    }
-    if (n == 0)
-        return null;
-
-    buf[0 .. n] = label[0 .. n];
-    buf[n .. n + ELLIPSIS.length] = ELLIPSIS[];
-    return cast(string) buf[0 .. n + ELLIPSIS.length];
-}
-
-unittest
-{
-    import core.stdc.stdlib : malloc, free;
-
-    // A stub face: every byte one unit wide, so a pixel budget reads as a byte
-    // count. The ellipsis is three bytes of UTF-8, hence three units.
-    extern (C) int width(mu_Font font, const(char)* str, int len)
-    {
-        return len < 0 ? cast(int) strlen(str) : len;
-    }
-    extern (C) int height(mu_Font font) { return 10; }
-
-    mu_Context* ctx = cast(mu_Context*) malloc(mu_Context.sizeof); // ~4 MB
-    assert(ctx);
-    scope(exit) free(ctx);
-    mu_init(ctx);
-    ctx.text_width  = &width;
-    ctx.text_height = &height;
-
-    char[32] buf = void;
-    assert(tab_elide(ctx, "", 40, buf) == "");
-    assert(tab_elide(ctx, "readme.txt", 40, buf) == "readme.txt"); // fits, untouched
-    assert(tab_elide(ctx, "readme.txt", 10, buf) == "readme.txt"); // exactly fits
-    assert(tab_elide(ctx, "readme.txt", 9, buf) == "readme…");     // 6 + the 3-byte …
-    assert(tab_elide(ctx, "readme.txt", 4, buf) == "r…");
-    assert(tab_elide(ctx, "readme.txt", 3, buf) is null);          // no room for a character
-    assert(tab_elide(ctx, "readme.txt", 0, buf) is null);
-
-    // The cut never lands inside a character: "é" is two bytes, and a budget of
-    // 5 pays for exactly two label bytes plus the ellipsis - which would split
-    // it - so the whole pair goes instead.
-    assert(tab_elide(ctx, "aébbbb", 6, buf) == "aé…");
-    assert(tab_elide(ctx, "aébbbb", 5, buf) == "a…");
-}
