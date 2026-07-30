@@ -1,10 +1,18 @@
-/// Splitter bar and the geometry behind a row of panes.
+/// Splitter bar and the geometry behind a line of panes.
 ///
-/// ddui has no split container, but a flat row of them needs very little: the
-/// panes are laid out from a weight each, a grab bar sits between every pair, and
+/// ddui has no split container, but a line of them needs very little: the panes
+/// are laid out from a weight each, a grab bar sits between every pair, and
 /// dragging one moves weight across that boundary. There is no tree here on
-/// purpose - panes sit side by side in one direction, the way an editor's groups
-/// do - so a pane is an index and the whole layout is two int arrays.
+/// purpose - the caller stacks these lines at most two deep, columns across the
+/// window and panes down a column - so a pane is an index and one line of them is
+/// two int arrays.
+///
+/// The geometry knows nothing of which way the line runs: it shares a count of
+/// pixels out and takes a count back, so the same two functions serve a row of
+/// columns and a column of panes. Only the bar has an axis, since it has to be
+/// drawn and has to read one half of the pointer's movement: hence split_bar_x
+/// for a boundary that moves left and right, split_bar_y for one that moves up
+/// and down.
 ///
 /// The geometry is kept apart from the drawing so it can be reasoned about (and
 /// tested) without a context: see split_layout and split_resize.
@@ -27,17 +35,40 @@ private enum mu_Color SPLIT_IDLE  = mu_Color( 30,  30,  38, 255);
 private enum mu_Color SPLIT_HOVER = mu_Color( 70,  70,  85, 255);
 private enum mu_Color SPLIT_HELD  = mu_Color(110, 170, 255, 255);
 
-/// Draw a vertical splitter bar in `r` and report what the pointer did to it.
+/// Draw an upright splitter bar in `r` and report what the pointer did to it.
 ///
-/// The bar holds focus while dragged, so a fast drag that outruns the pointer
-/// does not drop the bar the moment the cursor leaves it.
+/// The boundary between two panes side by side, so it moves left and right.
 /// Params:
 ///     ctx = ddui context.
 ///     name = Stable id string, unique among sibling widgets.
 ///     r = Where the bar goes, normally SPLIT_WIDTH wide and a pane tall.
 /// Returns: Pixels the pointer moved it this frame, 0 when it is not being
 ///          dragged. Positive is rightwards: the pane on the left grows.
-int split_bar(mu_Context* ctx, const(char)* name, mu_Rect r)
+int split_bar_x(mu_Context* ctx, const(char)* name, mu_Rect r)
+{
+    return split_bar(ctx, name, r, true);
+}
+
+/// Draw a lying-down splitter bar in `r` and report what the pointer did to it.
+///
+/// The boundary between two panes stacked one over the other, so it moves up and
+/// down.
+/// Params:
+///     ctx = ddui context.
+///     name = Stable id string, unique among sibling widgets.
+///     r = Where the bar goes, normally SPLIT_WIDTH tall and a pane wide.
+/// Returns: Pixels the pointer moved it this frame, 0 when it is not being
+///          dragged. Positive is downwards: the pane above grows.
+int split_bar_y(mu_Context* ctx, const(char)* name, mu_Rect r)
+{
+    return split_bar(ctx, name, r, false);
+}
+
+/// Both of the above. The bar holds focus while dragged, so a fast drag that
+/// outruns the pointer does not drop the bar the moment the cursor leaves it -
+/// and only the movement along its own axis counts, so wandering across the bar
+/// while dragging it does not feed the other axis in.
+private int split_bar(mu_Context* ctx, const(char)* name, mu_Rect r, bool alongX)
 {
     mu_Id id = mu_get_id(ctx, name, cast(int) strlen(name));
     mu_update_control(ctx, id, r, MU_OPT_HOLDFOCUS);
@@ -46,21 +77,24 @@ int split_bar(mu_Context* ctx, const(char)* name, mu_Rect r)
     mu_draw_rect(ctx, r, held ? SPLIT_HELD :
                          ctx.hover == id ? SPLIT_HOVER : SPLIT_IDLE);
 
-    return held ? ctx.mouse_delta.x : 0;
+    if (held == false)
+        return 0;
+    return alongX ? ctx.mouse_delta.x : ctx.mouse_delta.y;
 }
 
-/// Share `avail` pixels out over `weights`, writing one width per pane.
+/// Share `avail` pixels out over `weights`, writing one size per pane.
 ///
-/// The last pane takes whatever integer division left over, so the widths always
-/// add back up to `avail` exactly and a row of panes never leaves a seam of bare
-/// window down its right edge.
+/// The last pane takes whatever integer division left over, so the sizes always
+/// add back up to `avail` exactly and a line of panes never leaves a seam of bare
+/// window along its far edge.
 /// Params:
 ///     weights = One relative weight per pane. All-zero shares evenly.
 ///     avail = Pixels the panes have between them, the splitters excluded.
-///     widths = Filled in with a width per pane. Same length as `weights`.
-void split_layout(const(int)[] weights, int avail, int[] widths)
+///     sizes = Filled in with a size per pane, along the line. Same length as
+///             `weights`.
+void split_layout(const(int)[] weights, int avail, int[] sizes)
 {
-    assert(widths.length >= weights.length);
+    assert(sizes.length >= weights.length);
     if (weights.length == 0)
         return;
 
@@ -73,18 +107,18 @@ void split_layout(const(int)[] weights, int avail, int[] widths)
     if (total <= 0)
     {
         int even = avail / cast(int) weights.length;
-        widths[0 .. weights.length] = even;
-        widths[weights.length - 1] = avail - even * (cast(int) weights.length - 1);
+        sizes[0 .. weights.length] = even;
+        sizes[weights.length - 1] = avail - even * (cast(int) weights.length - 1);
         return;
     }
 
     int used;
     foreach (size_t i, int w; weights[0 .. $ - 1])
     {
-        widths[i] = cast(int)((cast(long) avail * w) / total);
-        used += widths[i];
+        sizes[i] = cast(int)((cast(long) avail * w) / total);
+        used += sizes[i];
     }
-    widths[weights.length - 1] = avail - used;
+    sizes[weights.length - 1] = avail - used;
 }
 
 unittest
@@ -127,15 +161,15 @@ unittest
 /// Move the boundary between panes `at` and `at + 1` by `dx` pixels.
 ///
 /// Only those two weights change and their sum is kept, so the panes either side
-/// trade space and nothing else on the row moves. The drag is clamped so neither
+/// trade space and nothing else on the line moves. The drag is clamped so neither
 /// falls below `minPx`, which is what stops a pane being shrunk to nothing and
 /// lost: a pane already at the floor simply refuses to give any more.
 /// Params:
 ///     weights = One weight per pane, edited in place.
-///     at = The boundary, counted by the pane on its left.
-///     dx = Pixels to move it by, positive rightwards.
+///     at = The boundary, counted by the pane before it.
+///     dx = Pixels to move it by, positive towards the end of the line.
 ///     avail = Pixels the panes have between them, as passed to split_layout.
-///     minPx = Narrowest a pane may become.
+///     minPx = Smallest a pane may become.
 /// Returns: The pixels actually moved, which is `dx` less whatever the clamp took.
 int split_resize(int[] weights, size_t at, int dx, int avail, int minPx)
 {
@@ -150,14 +184,14 @@ int split_resize(int[] weights, size_t at, int dx, int avail, int minPx)
 
     // Where the two panes stand now, in pixels, so the clamp can be expressed in
     // what the user is actually looking at.
-    int left  = cast(int)((cast(long) avail * weights[at])     / total);
-    int right = cast(int)((cast(long) avail * weights[at + 1]) / total);
+    int before = cast(int)((cast(long) avail * weights[at])     / total);
+    int after  = cast(int)((cast(long) avail * weights[at + 1]) / total);
 
     // Neither may cross the floor. With both already under it - a window too
-    // narrow for the panes in it - the room to give is nil rather than negative.
-    int room = left - minPx;
+    // small for the panes in it - the room to give is nil rather than negative.
+    int room = before - minPx;
     if (room < 0) room = 0;
-    int give = right - minPx;
+    int give = after - minPx;
     if (give < 0) give = 0;
     if (dx < -room) dx = -room;
     if (dx > give)  dx = give;
@@ -165,9 +199,9 @@ int split_resize(int[] weights, size_t at, int dx, int avail, int minPx)
         return 0;
 
     // Back into weights. The pair's total is preserved exactly, so repeated drags
-    // cannot leak weight out of the row.
+    // cannot leak weight out of the line.
     int sum = weights[at] + weights[at + 1];
-    weights[at] = cast(int)((cast(long)(left + dx) * total) / avail);
+    weights[at] = cast(int)((cast(long)(before + dx) * total) / avail);
     if (weights[at] > sum) weights[at] = sum;
     if (weights[at] < 0)   weights[at] = 0;
     weights[at + 1] = sum - weights[at];

@@ -376,6 +376,42 @@ int screenshot_run(string[] args)
     shot("shot-tab-drag-held.bmp");
     mu_input_mouseup(&ctx, 330, 300, MU_MOUSE_LEFT); frame(); frame();
 
+    // Scenario 10e: splitting the other way. The new pane goes under the focused
+    // one inside its own column, so the column keeps its width and the panes
+    // beside it do not move at all - which is the whole difference from the
+    // split above.
+    ui_split_down();
+    frame(); frame();
+    shot("shot-pane-split-down.bmp");
+
+    // The two stacked panes are separate views of one document, so walking the
+    // lower one leaves the upper where it was, the same as side by side. Its
+    // strip is dim until it is clicked into: only the focused pane lights up,
+    // wherever in the grid it sits.
+    foreach (i; 0 .. 12) tap(HEX_KEY_DOWN);
+    frame();
+    shot("shot-pane-stacked-apart.bmp");
+
+    // The bar between them is a splitter like any other, dragged up and down
+    // instead of left and right. The column runs from under the toolbar to the
+    // status bar, so two even panes put the boundary near the middle of the
+    // window; the click aims at the bar and the drag lifts it, taking height from
+    // the pane above and giving it to the one below.
+    enum int STACK_X = 100, STACK_Y = 308;
+    mu_input_mousemove(&ctx, STACK_X, STACK_Y); frame(); frame();
+    mu_input_mousedown(&ctx, STACK_X, STACK_Y, MU_MOUSE_LEFT); frame();
+    mu_input_mousemove(&ctx, STACK_X, STACK_Y - 120); frame(); frame();
+    shot("shot-pane-stack-resize.bmp");
+    mu_input_mouseup(&ctx, STACK_X, STACK_Y - 120, MU_MOUSE_LEFT); frame(); frame();
+
+    // Put the stack away again: the pane below closes, the one above takes its
+    // height back, and the window is left as the scenarios after this expect it.
+    // Its view shares a document with the pane it came from, so nothing is being
+    // lost and no prompt is raised.
+    ui_close_pane();
+    frame(); frame();
+    shot("shot-pane-stack-closed.bmp");
+
     // Scenario 11: the omnibar. Ctrl+E is a main-loop chord, so the scripted
     // driver calls the entry point that key does, then types into the box the
     // way SDL's text input would. The list is matched against the query as it

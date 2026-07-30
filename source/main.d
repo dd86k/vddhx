@@ -323,12 +323,17 @@ void main(string[] args)
                     //
                     // Ctrl+\ is what VS Code splits with, and it is a keycode
                     // rather than a typed character because SDL sends no text
-                    // input for a Ctrl chord. On a layout that puts backslash
-                    // behind AltGr this will not fire; the omnibar's "Split Pane"
-                    // is the route that always works.
+                    // input for a Ctrl chord. Shift stacks the new pane under the
+                    // old one instead of putting it alongside. On a layout that
+                    // puts backslash behind AltGr neither will fire; the
+                    // omnibar's "Split Pane Right" and "Split Pane Down" are the
+                    // route that always works.
                     if (event.key.key == SDLK_BACKSLASH)
                     {
-                        ui_split();
+                        if (event.key.mod & SDL_KMOD_SHIFT)
+                            ui_split_down();
+                        else
+                            ui_split();
                         break;
                     }
                     if (event.key.key >= SDLK_1 && event.key.key <= SDLK_9)

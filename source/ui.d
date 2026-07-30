@@ -58,8 +58,8 @@ private struct Document
 ///
 /// Split from Document so the same file can be open in two panels at different
 /// offsets, each with its own caret, the way an editor's windows sit over its
-/// buffers. Today the tab strip keeps one view per document; the split panes
-/// this was done for are what will make several of them at once.
+/// buffers. Splitting a pane is what makes a second one, whether the two end up
+/// side by side or one above the other.
 private struct View
 {
     /// The document this is a view of. Never null while the view is in a pane.
@@ -73,14 +73,13 @@ private struct View
 
 /// One pane: a strip of tabs over a hex panel, filling its share of the window.
 ///
-/// Panes sit side by side in a flat row with a splitter between each pair - the
-/// way an editor's groups do - rather than nesting. Each holds its own tabs and
-/// its own front tab, so the same file can be open on the left at one offset and
-/// on the right at another.
+/// Each holds its own tabs and its own front tab, so the same file can be open on
+/// the left at one offset and on the right at another. Where a pane sits is the
+/// grid's business, not its own; see Column.
 private struct Pane
 {
     /// The views this pane has tabs for, in strip order. Never empty while the
-    /// pane is in `panes`: a pane that loses its last tab is closed with it.
+    /// pane is in the grid: a pane that loses its last tab is closed with it.
     View*[] views;
 
     /// Index into `views` of the one on screen.
@@ -93,9 +92,9 @@ private struct Pane
     /// ever grows, so a steady tab count costs no allocation.
     TabItem[] items;
 
-    /// Share of the row this pane takes, against its neighbours'. Relative, so a
-    /// window resize needs no arithmetic here: the same weights simply divide a
-    /// different number of pixels.
+    /// Share of its column's height this pane takes, against the panes stacked
+    /// with it. Relative, so a window resize needs no arithmetic here: the same
+    /// weights simply divide a different number of pixels.
     int weight = SPLIT_WEIGHT;
 
     /// Where this pane was last drawn. Recorded by ui_panes so that a hit test
@@ -105,12 +104,33 @@ private struct Pane
     mu_Rect rect;
 }
 
-/// Every open document, every view onto one, and every pane showing views.
+/// One column of the grid: panes stacked top to bottom over a shared width.
+///
+/// The grid is two levels deep and no more - a row of columns across the window,
+/// a stack of panes down each column - rather than a tree. That is enough for the
+/// splits an editor actually offers, side by side and one above the other, and it
+/// keeps the layout to two passes of the same flat arithmetic (see split.d)
+/// instead of a recursion, with no interior node that can be left holding one
+/// child.
+private struct Column
+{
+    /// The panes in it, top to bottom. Never empty while the column is in
+    /// `columns`: a column that loses its last pane is closed with it.
+    Pane*[] panes;
+
+    /// Share of the window's width this column takes, against its neighbours'.
+    int weight = SPLIT_WEIGHT;
+}
+
+/// Every open document, every view onto one, and every column of panes.
 ///
 /// All held by pointer: the panel's callbacks park a Document* and a View* for
 /// ddui to hand back on every read, colour and edit, and those have to survive a
-/// document being closed out of the middle of the array. Panes likewise, since a
-/// pane's ddui ids and tab state have to outlive its neighbours closing.
+/// document being closed out of the middle of the array. Panes and columns
+/// likewise - a pane's ddui ids and tab state have to outlive its neighbours
+/// closing, and a pane is named by its pointer everywhere below rather than by
+/// where it sits, so that splitting and closing elsewhere in the grid cannot turn
+/// a reference to one pane into a reference to another.
 ///
 /// None is ever empty: startup opens a scratch buffer, closing the last tab of
 /// the last pane leaves a fresh one behind, and a pane that empties is closed
@@ -118,21 +138,32 @@ private struct Pane
 /// and a document to work on.
 private __gshared Document*[] docs;
 /// Ditto.
-private __gshared Pane*[] panes;
+private __gshared Column*[] columns;
 
-/// Index into `panes` of the one taking the keyboard. Every action below acts on
-/// this pane's front tab.
-private __gshared size_t focused;
+/// The pane taking the keyboard. Every action below acts on its front tab. Never
+/// null once ui_init has run, and always a pane still in `columns`.
+private __gshared Pane* focused;
 
-/// Scratch for laying the pane row out: the weights copied out of `panes` and the
-/// pixel widths they come to. Both only ever grow.
+/// Scratch for laying a line of panes out: the weights copied out of the grid and
+/// the pixel sizes they come to. One pair for the row of columns, one for the
+/// panes down whichever column is being drawn - reused column by column, since
+/// each is laid out and finished with before the next begins. All only ever grow.
+private __gshared int[] colWeights;
+/// Ditto.
+private __gshared int[] colSizes;
+/// Ditto.
 private __gshared int[] paneWeights;
 /// Ditto.
-private __gshared int[] paneWidths;
+private __gshared int[] paneSizes;
 
 /// Narrowest a pane may be dragged, in pixels. Enough that the offset column and
 /// a few bytes stay legible: a pane squeezed below this is not a view of anything.
 private enum int PANE_MIN = 180;
+
+/// Shortest a pane may be dragged, in pixels. Enough for its tab strip and a row
+/// or two of bytes under it, so a pane shrunk to the floor is still recognisably
+/// a pane rather than a stray strip of tabs.
+private enum int PANE_MIN_H = 120;
 
 /// Scratch buffers are numbered in creation order: "untitled", "untitled 2"...
 private __gshared uint untitled;
@@ -145,7 +176,13 @@ private __gshared OmniItem[] omniItems;
 
 /// The pane and tab each switcher row stands for, parallel to `omniItems` while
 /// the switcher is the mode showing. A row's id indexes this.
-private __gshared size_t[2][] omniTabs;
+private struct OmniTab
+{
+    Pane* pane;
+    size_t tab;
+}
+/// Ditto.
+private __gshared OmniTab[] omniTabs;
 
 /// The pane taking the keyboard, the view it has in front, and the document that
 /// view is showing. Every action below acts on one of the three: `pane` for the
@@ -153,17 +190,82 @@ private __gshared size_t[2][] omniTabs;
 /// anything about the bytes themselves.
 private ref Pane pane()
 {
-    return *panes[focused];
+    return *focused;
 }
 /// Ditto.
 private ref View view()
 {
-    return *panes[focused].views[panes[focused].current];
+    return *focused.views[focused.current];
 }
 /// Ditto.
 private ref Document doc()
 {
     return *view().doc;
+}
+
+/// Find `p` in the grid: which column it is in, and how far down that column.
+///
+/// The one place the grid is searched by pointer, so everything that has a pane
+/// and needs its neighbours goes through here rather than carrying indices about.
+/// Returns: True when the pane is in the grid, with `ci` and `pi` filled in.
+private bool ui_locate(const(Pane)* p, out size_t ci, out size_t pi)
+{
+    foreach (size_t i, Column* c; columns)
+    {
+        foreach (size_t j, Pane* q; c.panes)
+        {
+            if (q is p)
+            {
+                ci = i;
+                pi = j;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Panes in the whole grid, counted across every column.
+private size_t ui_pane_count()
+{
+    size_t n;
+    foreach (Column* c; columns)
+        n += c.panes.length;
+    return n;
+}
+
+/// The `n`th pane in reading order - columns left to right, panes top to bottom
+/// within each - or null when there are not that many.
+///
+/// This order is what Ctrl+1..9 and the next/previous pane commands count in, so
+/// a numbered jump means the same thing whichever way the window is carved up:
+/// the numbers run down a column before moving on to the next.
+private Pane* ui_pane_nth(size_t n)
+{
+    foreach (Column* c; columns)
+    {
+        if (n < c.panes.length)
+            return c.panes[n];
+        n -= c.panes.length;
+    }
+    return null;
+}
+
+/// Ditto, the other way: where `p` falls in that order, or -1 when it is not in
+/// the grid at all.
+private ptrdiff_t ui_pane_index(const(Pane)* p)
+{
+    ptrdiff_t at;
+    foreach (Column* c; columns)
+    {
+        foreach (Pane* q; c.panes)
+        {
+            if (q is p)
+                return at;
+            ++at;
+        }
+    }
+    return -1;
 }
 
 /// The main window, for parenting the native Open dialog. main sets it up front.
@@ -257,10 +359,15 @@ void ui_new_tab()
 
     // The first tab of all has no pane to go in yet: ui_init opens it before
     // anything has laid the window out.
-    if (panes.length == 0)
-        panes ~= newPane();
+    if (columns.length == 0)
+    {
+        Column* c = new Column;
+        c.panes ~= newPane();
+        columns ~= c;
+        focused = c.panes[0];
+    }
 
-    Pane* p = panes[focused];
+    Pane* p = focused;
     p.views ~= v;
     p.current = p.views.length - 1;
     v.hex.takeFocus = true; // ready to take bytes without a click first
@@ -286,16 +393,13 @@ void ui_select_tab(size_t index)
     ui_select_tab_in(focused, index);
 }
 
-/// Ditto, in a named pane - which also becomes the focused one, since bringing a
+/// Ditto, in a given pane - which also becomes the focused one, since bringing a
 /// tab forward is asking to work in it.
-private void ui_select_tab_in(size_t paneIndex, size_t index)
+private void ui_select_tab_in(Pane* p, size_t index)
 {
-    if (paneIndex >= panes.length)
+    if (p is null || index >= p.views.length)
         return;
-    Pane* p = panes[paneIndex];
-    if (index >= p.views.length)
-        return;
-    focused = paneIndex;
+    focused = p;
     p.current = index;
     p.views[index].hex.takeFocus = true; // typing follows the tab that came forward
 }
@@ -303,7 +407,7 @@ private void ui_select_tab_in(size_t paneIndex, size_t index)
 /// Step `delta` tabs along from the current one, wrapping at either end.
 void ui_cycle_tab(int delta)
 {
-    Pane* p = panes[focused];
+    Pane* p = focused;
     if (p.views.length <= 1)
         return;
 
@@ -327,33 +431,32 @@ void ui_close_tab(size_t index)
     ui_close_tab_in(focused, index);
 }
 
-/// Ditto, in a named pane. The pane is named rather than taken by pointer
-/// because the prompt below can bring another pane forward on its way past.
-private void ui_close_tab_in(size_t paneIndex, size_t index)
+/// Ditto, in a given pane. The prompt below can bring another pane forward on its
+/// way past and a Save As raised from it can run a frame's worth of work, so the
+/// pane is held by pointer: it stays the pane that was asked about however the
+/// grid is rearranged meanwhile.
+private void ui_close_tab_in(Pane* p, size_t index)
 {
-    if (paneIndex >= panes.length || index >= panes[paneIndex].views.length)
+    if (p is null || index >= p.views.length)
         return;
 
-    Document* d = panes[paneIndex].views[index].doc;
+    Document* d = p.views[index].doc;
     bool last = ui_view_count(d) <= 1;
     if (last && ui_confirm_discard(d, "Close document") != Confirm.proceed)
         return;
 
-    // Re-read the pane: the prompt above may have moved the focus to it, and a
-    // Save As raised from it may have run a frame's worth of work.
-    Pane* p = panes[paneIndex];
     p.views = p.views[0 .. index] ~ p.views[index + 1 .. $];
     if (last)
         ui_drop_document(d);
 
     if (p.views.length == 0)
     {
-        // An empty pane goes, and the row closes over it - unless it is the only
+        // An empty pane goes, and the grid closes over it - unless it is the only
         // one left, in which case there is nothing to close over it and the
         // window itself is what is being shut.
-        if (panes.length > 1)
+        if (ui_pane_count() > 1)
         {
-            ui_drop_pane(paneIndex);
+            ui_drop_pane(p);
             return;
         }
 
@@ -383,10 +486,11 @@ private void ui_close_tab_in(size_t paneIndex, size_t index)
 private size_t ui_view_count(const(Document)* d)
 {
     size_t n;
-    foreach (Pane* p; panes)
-        foreach (View* v; p.views)
-            if (v.doc is d)
-                ++n;
+    foreach (Column* c; columns)
+        foreach (Pane* p; c.panes)
+            foreach (View* v; p.views)
+                if (v.doc is d)
+                    ++n;
     return n;
 }
 
@@ -409,55 +513,74 @@ private void ui_drop_document(Document* d)
 /// is on screen. Does nothing when no view is showing it.
 private void ui_focus_document(const(Document)* d)
 {
-    foreach (size_t i, Pane* p; panes)
+    foreach (Column* c; columns)
     {
-        foreach (size_t j, View* v; p.views)
+        foreach (Pane* p; c.panes)
         {
-            if (v.doc is d)
+            foreach (size_t j, View* v; p.views)
             {
-                ui_select_tab_in(i, j);
-                return;
+                if (v.doc is d)
+                {
+                    ui_select_tab_in(p, j);
+                    return;
+                }
             }
         }
     }
 }
 
-/// Drop the pane at `index` from the row, handing its share of the width to a
-/// neighbour so the panes still fill the window between them. Its views go with
-/// it, so the caller closes those first (ui_close_tab_in does).
-private void ui_drop_pane(size_t index)
+/// Drop `p` from the grid, handing its share of the space to a neighbour so the
+/// panes still fill the window between them. Its views go with it, so the caller
+/// closes those first (ui_close_tab_in does).
+///
+/// The neighbour is the one before it in the same column, or the one after when
+/// the pane closing is at the top: either way the column's total weight is
+/// unchanged and nothing outside it moves. A pane on its own in a column takes
+/// the column with it, and then it is the column before or after that inherits
+/// the width - the same rule one level up.
+private void ui_drop_pane(Pane* p)
 {
-    if (index >= panes.length || panes.length <= 1)
+    size_t ci, pi;
+    if (ui_locate(p, ci, pi) == false || ui_pane_count() <= 1)
         return;
 
-    // The pane on the left inherits the space, or the one on the right when the
-    // pane closing is the first: either way the row's total weight is unchanged
-    // and nothing else on it moves.
-    size_t heir = index > 0 ? index - 1 : index + 1;
-    panes[heir].weight += panes[index].weight;
+    Column* c = columns[ci];
+    Pane* heir;
 
-    panes = panes[0 .. index] ~ panes[index + 1 .. $];
+    if (c.panes.length > 1)
+    {
+        // Read the neighbour out before the removal shifts the indices under it:
+        // it is the pane itself that has to be remembered, not where it sat.
+        heir = c.panes[pi > 0 ? pi - 1 : pi + 1];
+        heir.weight += p.weight;
+        c.panes = c.panes[0 .. pi] ~ c.panes[pi + 1 .. $];
+    }
+    else
+    {
+        Column* into = columns[ci > 0 ? ci - 1 : ci + 1];
+        into.weight += c.weight;
+        columns = columns[0 .. ci] ~ columns[ci + 1 .. $];
+        heir = into.panes[0];
+    }
 
-    // Closing a pane left of the focused one shifts it down; closing the focused
-    // one keeps the index, which now names its right-hand neighbour (or the new
-    // last pane, when the one that went was the last).
-    if (focused > index)
-        --focused;
-    if (focused >= panes.length)
-        focused = panes.length - 1;
-
-    pane.views[pane.current].hex.takeFocus = true; // the pane that took over
+    // Only the pane that just went can have been the one taking keys, and the
+    // neighbour that took its space is the natural place for them to land.
+    if (focused is p)
+    {
+        focused = heir;
+        focused.views[focused.current].hex.takeFocus = true;
+    }
 }
 
-/// Split the focused pane in two: a second pane opens beside it, showing the
-/// same document at the same offset, and takes the keyboard.
+/// A second view of whatever the focused pane has in front: the same document at
+/// the same offset, ready to go in a pane of its own.
 ///
-/// The same document rather than a copy of it - one editor, one undo history,
-/// one set of bookmarks - so the two panes are two windows onto one file, and an
-/// edit made in either shows up in both. What they do not share is the looking:
-/// the new view carries the old one's caret and scroll position as a starting
-/// point and then moves on its own, which is the whole use of a split here.
-void ui_split()
+/// The same document rather than a copy of it - one editor, one undo history, one
+/// set of bookmarks - so two panes are two windows onto one file, and an edit made
+/// in either shows up in both. What they do not share is the looking: the new view
+/// carries the old one's caret and scroll position as a starting point and then
+/// moves on its own, which is the whole use of a split here.
+private View* ui_split_view()
 {
     View* src = pane.views[pane.current];
 
@@ -466,17 +589,53 @@ void ui_split()
     v.hex = hex_split(src.hex); // its own scratch buffers, the same place in the file
     wireView(v);                // and its own hooks, pointing at itself
     v.hex.takeFocus = true;
+    return v;
+}
+
+/// Split the focused pane in two side by side: a second pane opens to the right
+/// of its column, in a new column of its own, and takes the keyboard.
+void ui_split()
+{
+    size_t ci, pi;
+    if (ui_locate(focused, ci, pi) == false)
+        return;
 
     Pane* p = newPane();
-    p.views ~= v;
+    p.views ~= ui_split_view();
 
-    // The new pane takes half the space of the one it came out of, so the rest of
-    // the row is left exactly as it was.
-    p.weight = panes[focused].weight / 2;
-    panes[focused].weight -= p.weight;
+    // A column of one, taking half the width of the column it came out of, so the
+    // rest of the window is left exactly as it was. Splitting a column that has
+    // panes stacked in it splits the whole column: the new one sits alongside the
+    // stack rather than reaching into it, which is what keeps the grid two deep.
+    Column* c = new Column;
+    c.panes ~= p;
+    c.weight = columns[ci].weight / 2;
+    columns[ci].weight -= c.weight;
 
-    panes = panes[0 .. focused + 1] ~ p ~ panes[focused + 1 .. $];
-    ++focused;
+    columns = columns[0 .. ci + 1] ~ c ~ columns[ci + 1 .. $];
+    focused = p;
+}
+
+/// Split the focused pane in two, one above the other: a second pane opens
+/// directly below it in the same column, and takes the keyboard.
+///
+/// The column keeps its width, so the split is felt only within it and the panes
+/// either side stay where they are.
+void ui_split_down()
+{
+    size_t ci, pi;
+    if (ui_locate(focused, ci, pi) == false)
+        return;
+
+    Pane* p = newPane();
+    p.views ~= ui_split_view();
+
+    Column* c = columns[ci];
+    p.weight = c.panes[pi].weight / 2;
+    c.panes[pi].weight -= p.weight;
+
+    c.panes = c.panes[0 .. pi + 1] ~ p ~ c.panes[pi + 1 .. $];
+    focused = p;
 }
 
 /// Close the focused pane, tab by tab, so each document still gets its say about
@@ -484,53 +643,49 @@ void ui_split()
 /// The last pane cannot be closed: there would be nothing left to draw.
 void ui_close_pane()
 {
-    if (panes.length <= 1)
+    if (ui_pane_count() <= 1)
     {
         ui_status("the last pane cannot be closed");
         return;
     }
 
-    Pane* p = panes[focused];
+    Pane* p = focused;
     for (;;)
     {
-        // Found again each round rather than held as an index: a prompt can bring
-        // another pane forward on its way past, and the last tab closing takes
-        // this pane out of the row altogether.
-        size_t at = size_t.max;
-        foreach (size_t i, Pane* q; panes)
-            if (q is p)
-            {
-                at = i;
-                break;
-            }
-        if (at == size_t.max)
+        // Looked up again each round: a prompt can bring another pane forward on
+        // its way past, and the last tab closing takes this pane out of the grid
+        // altogether, which is the loop's way out.
+        size_t ci, pi;
+        if (ui_locate(p, ci, pi) == false)
             return; // gone, which is what was asked for
 
         size_t before = p.views.length;
-        ui_close_tab_in(at, p.current);
+        ui_close_tab_in(p, p.current);
         if (p.views.length == before) // a prompt was cancelled: leave it open
             return;
     }
 }
 
-/// Move the keyboard to the pane at `index`, counted from the left. Out of range
-/// does nothing, so Ctrl+9 on a two-pane window is simply ignored.
+/// Move the keyboard to the pane at `index`, counted in the order ui_pane_nth
+/// lays out. Out of range does nothing, so Ctrl+9 on a two-pane window is simply
+/// ignored.
 void ui_focus_pane(size_t index)
 {
-    if (index >= panes.length)
+    Pane* p = ui_pane_nth(index);
+    if (p is null)
         return;
-    focused = index;
-    pane.views[pane.current].hex.takeFocus = true;
+    focused = p;
+    p.views[p.current].hex.takeFocus = true;
 }
 
 /// Step `delta` panes along from the focused one, wrapping at either end.
 void ui_cycle_pane(int delta)
 {
-    if (panes.length <= 1)
+    long count = cast(long) ui_pane_count();
+    if (count <= 1)
         return;
 
-    long count = cast(long) panes.length;
-    long at = (cast(long) focused + delta) % count;
+    long at = (ui_pane_index(focused) + delta) % count;
     if (at < 0)
         at += count;
     ui_focus_pane(cast(size_t) at);
@@ -764,9 +919,9 @@ private void wireView(View* v)
     v.hex.dataSize  = ed ? ed.size() : 0;
 }
 
-/// The pane a file is currently being dragged over, or -1 for none. Only ever
+/// The pane a file is currently being dragged over, or null for none. Only ever
 /// set while a drag is in flight over the window; see ui_drop_hover.
-private __gshared ptrdiff_t dropPane = -1;
+private __gshared Pane* dropPane;
 
 /// Colour a pane is picked out in while a file is held over it.
 private enum mu_Color DROP_EDGE = mu_Color(110, 170, 255, 255);
@@ -775,17 +930,20 @@ private enum mu_Color DROP_WASH = mu_Color(110, 170, 255, 40);
 /// Thickness of the edge, in pixels.
 private enum int DROP_EDGE_W = 2;
 
-/// The pane at a window coordinate, or -1 when the point is not in one (the
+/// The pane at a window coordinate, or null when the point is not in one (the
 /// menubar, the status bar, a splitter between two panes).
-private ptrdiff_t ui_pane_at(int x, int y)
+private Pane* ui_pane_at(int x, int y)
 {
-    foreach (size_t i, Pane* p; panes)
+    foreach (Column* c; columns)
     {
-        mu_Rect r = p.rect;
-        if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
-            return cast(ptrdiff_t) i;
+        foreach (Pane* p; c.panes)
+        {
+            mu_Rect r = p.rect;
+            if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+                return p;
+        }
     }
-    return -1;
+    return null;
 }
 
 /// A file is being dragged over the window: mark the pane under the pointer so
@@ -799,7 +957,7 @@ void ui_drop_hover(int x, int y)
 /// The drag is over, dropped or not: stop marking anything.
 void ui_drop_clear()
 {
-    dropPane = -1;
+    dropPane = null;
 }
 
 /// Open a dropped file in the pane it was dropped on, rather than in whichever
@@ -808,9 +966,9 @@ void ui_drop_clear()
 /// file. A drop that misses every pane falls back to the focused one.
 void ui_drop_file(string path, int x, int y)
 {
-    ptrdiff_t at = ui_pane_at(x, y);
-    if (at >= 0)
-        focused = cast(size_t) at;
+    Pane* at = ui_pane_at(x, y);
+    if (at)
+        focused = at;
     ui_drop_clear();
     ui_open(path);
 }
@@ -849,7 +1007,7 @@ void ui_open(string path)
     // behind as an empty tab; one another view is showing has to stay put, since
     // pulling its editor out from under that view would strand it. The tab lands
     // in the focused pane, which is where the user was working.
-    Pane* p = panes[focused];
+    Pane* p = focused;
     Document* d = p.views[p.current].doc;
     if (scratchEmpty(*d) && ui_view_count(d) == 1)
     {
@@ -1339,7 +1497,7 @@ private enum
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT,
     CMD_SKIP_NEXT, CMD_SKIP_PREV,
     CMD_MARK, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
-    CMD_SPLIT, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
+    CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
     CMD_MINIMAP, CMD_ABOUT, CMD_QUIT,
 }
 
@@ -1365,7 +1523,8 @@ private immutable Entry[] COMMANDS = [
     Entry("Previous Bookmark","[",            CMD_MARK_PREV),
     Entry("Bookmarks...",     "",             CMD_MARK_LIST),
     Entry("Clear Bookmarks",  "",             CMD_MARK_CLEAR),
-    Entry("Split Pane",       "Ctrl+\\",      CMD_SPLIT),
+    Entry("Split Pane Right", "Ctrl+\\",      CMD_SPLIT),
+    Entry("Split Pane Down",  "Ctrl+Shift+\\",CMD_SPLIT_DOWN),
     Entry("Close Pane",       "",             CMD_CLOSE_PANE),
     Entry("Next Pane",        "",             CMD_PANE_NEXT),
     Entry("Previous Pane",    "",             CMD_PANE_PREV),
@@ -1475,16 +1634,19 @@ private const(OmniItem)[] ui_omni_items()
         // tab index means nothing without the pane it counts within; omniTabs
         // carries the pair back for ui_omni_accept to act on.
         size_t at;
-        foreach (size_t pi, Pane* p; panes)
+        foreach (Column* c; columns)
         {
-            foreach (size_t ti, View* v; p.views)
+            foreach (Pane* p; c.panes)
             {
-                if (at >= omniTabs.length)
-                    omniTabs.length = at + 16;
-                omniTabs[at] = [ pi, ti ];
-                put(v.doc.title, v.doc.path.length ? v.doc.path : "not saved yet",
-                    cast(int) at, v.doc.editor && v.doc.editor.edited());
-                ++at;
+                foreach (size_t ti, View* v; p.views)
+                {
+                    if (at >= omniTabs.length)
+                        omniTabs.length = at + 16;
+                    omniTabs[at] = OmniTab(p, ti);
+                    put(v.doc.title, v.doc.path.length ? v.doc.path : "not saved yet",
+                        cast(int) at, v.doc.editor && v.doc.editor.edited());
+                    ++at;
+                }
             }
         }
         break;
@@ -1718,7 +1880,7 @@ private void ui_omni_accept(OmniMode mode, int id)
         // The id indexes the flat list the rows were built from, which carries
         // the pane the tab lives in as well as the tab itself.
         if (id >= 0 && id < omniTabs.length)
-            ui_select_tab_in(omniTabs[id][0], omniTabs[id][1]); // takes focus itself
+            ui_select_tab_in(omniTabs[id].pane, omniTabs[id].tab); // takes focus itself
         break;
     case OmniMode.command:
         ui_omni_run(id);
@@ -1964,6 +2126,7 @@ private void ui_omni_run(int id)
     case CMD_MARK_NEXT: ui_mark_step(1);       break;
     case CMD_MARK_PREV: ui_mark_step(-1);      break;
     case CMD_SPLIT:      ui_split();           break;
+    case CMD_SPLIT_DOWN: ui_split_down();      break;
     case CMD_CLOSE_PANE: ui_close_pane();      break;
     case CMD_PANE_NEXT:  ui_cycle_pane(1);     break;
     case CMD_PANE_PREV:  ui_cycle_pane(-1);    break;
@@ -2125,104 +2288,93 @@ void ui_frame(mu_Context* ctx, int width, int height)
 
 /// What a tab strip asked for this frame, held until every pane has been drawn.
 ///
-/// A close can take a whole pane out of the row, which would leave the loop over
-/// `panes` walking an array that has moved under it. So the strips only report,
-/// and the one action a frame can carry is applied once the loop is done - still
-/// this frame, so nothing the user did is left waiting for the next one.
+/// A close can take a whole pane out of the grid, which would leave the loops
+/// below walking arrays that have moved under them. So the strips only report,
+/// and the one action a frame can carry is applied once the loops are done -
+/// still this frame, so nothing the user did is left waiting for the next one.
 private struct TabRequest
 {
-    size_t pane;
+    Pane* pane;
     TabAction action;
     int index;
     int target;
 }
 
-/// Lay the panes out across the window and draw each one.
+/// A tab dragged clean out of its strip, which belongs to no pane while it is in
+/// the air: the pane it came from, which item of that pane's strip it is, and
+/// where the pointer has it. Drawn once every pane is down, so it passes over
+/// them all rather than being clipped to the lane it left.
+private struct TabGhost
+{
+    Pane* pane; // null while nothing is in the air
+    int index;
+    mu_Rect rect;
+}
+
+/// Lay the grid out across the window and draw every pane in it.
 ///
-/// A row of panes, splitters between them, sharing the width by weight. The row
-/// takes the whole window below the toolbar bar `statusH` pixels at the bottom,
-/// which the status bar then lands in.
+/// A row of columns, splitters between them, sharing the width by weight; each
+/// column then shares its height out over the panes stacked in it the same way.
+/// The grid takes the whole window below the toolbar bar `statusH` pixels at the
+/// bottom, which the status bar then lands in.
 private void ui_panes(mu_Context* ctx, int statusH)
 {
-    size_t n = panes.length;
+    size_t n = columns.length;
 
-    // One full-width row for the lot, then every pane and splitter placed inside
-    // it by hand: ddui hands an absolute rect straight back without advancing its
-    // own layout, which is what lets a column be pinned to a computed rect.
+    // One full-width row for the lot, then every column and splitter placed
+    // inside it by hand: ddui hands an absolute rect straight back without
+    // advancing its own layout, which is what lets a column be pinned to a
+    // computed rect.
     static immutable int[1] full = [ -1 ];
     mu_layout_row(ctx, 1, full.ptr, -(statusH + ctx.style.spacing + 1));
-    mu_Rect row = mu_layout_next(ctx);
+    mu_Rect grid = mu_layout_next(ctx);
 
     int bars  = cast(int)(n - 1) * SPLIT_WIDTH;
-    int avail = mu_max(0, row.w - bars);
+    int avail = mu_max(0, grid.w - bars);
 
-    if (paneWeights.length < n) paneWeights.length = n;
-    if (paneWidths.length  < n) paneWidths.length  = n;
-    foreach (size_t i, Pane* p; panes)
-        paneWeights[i] = p.weight;
-    split_layout(paneWeights[0 .. n], avail, paneWidths[0 .. n]);
+    if (colWeights.length < n) colWeights.length = n;
+    if (colSizes.length   < n) colSizes.length   = n;
+    foreach (size_t i, Column* c; columns)
+        colWeights[i] = c.weight;
+    split_layout(colWeights[0 .. n], avail, colSizes[0 .. n]);
 
     TabRequest req = { action: TabAction.none };
+    TabGhost ghost;
 
-    // A tab dragged clean out of its strip, which belongs to no pane while it is
-    // in the air: the pane it came from, which item it is, and where the pointer
-    // has it. Drawn once every pane is down, so it passes over them all.
-    mu_Rect ghost;
-    int ghostTab = -1;
-    size_t ghostPane;
-
-    int x = row.x;
-    foreach (size_t i, Pane* p; panes)
+    int x = grid.x;
+    foreach (size_t i, Column* c; columns)
     {
-        mu_Rect r = mu_Rect(x, row.y, paneWidths[i], row.h);
+        mu_Rect r = mu_Rect(x, grid.y, colSizes[i], grid.h);
         x += r.w;
-        p.rect = r; // for the out-of-frame hit test; see Pane.rect
 
-        // Clicking anywhere in a pane is what moves the keyboard to it, so the
-        // menus, the omnibar and every chord act on the pane last worked in. The
-        // panel inside also takes ddui's own focus from the same press; this is
-        // the application's notion of where the user is, alongside it.
-        if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, r))
-            focused = i;
-
-        // Everything this pane draws is scoped under the pane's own identity, so
-        // the widgets inside can go on using plain constant names and still come
-        // out unique per pane: ddui seeds every id it hashes with the top of the
-        // id stack, containers included. That is what keeps two panes from
-        // sharing one panel's scroll offset and body rect.
+        // Everything this column draws is scoped under the column's own identity,
+        // and every pane in it under the pane's, so the widgets inside can go on
+        // using plain constant names and still come out unique: ddui seeds every
+        // id it hashes with the top of the id stack, containers included. That is
+        // what keeps two panes from sharing one panel's scroll offset and body
+        // rect, and the two splitter axes from sharing a grab.
         //
-        // It is the pointer's value that is hashed - the bytes at `&p` - and not
-        // the array slot it was read from, which moves whenever `panes` grows. A
-        // pane is heap allocated and never moves, so the value is stable for as
-        // long as the pane is.
-        mu_push_id(ctx, &p, (Pane*).sizeof);
+        // It is the pointer's value that is hashed - the bytes at `&c` - and not
+        // the array slot it was read from, which moves whenever the grid grows. A
+        // column is heap allocated and never moves, so the value is stable for as
+        // long as the column is.
+        mu_push_id(ctx, &c, (Column*).sizeof);
         scope(exit) mu_pop_id(ctx);
 
-        mu_layout_set_next(ctx, r, 0);
-        mu_layout_begin_column(ctx);
-        ui_pane(ctx, *p, i, req);
-        mu_layout_end_column(ctx);
+        ui_column(ctx, c, r, req, ghost);
 
-        mu_Rect out_;
-        int outTab;
-        if (tab_drag_out(p.tabs, out_, outTab))
-        {
-            ghost = out_;
-            ghostTab = outTab;
-            ghostPane = i;
-        }
-
-        // A splitter between each pair, dragged to trade width across it. The
-        // weights are written back through the scratch the layout was built from,
-        // so the panes redraw at the new sizes on the very next frame.
+        // A splitter between each pair of columns, dragged to trade width across
+        // it. The weights are written back through the scratch the layout was
+        // built from, so the columns redraw at the new sizes on the very next
+        // frame.
         if (i + 1 < n)
         {
-            mu_Rect sr = mu_Rect(x, row.y, SPLIT_WIDTH, row.h);
+            mu_Rect sr = mu_Rect(x, grid.y, SPLIT_WIDTH, grid.h);
             x += SPLIT_WIDTH;
-            int dx = split_bar(ctx, "bar", sr);
-            if (dx && split_resize(paneWeights[0 .. n], i, dx, avail, PANE_MIN))
-                foreach (size_t j, Pane* q; panes)
-                    q.weight = paneWeights[j];
+            int dx = split_bar_x(ctx, "vbar", sr);
+            if (dx && split_resize(colWeights[0 .. n], i, dx, avail, PANE_MIN))
+                foreach (size_t j, Column* q; columns)
+                    q.weight = colWeights[j];
         }
     }
 
@@ -2230,25 +2382,29 @@ private void ui_panes(mu_Context* ctx, int statusH)
     // after the loop so it washes over the panel rather than under it: a hex
     // panel is a ddui panel, not a root container, so its commands sit inline in
     // this window's list and anything added later paints on top.
-    if (dropPane >= 0 && dropPane < panes.length)
-        ui_mark_pane(ctx, panes[dropPane].rect);
+    //
+    // The pane is looked up rather than trusted: a drag can be in flight while
+    // the window carries on working, and the pane it was last over may have been
+    // closed since.
+    if (dropPane && ui_pane_index(dropPane) >= 0)
+        ui_mark_pane(ctx, dropPane.rect);
 
     // A tab in the air between panes. The pane it would land in is picked out
     // first, then the tab itself over the top of everything - here rather than in
     // the strip it came from, which clips to its own lane and so could never have
     // shown it crossing into a neighbour.
-    if (ghostTab >= 0 && ghostPane < panes.length)
+    if (ghost.pane)
     {
-        Pane* src = panes[ghostPane];
-        ptrdiff_t onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
-        if (onto >= 0 && cast(size_t) onto != ghostPane)
-            ui_mark_pane(ctx, panes[onto].rect);
-        if (ghostTab < src.items.length)
-            tab_ghost(ctx, src.tabs, src.items[ghostTab], ghost);
+        Pane* src = ghost.pane;
+        Pane* onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
+        if (onto && onto !is src)
+            ui_mark_pane(ctx, onto.rect);
+        if (ghost.index >= 0 && ghost.index < src.items.length)
+            tab_ghost(ctx, src.tabs, src.items[ghost.index], ghost.rect);
     }
 
-    // Now that the loop is done with `panes`, whatever a strip asked for is safe
-    // to carry out, even where it drops the pane that asked.
+    // Now that the loops are done with the grid, whatever a strip asked for is
+    // safe to carry out, even where it drops the pane that asked.
     switch (req.action)
     {
     case TabAction.select: ui_select_tab_in(req.pane, req.index); break;
@@ -2259,11 +2415,67 @@ private void ui_panes(mu_Context* ctx, int statusH)
     // over. Released over nothing - a splitter, the status bar - and it stays
     // where it was, which is the way out of a drag begun by accident.
     case TabAction.detach:
-        ptrdiff_t onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
-        if (onto >= 0)
-            ui_move_view(req.pane, req.index, cast(size_t) onto);
+        ui_move_view(req.pane, req.index, ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y));
         break;
     default:
+    }
+}
+
+/// Lay one column's panes out down `r` and draw each one.
+///
+/// The same arithmetic as the row of columns above, one axis over: the height is
+/// shared by weight, a splitter sits between each pair, and dragging one trades
+/// height across that boundary alone.
+private void ui_column(mu_Context* ctx, Column* c, mu_Rect r, ref TabRequest req,
+    ref TabGhost ghost)
+{
+    size_t n = c.panes.length;
+
+    int bars  = cast(int)(n - 1) * SPLIT_WIDTH;
+    int avail = mu_max(0, r.h - bars);
+
+    if (paneWeights.length < n) paneWeights.length = n;
+    if (paneSizes.length   < n) paneSizes.length   = n;
+    foreach (size_t i, Pane* p; c.panes)
+        paneWeights[i] = p.weight;
+    split_layout(paneWeights[0 .. n], avail, paneSizes[0 .. n]);
+
+    int y = r.y;
+    foreach (size_t i, Pane* p; c.panes)
+    {
+        mu_Rect pr = mu_Rect(r.x, y, r.w, paneSizes[i]);
+        y += pr.h;
+        p.rect = pr; // for the out-of-frame hit test; see Pane.rect
+
+        // Clicking anywhere in a pane is what moves the keyboard to it, so the
+        // menus, the omnibar and every chord act on the pane last worked in. The
+        // panel inside also takes ddui's own focus from the same press; this is
+        // the application's notion of where the user is, alongside it.
+        if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, pr))
+            focused = p;
+
+        mu_push_id(ctx, &p, (Pane*).sizeof); // see ui_panes for why the pointer
+        scope(exit) mu_pop_id(ctx);
+
+        mu_layout_set_next(ctx, pr, 0);
+        mu_layout_begin_column(ctx);
+        ui_pane(ctx, p, req);
+        mu_layout_end_column(ctx);
+
+        mu_Rect out_;
+        int outTab;
+        if (tab_drag_out(p.tabs, out_, outTab))
+            ghost = TabGhost(p, outTab, out_);
+
+        if (i + 1 < n)
+        {
+            mu_Rect sr = mu_Rect(r.x, y, r.w, SPLIT_WIDTH);
+            y += SPLIT_WIDTH;
+            int dy = split_bar_y(ctx, "hbar", sr);
+            if (dy && split_resize(paneWeights[0 .. n], i, dy, avail, PANE_MIN_H))
+                foreach (size_t j, Pane* q; c.panes)
+                    q.weight = paneWeights[j];
+        }
     }
 }
 
@@ -2290,7 +2502,7 @@ private void ui_mark_pane(mu_Context* ctx, mu_Rect r)
 /// us) into storage that only ever grows, so a steady tab count costs no
 /// allocation. What the strip reports goes into `req` rather than happening here;
 /// see TabRequest.
-private void ui_pane(mu_Context* ctx, ref Pane p, size_t index, ref TabRequest req)
+private void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
 {
     if (p.items.length < p.views.length)
         p.items.length = p.views.length;
@@ -2299,13 +2511,13 @@ private void ui_pane(mu_Context* ctx, ref Pane p, size_t index, ref TabRequest r
 
     // Only the pane taking keys lights its accent, so with several panes open it
     // is never a guess which one a keystroke lands in.
-    p.tabs.unfocused = index != focused;
+    p.tabs.unfocused = p !is focused;
 
     int at, target;
     TabAction action = tab_bar(ctx, "tabs", p.tabs,
         p.items[0 .. p.views.length], cast(int) p.current, at, target);
     if (action != TabAction.none)
-        req = TabRequest(index, action, at, target);
+        req = TabRequest(p, action, at, target);
 
     View* v = p.views[p.current];
     v.hex.minimap = minimapOn != 0;
@@ -2327,12 +2539,9 @@ private void ui_pane(mu_Context* ctx, ref Pane p, size_t index, ref TabRequest r
 /// Reorder the tab strip: take the view at `from` and put it at `to`, shifting
 /// whatever it passes over the other way. The drag route, so the strip the
 /// pointer leaves behind is the order that sticks.
-private void ui_move_tab(size_t paneIndex, size_t from, size_t to)
+private void ui_move_tab(Pane* p, size_t from, size_t to)
 {
-    if (paneIndex >= panes.length)
-        return;
-    Pane* p = panes[paneIndex];
-    if (from >= p.views.length || to >= p.views.length || from == to)
+    if (p is null || from >= p.views.length || to >= p.views.length || from == to)
         return;
 
     View* moved = p.views[from];
@@ -2347,22 +2556,19 @@ private void ui_move_tab(size_t paneIndex, size_t from, size_t to)
     p.current = tab_reindex(p.current, from, to);
 }
 
-/// Hand the view at `index` in pane `fromPane` over to pane `toPane`, where it
-/// joins the end of the strip and comes to the front. The drag-between-panes
-/// route: the tab leaves one pane and lands in another.
+/// Hand the view at `index` in pane `src` over to pane `dst`, where it joins the
+/// end of the strip and comes to the front. The drag-between-panes route: the tab
+/// leaves one pane and lands in another.
 ///
-/// The view goes across whole - its caret, its scroll position, its document -
-/// so what was on screen in the old pane is what appears in the new one. A pane
+/// The view goes across whole - its caret, its scroll position, its document - so
+/// what was on screen in the old pane is what appears in the new one. A pane
 /// emptied by the move is closed, since an empty pane is not a view of anything,
-/// and the destination takes the keyboard either way.
-private void ui_move_view(size_t fromPane, size_t index, size_t toPane)
+/// and the destination takes the keyboard either way. A null `dst` - let go over
+/// a splitter or the status bar - is no move at all, which is the way out of a
+/// drag begun by accident.
+private void ui_move_view(Pane* src, size_t index, Pane* dst)
 {
-    if (fromPane >= panes.length || toPane >= panes.length || fromPane == toPane)
-        return;
-
-    Pane* src = panes[fromPane];
-    Pane* dst = panes[toPane];
-    if (index >= src.views.length)
+    if (src is null || dst is null || src is dst || index >= src.views.length)
         return;
 
     View* v = src.views[index];
@@ -2376,18 +2582,13 @@ private void ui_move_view(size_t fromPane, size_t index, size_t toPane)
     dst.current = dst.views.length - 1;
     v.hex.takeFocus = true;
 
-    // The pane it came from may have nothing left in it. Dropping it shifts the
-    // indices, so the destination is found again by identity rather than trusted
-    // to still be where it was.
-    if (src.views.length == 0 && panes.length > 1)
-        ui_drop_pane(fromPane);
+    // The pane it came from may have nothing left in it, in which case it goes -
+    // and since panes are named by pointer, the destination is unaffected by the
+    // grid closing over it.
+    if (src.views.length == 0 && ui_pane_count() > 1)
+        ui_drop_pane(src);
 
-    foreach (size_t i, Pane* q; panes)
-        if (q is dst)
-        {
-            focused = i;
-            break;
-        }
+    focused = dst;
 }
 
 /// Where the tab at `at` ends up once the one at `from` is moved to `to`. The
