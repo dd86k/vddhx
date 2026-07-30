@@ -150,71 +150,92 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
     return hit;
 }
 
-/// Walk away from `from` until the byte there differs from the byte at `from`,
-/// which is how ddhx's skip-back / skip-forward move over a run of the same data
-/// (a field of zeroes, a stretch of padding) in one keystroke.
+/// Longest element a skip may be asked to walk over, in bytes. A run is compared
+/// against a copy of itself, so this is what that copy is allowed to cost;
+/// anything selected past it is a search, not a skip.
+enum size_t SEARCH_ELEMENT_MAX = 4096;
+
+/// Walk away from `from` until the `len` bytes there differ from the `len` bytes
+/// at `from`, which is how ddhx's skip-back / skip-forward cross a run of the
+/// same data (a field of zeroes, a stretch of padding, a table of identical
+/// records) in one keystroke. `len` is 1 for the byte under a bare caret, and the
+/// length of the selection when there is one.
+///
+/// Positions are aligned to `from`, again as ddhx aligns them: only offsets
+/// `from ± n * len` are looked at, so a run of records is walked a whole record
+/// at a time rather than sliding a window through them a byte at a time.
 ///
 /// Unlike a search this never wraps: a run reaching the end of the document
-/// answers with that end, since the intent was to move even when there is
-/// nothing different left - the same reading a text editor gives Ctrl+Left on a
-/// line of one repeated character.
+/// answers with the last element that end leaves room for, since the intent was
+/// to move even when there is nothing different left - the same reading a text
+/// editor gives Ctrl+Left on a line of one repeated character.
 /// Params:
-///     from = Offset the caret is on, the byte the run is made of.
+///     from = Offset the element starts at (the low end of a selection).
+///     len = Element length in bytes, up to SEARCH_ELEMENT_MAX.
 ///     size = Document size in bytes.
 ///     backward = Walk towards the start of the document instead.
 ///     read = Byte source.
 ///     user = Opaque pointer handed to `read`.
-/// Returns: Offset of the first differing byte, the end of the document the walk
-///     ran into, or -1 when there is nothing to read.
-long search_skip(long from, long size, bool backward, SearchReadFn read, void* user)
+/// Returns: Offset the first differing element starts at, the last element the
+///     end of the document leaves room for, or -1 when there is nothing to read
+///     (an empty document, an element longer than the limit or than what is
+///     left of the document).
+long search_skip(long from, long len, long size, bool backward,
+    SearchReadFn read, void* user)
 {
-    if (read is null || size <= 0)
+    if (read is null || size <= 0 || len < 1 || len > cast(long) SEARCH_ELEMENT_MAX)
         return -1;
-    // The caret may sit on the append slot past the last byte, where there is no
-    // data to take a run from; the last byte is what a run there is made of.
-    if (from >= size)
-        from = size - 1;
-    if (from < 0)
-        from = 0;
 
-    ubyte[1] one = void;
-    ubyte[] at = read(from, one, user);
-    if (at.length == 0)
+    // The caret may sit on the append slot past the last byte, where there is no
+    // data to take a run from; the last element that fits is what a run there is
+    // made of. Same for a selection left hanging past a delete.
+    if (from + len > size)
+        from = size - len;
+    if (from < 0)
+        return -1; // the document is shorter than one element of it
+
+    size_t n = cast(size_t) len;
+    ubyte[] want = read(from, element[0 .. n], user);
+    if (want.length < n)
         return -1;
-    ubyte value = at[0];
+
+    // Whole elements per window, so a window boundary never splits one.
+    long step = cast(long)((SEARCH_WINDOW / n) * n);
 
     if (backward)
     {
         long end = from; // one past the last byte still to look at
-        while (end > 0)
+        while (end - len >= 0)
         {
-            long want = end > cast(long) SEARCH_WINDOW ? SEARCH_WINDOW : end;
-            long pos = end - want;
-            ubyte[] have = read(pos, window[0 .. cast(size_t) want], user);
-            if (have.length == 0)
+            long room = ((end - from % len) / len) * len; // aligned bytes below it
+            long take = room > step ? step : room;
+            long pos = end - take;
+            ubyte[] have = read(pos, window[0 .. cast(size_t) take], user);
+            if (have.length < n)
                 break;
-            foreach_reverse (size_t i, ubyte b; have)
-                if (b != value)
-                    return pos + cast(long) i;
+            foreach_reverse (size_t b; 0 .. have.length / n)
+                if (have[b * n .. (b + 1) * n] != element[0 .. n])
+                    return pos + cast(long)(b * n);
             end = pos;
         }
-        return 0;
+        return from % len; // ran into the start: the lowest element in step with it
     }
 
-    long pos = from + 1;
-    while (pos < size)
+    long pos = from + len;
+    while (pos + len <= size)
     {
-        long left = size - pos;
-        long want = left > cast(long) SEARCH_WINDOW ? SEARCH_WINDOW : left;
-        ubyte[] have = read(pos, window[0 .. cast(size_t) want], user);
-        if (have.length == 0)
+        long room = ((size - pos) / len) * len;
+        long take = room > step ? step : room;
+        ubyte[] have = read(pos, window[0 .. cast(size_t) take], user);
+        if (have.length < n)
             break;
-        foreach (size_t i, ubyte b; have)
-            if (b != value)
-                return pos + cast(long) i;
-        pos += cast(long) have.length;
+        foreach (size_t b; 0 .. have.length / n)
+            if (have[b * n .. (b + 1) * n] != element[0 .. n])
+                return pos + cast(long)(b * n);
+        pos += cast(long)((have.length / n) * n);
     }
-    return size - 1;
+    // Ran into the end: the last element in step with `from` that still fits.
+    return from + ((size - len - from) / len) * len;
 }
 
 private:
@@ -224,6 +245,11 @@ private:
 /// platforms this builds for care to give.
 enum size_t SEARCH_WINDOW = 64 * 1024;
 __gshared ubyte[SEARCH_WINDOW] window;
+
+/// The element a skip walks over, copied out of the document once so the windows
+/// below can be compared against it. Same reasoning as `window` for not being on
+/// the stack.
+__gshared ubyte[SEARCH_ELEMENT_MAX] element;
 
 /// Which of the pattern syntaxes a token is written in.
 enum Token
@@ -542,22 +568,36 @@ unittest
     long size = cast(long) runs.length;
 
     // Forward: off the end of the run the caret sits in, wherever in it it sits.
-    assert(search_skip(4, size, false, &reader, null) == 10);
-    assert(search_skip(9, size, false, &reader, null) == 10);
-    assert(search_skip(10, size, false, &reader, null) == 13);
-    assert(search_skip(0, size, false, &reader, null) == 1); // a run of one byte
+    assert(search_skip(4, 1, size, false, &reader, null) == 10);
+    assert(search_skip(9, 1, size, false, &reader, null) == 10);
+    assert(search_skip(10, 1, size, false, &reader, null) == 13);
+    assert(search_skip(0, 1, size, false, &reader, null) == 1); // a run of one byte
 
     // Backward: onto the last byte before the run.
-    assert(search_skip(9, size, true, &reader, null) == 3);
-    assert(search_skip(4, size, true, &reader, null) == 3);
-    assert(search_skip(12, size, true, &reader, null) == 9);
+    assert(search_skip(9, 1, size, true, &reader, null) == 3);
+    assert(search_skip(4, 1, size, true, &reader, null) == 3);
+    assert(search_skip(12, 1, size, true, &reader, null) == 9);
 
     // Running into either end without finding anything different, which still
     // moves, and the append slot past the last byte, which reads as that byte.
-    assert(search_skip(0, size, true, &reader, null) == 0);
-    assert(search_skip(15, size, false, &reader, null) == 15);
-    assert(search_skip(size, size, true, &reader, null) == 14);
-    assert(search_skip(0, 0, false, &reader, null) == -1); // empty document
+    assert(search_skip(0, 1, size, true, &reader, null) == 0);
+    assert(search_skip(15, 1, size, false, &reader, null) == 15);
+    assert(search_skip(size, 1, size, true, &reader, null) == 14);
+    assert(search_skip(0, 1, 0, false, &reader, null) == -1); // empty document
+
+    // A longer element, the shape a selection gives it. From 4 the pairs read
+    // 00 00, 00 00, 00 00, then 02 02 at 10; backwards from there the pair below
+    // is 4c 46 at 2, already different. Alignment follows the offset the walk
+    // started from, so the same walk from 3 reads its pairs on odd offsets and
+    // stops at 1 (45 4c against the 46 00 it started on).
+    assert(search_skip(4, 2, size, false, &reader, null) == 10);
+    assert(search_skip(4, 2, size, true, &reader, null) == 2);
+    assert(search_skip(3, 2, size, true, &reader, null) == 1);
+    assert(search_skip(10, 3, size, false, &reader, null) == 13); // 02 02 02, then ff ff 01
+
+    // An element the document is too short for, and one past the limit.
+    assert(search_skip(0, size + 1, size, false, &reader, null) == -1);
+    assert(search_skip(0, cast(long) SEARCH_ELEMENT_MAX + 1, size, false, &reader, null) == -1);
 }
 
 unittest

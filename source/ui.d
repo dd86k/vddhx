@@ -1428,27 +1428,52 @@ void ui_find_repeat(bool backward)
     ui_find_step(backward, from);
 }
 
-/// Move the caret past the run of identical bytes it sits in, the way ddhx's
-/// skip-back and skip-forward do: it lands on the first byte either side that
-/// holds something else, so a field of zeroes or a stretch of padding is crossed
-/// in one keystroke. A run reaching the end of the document takes the caret
-/// there rather than leaving the key looking dropped.
+/// Move past the run of identical elements at the caret, the way ddhx's skip-back
+/// and skip-forward do: it lands on the first element either side that holds
+/// something else, so a field of zeroes or a stretch of padding is crossed in one
+/// keystroke. A run reaching the end of the document goes there rather than
+/// leaving the key looking dropped.
+///
+/// The element is the byte under a bare caret, and the whole of the selection
+/// when there is one, which is how a table of records is walked a record at a
+/// time: select one, and each keystroke steps to the next one that reads
+/// differently. What is landed on stays selected, so the walk can be repeated -
+/// ddhx drops the selection there and vddhx keeps it, since a chord that cannot
+/// be pressed twice is half a movement.
 void ui_skip_element(bool backward)
 {
     if (doc.editor is null)
         return;
 
     long total = cast(long) hex_total(doc.hex);
-    long from = cast(long) doc.hex.cursor;
-    // Nothing ahead of the append slot past the last byte, so a forward skip from
-    // there has nowhere to go; backward still walks the run behind it.
-    if (total <= 0 || (from >= total && backward == false))
+    if (total <= 0)
         return;
 
-    long at = search_skip(from, total, backward, &hexRead, cast(void*) doc.editor);
+    // The selection is the element, taken from its low end the way ddhx takes it,
+    // so both directions step in the same lane. A selection can outlive the bytes
+    // it covered (a delete under it), so it is clamped to the document first.
+    long from = cast(long) hex_sel_low(doc.hex);
+    long high = cast(long) hex_sel_high(doc.hex);
+    if (high >= total)
+        high = total - 1;
+    long len = high >= from ? high - from + 1 : 1;
+    if (len > cast(long) SEARCH_ELEMENT_MAX)
+    {
+        ui_status("selection too long to skip over (max %u bytes)", SEARCH_ELEMENT_MAX);
+        return;
+    }
+    // Nothing ahead of the append slot past the last byte, so a forward skip from
+    // there has nowhere to go; backward still walks the run behind it.
+    if (from >= total && backward == false)
+        return;
+
+    long at = search_skip(from, len, total, backward, &hexRead, cast(void*) doc.editor);
     if (at < 0)
         return;
-    hex_set_caret(doc.hex, cast(size_t) at); // collapses the selection onto it
+    if (len > 1)
+        ui_select_range(cast(size_t) at, cast(size_t) len);
+    else
+        hex_set_caret(doc.hex, cast(size_t) at);
 }
 
 /// Put the selection over `len` bytes at `start` and scroll it into view. The

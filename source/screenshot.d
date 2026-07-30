@@ -16,7 +16,7 @@ import core.stdc.string : strncmp, strlen;
 import bindbc.sdl;
 import ddui;
 import hexview : HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
-    HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_DOWN;
+    HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
@@ -443,6 +443,28 @@ int screenshot_run(string[] args)
     ui_skip_element(true);
     frame();
     shot("shot-skip-back2.bmp"); // and across the whole run to 0x00
+
+    // With a selection the element is the whole of it: three identical four-byte
+    // records typed over the head of row 0x10, then the first of them selected.
+    // The skip crosses the run a record at a time and keeps the selection, so it
+    // lands on the random bytes at 0x1c - not on 0x14, which reads the same.
+    chord(MU_KEY_CTRL, HEX_KEY_HOME);
+    tap(HEX_KEY_DOWN);
+    mu_input_text(&ctx, "cafe0001cafe0001cafe0001");
+    frame();
+    chord(MU_KEY_CTRL, HEX_KEY_HOME); // back onto the head of the run
+    tap(HEX_KEY_DOWN);
+    mu_input_keydown(&ctx, MU_KEY_SHIFT);
+    tap(HEX_KEY_RIGHT); tap(HEX_KEY_RIGHT); tap(HEX_KEY_RIGHT);
+    mu_input_keyup(&ctx, MU_KEY_SHIFT);
+    frame();
+    shot("shot-skip-sel.bmp");      // cafe0001 selected at 0x10
+    ui_skip_element(false);
+    frame();
+    shot("shot-skip-sel-fwd.bmp");  // past the whole run, selection carried along
+    ui_skip_element(true);
+    frame();
+    shot("shot-skip-sel-back.bmp"); // and back onto the last record of it
 
     // A click anywhere outside puts it away without taking a row, the way every
     // quick-open box behaves: here, into the grid it was floating over.
