@@ -950,6 +950,7 @@ private enum
     CMD_NEW_TAB, CMD_OPEN, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
     CMD_CUT, CMD_COPY, CMD_PASTE, CMD_GOTO,
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT,
+    CMD_SKIP_NEXT, CMD_SKIP_PREV,
     CMD_MARK, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_MINIMAP, CMD_ABOUT, CMD_QUIT,
 }
@@ -969,6 +970,8 @@ private immutable Entry[] COMMANDS = [
     Entry("Find Next",        "Ctrl+N",       CMD_FIND_NEXT),
     Entry("Find Previous",    "Ctrl+Shift+N", CMD_FIND_PREV),
     Entry("Inspect Bytes...", "Alt+I",        CMD_INSPECT),
+    Entry("Skip Forward",     "Ctrl+Right",   CMD_SKIP_NEXT),
+    Entry("Skip Back",        "Ctrl+Left",    CMD_SKIP_PREV),
     Entry("Toggle Bookmark",  "Ctrl+B",       CMD_MARK),
     Entry("Next Bookmark",    "]",            CMD_MARK_NEXT),
     Entry("Previous Bookmark","[",            CMD_MARK_PREV),
@@ -1018,6 +1021,7 @@ private immutable Entry[] SHORTCUTS = [
     Entry("Cut / copy / paste bytes",     "Ctrl+X / C / V"),
     Entry("Undo / redo",                  "Ctrl+Z / Ctrl+Y"),
     Entry("Move the caret",               "Arrows"),
+    Entry("Skip the run under the caret", "Ctrl+Left / Ctrl+Right"),
     Entry("Extend the selection",         "Shift+Arrows"),
     Entry("Row start / row end",          "Home / End"),
     Entry("File start / file end",        "Ctrl+Home / Ctrl+End"),
@@ -1424,6 +1428,29 @@ void ui_find_repeat(bool backward)
     ui_find_step(backward, from);
 }
 
+/// Move the caret past the run of identical bytes it sits in, the way ddhx's
+/// skip-back and skip-forward do: it lands on the first byte either side that
+/// holds something else, so a field of zeroes or a stretch of padding is crossed
+/// in one keystroke. A run reaching the end of the document takes the caret
+/// there rather than leaving the key looking dropped.
+void ui_skip_element(bool backward)
+{
+    if (doc.editor is null)
+        return;
+
+    long total = cast(long) hex_total(doc.hex);
+    long from = cast(long) doc.hex.cursor;
+    // Nothing ahead of the append slot past the last byte, so a forward skip from
+    // there has nowhere to go; backward still walks the run behind it.
+    if (total <= 0 || (from >= total && backward == false))
+        return;
+
+    long at = search_skip(from, total, backward, &hexRead, cast(void*) doc.editor);
+    if (at < 0)
+        return;
+    hex_set_caret(doc.hex, cast(size_t) at); // collapses the selection onto it
+}
+
 /// Put the selection over `len` bytes at `start` and scroll it into view. The
 /// caret lands on the run's last byte, so the panel's own reveal keeps the run
 /// on screen and Shift+arrows carry on extending from there.
@@ -1493,6 +1520,8 @@ private void ui_omni_run(int id)
     case CMD_MINIMAP:   minimapOn = minimapOn ? 0 : 1; break;
     case CMD_FIND_NEXT: ui_find_repeat(false); break;
     case CMD_FIND_PREV: ui_find_repeat(true);  break;
+    case CMD_SKIP_NEXT: ui_skip_element(false); break;
+    case CMD_SKIP_PREV: ui_skip_element(true);  break;
     case CMD_MARK:      ui_mark_toggle();      break;
     case CMD_MARK_NEXT: ui_mark_step(1);       break;
     case CMD_MARK_PREV: ui_mark_step(-1);      break;

@@ -424,6 +424,26 @@ int screenshot_run(string[] args)
     ui_omni_close();
     frame();
 
+    // Scenario 16: skipping a run. The document is random bytes, so the scenario
+    // lays a run of its own first: eight zero bytes over the head of row 0, typed
+    // in OVR mode. Ctrl+Left / Ctrl+Right are main-loop chords, so the driver
+    // calls the entry point they reach.
+    chord(MU_KEY_CTRL, HEX_KEY_HOME);
+    mu_input_text(&ctx, "0000000000000000");
+    frame();
+    chord(MU_KEY_CTRL, HEX_KEY_HOME);
+    frame();
+    shot("shot-skip-run.bmp");  // caret at 0x00, on the head of the run
+    ui_skip_element(false);
+    frame();
+    shot("shot-skip-fwd.bmp");  // crossed the zeroes: caret on 0x08
+    ui_skip_element(true);
+    frame();
+    shot("shot-skip-back.bmp"); // back onto 0x07, the last byte of the run
+    ui_skip_element(true);
+    frame();
+    shot("shot-skip-back2.bmp"); // and across the whole run to 0x00
+
     // A click anywhere outside puts it away without taking a row, the way every
     // quick-open box behaves: here, into the grid it was floating over.
     ui_omni_toggle();

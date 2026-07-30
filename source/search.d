@@ -150,6 +150,73 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
     return hit;
 }
 
+/// Walk away from `from` until the byte there differs from the byte at `from`,
+/// which is how ddhx's skip-back / skip-forward move over a run of the same data
+/// (a field of zeroes, a stretch of padding) in one keystroke.
+///
+/// Unlike a search this never wraps: a run reaching the end of the document
+/// answers with that end, since the intent was to move even when there is
+/// nothing different left - the same reading a text editor gives Ctrl+Left on a
+/// line of one repeated character.
+/// Params:
+///     from = Offset the caret is on, the byte the run is made of.
+///     size = Document size in bytes.
+///     backward = Walk towards the start of the document instead.
+///     read = Byte source.
+///     user = Opaque pointer handed to `read`.
+/// Returns: Offset of the first differing byte, the end of the document the walk
+///     ran into, or -1 when there is nothing to read.
+long search_skip(long from, long size, bool backward, SearchReadFn read, void* user)
+{
+    if (read is null || size <= 0)
+        return -1;
+    // The caret may sit on the append slot past the last byte, where there is no
+    // data to take a run from; the last byte is what a run there is made of.
+    if (from >= size)
+        from = size - 1;
+    if (from < 0)
+        from = 0;
+
+    ubyte[1] one = void;
+    ubyte[] at = read(from, one, user);
+    if (at.length == 0)
+        return -1;
+    ubyte value = at[0];
+
+    if (backward)
+    {
+        long end = from; // one past the last byte still to look at
+        while (end > 0)
+        {
+            long want = end > cast(long) SEARCH_WINDOW ? SEARCH_WINDOW : end;
+            long pos = end - want;
+            ubyte[] have = read(pos, window[0 .. cast(size_t) want], user);
+            if (have.length == 0)
+                break;
+            foreach_reverse (size_t i, ubyte b; have)
+                if (b != value)
+                    return pos + cast(long) i;
+            end = pos;
+        }
+        return 0;
+    }
+
+    long pos = from + 1;
+    while (pos < size)
+    {
+        long left = size - pos;
+        long want = left > cast(long) SEARCH_WINDOW ? SEARCH_WINDOW : left;
+        ubyte[] have = read(pos, window[0 .. cast(size_t) want], user);
+        if (have.length == 0)
+            break;
+        foreach (size_t i, ubyte b; have)
+            if (b != value)
+                return pos + cast(long) i;
+        pos += cast(long) have.length;
+    }
+    return size - 1;
+}
+
 private:
 
 /// Window pulled out of the document at a time. Not on the stack: the search
@@ -454,6 +521,43 @@ unittest
     assert(search_find(n, 0, size, false, &reader, null) == -1);
     assert(search_parse("hello world, and then some more text than fits", n));
     assert(search_find(n, 0, size, false, &reader, null) == -1);
+}
+
+unittest
+{
+    // Skipping runs: a document of three runs, with singles either side of them.
+    static ubyte[] runs = [
+        0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x02, 0x02, 0x02, 0xff, 0xff, 0x01,
+    ];
+    static ubyte[] reader(long pos, ubyte[] buf, void* user)
+    {
+        if (pos >= runs.length)
+            return null;
+        size_t n = runs.length - cast(size_t) pos;
+        if (n > buf.length) n = buf.length;
+        buf[0 .. n] = runs[cast(size_t) pos .. cast(size_t) pos + n];
+        return buf[0 .. n];
+    }
+    long size = cast(long) runs.length;
+
+    // Forward: off the end of the run the caret sits in, wherever in it it sits.
+    assert(search_skip(4, size, false, &reader, null) == 10);
+    assert(search_skip(9, size, false, &reader, null) == 10);
+    assert(search_skip(10, size, false, &reader, null) == 13);
+    assert(search_skip(0, size, false, &reader, null) == 1); // a run of one byte
+
+    // Backward: onto the last byte before the run.
+    assert(search_skip(9, size, true, &reader, null) == 3);
+    assert(search_skip(4, size, true, &reader, null) == 3);
+    assert(search_skip(12, size, true, &reader, null) == 9);
+
+    // Running into either end without finding anything different, which still
+    // moves, and the append slot past the last byte, which reads as that byte.
+    assert(search_skip(0, size, true, &reader, null) == 0);
+    assert(search_skip(15, size, false, &reader, null) == 15);
+    assert(search_skip(size, size, true, &reader, null) == 14);
+    assert(search_skip(0, 0, false, &reader, null) == -1); // empty document
 }
 
 unittest

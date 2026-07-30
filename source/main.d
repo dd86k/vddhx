@@ -339,6 +339,14 @@ void main(string[] args)
                         ui_mark_toggle();
                         break;
                     }
+                    // ddhx's skip-back / skip-forward: cross the run of identical
+                    // bytes under the caret. Caught here so the arrow never
+                    // reaches the panel, which would step it one nibble instead.
+                    if (event.key.key == SDLK_LEFT || event.key.key == SDLK_RIGHT)
+                    {
+                        ui_skip_element(event.key.key == SDLK_LEFT);
+                        break;
+                    }
                 }
                 int key = muiKey(event.key.key);
                 if (key == 0)
