@@ -22,12 +22,13 @@ import std.array : Appender, appender;
 import std.format : format, sformat;
 import std.path : baseName;
 
-/// One open document: the ddhx editor that owns the bytes, where they live on
-/// disk, and the panel state viewing them. One tab shows one of these.
+/// One open document: the ddhx editor that owns the bytes, and where they live
+/// on disk. Nothing here says how the bytes are being looked at - that is a
+/// View's business - so one document can be open in several panels at once.
 private struct Document
 {
-    /// The editor backing the panel. It owns the document and all the
-    /// piece-table/undo machinery; the panel only ever reads through it.
+    /// The editor backing the document. It owns the bytes and all the
+    /// piece-table/undo machinery; a panel only ever reads through it.
     IDocumentEditor editor;
 
     /// Disk path backing the document, empty for an in-memory scratch buffer.
@@ -38,16 +39,12 @@ private struct Document
     /// What the tab shows: the file's base name, or "untitled" for a scratch.
     string title;
 
-    /// Persisted hex panel state (the selection lives here across frames). The
-    /// caret is active from the outset so it sits ready on a blank panel,
-    /// letting a file be built from scratch before anything is opened.
-    HexView hex = { active: true };
-
-    /// Bookmarked runs of bytes, sorted. Per document, since an offset only
-    /// means something against the bytes it points into. The panel tints them
-    /// and the omnibar's '@' lists them.
+    /// Bookmarked runs of bytes, sorted. Per document rather than per view,
+    /// since an offset only means something against the bytes it points into: a
+    /// mark set in one panel is a mark in every panel showing the same file.
+    /// The panel tints them and the omnibar's '@' lists them.
     ///
-    /// Edits made through the panel carry them along (see bookmark_shift), but
+    /// Edits made through a panel carry them along (see bookmark_shift), but
     /// undo and redo do not: the editor reports only where a change landed, not
     /// how many bytes it moved, so a mark can end up a few bytes off its bytes
     /// after a rolled-back insert. It is never wrong about which document it
@@ -55,13 +52,37 @@ private struct Document
     Bookmark[] marks;
 }
 
-/// Every open document, one per tab, and the index of the one on screen.
+/// One way of looking at a document: which document, plus everything about the
+/// looking - caret, selection, scroll position, entry mode.
 ///
-/// Never empty: startup opens a scratch buffer and closing the last tab leaves
-/// a fresh one behind, so the panel - and every action below - always has a
-/// document to work on.
-private __gshared Document[] docs;
+/// Split from Document so the same file can be open in two panels at different
+/// offsets, each with its own caret, the way an editor's windows sit over its
+/// buffers. Today the tab strip keeps one view per document; the split panes
+/// this was done for are what will make several of them at once.
+private struct View
+{
+    /// The document this is a view of. Never null while the view is in `views`.
+    Document* doc;
+
+    /// Persisted hex panel state (the selection lives here across frames). The
+    /// caret is active from the outset so it sits ready on a blank panel,
+    /// letting a file be built from scratch before anything is opened.
+    HexView hex = { active: true };
+}
+
+/// Every open document, and every view onto one. Both are held by pointer: the
+/// panel's callbacks park a Document* and a View* for ddui to hand back on every
+/// read, colour and edit, and those have to survive a document being closed out
+/// of the middle of the array.
+///
+/// Neither is ever empty: startup opens a scratch buffer and closing the last
+/// tab leaves a fresh one behind, so the panel - and every action below - always
+/// has something to work on.
+private __gshared Document*[] docs;
 /// Ditto.
+private __gshared View*[] views;
+
+/// Index into `views` of the one the tab strip has in front.
 private __gshared size_t current;
 
 /// Tab strip state, and the item slice handed to it. The slice is reused across
@@ -79,10 +100,17 @@ private __gshared Omnibar omni;
 /// Ditto.
 private __gshared OmniItem[] omniItems;
 
-/// The document the tab strip has in front. Every action below acts on it.
+/// The view the tab strip has in front, and the document it is showing. Every
+/// action below acts on one or the other: `view` for anything about the caret
+/// and what is on screen, `doc` for anything about the bytes themselves.
+private ref View view()
+{
+    return *views[current];
+}
+/// Ditto.
 private ref Document doc()
 {
-    return docs[current];
+    return *views[current].doc;
 }
 
 /// The main window, for parenting the native Open dialog. main sets it up front.
@@ -166,33 +194,37 @@ void ui_new_tab()
 {
     ++untitled;
 
-    Document d;
+    Document* d = new Document;
     d.editor = spawnEditor(); // no document: a zero-length, in-memory buffer
     d.title  = untitled == 1 ? "untitled" : format("untitled %u", untitled);
-
     docs ~= d;
-    current = docs.length - 1;
-    wireEditor(docs[current]);
-    doc.hex.takeFocus = true; // ready to take bytes without a click first
+
+    View* v = new View;
+    v.doc = d;
+    views ~= v;
+    current = views.length - 1;
+
+    wireView(v);
+    v.hex.takeFocus = true; // ready to take bytes without a click first
 }
 
 /// Bring the tab at `index` to the front. Out-of-range indices are ignored, so
 /// a stale index from a strip built before a close cannot strand the panel.
 void ui_select_tab(size_t index)
 {
-    if (index >= docs.length)
+    if (index >= views.length)
         return;
     current = index;
-    doc.hex.takeFocus = true; // typing follows the tab that came forward
+    view.hex.takeFocus = true; // typing follows the tab that came forward
 }
 
 /// Step `delta` tabs along from the current one, wrapping at either end.
 void ui_cycle_tab(int delta)
 {
-    if (docs.length <= 1)
+    if (views.length <= 1)
         return;
 
-    long count = cast(long) docs.length;
+    long count = cast(long) views.length;
     long at = (cast(long) current + delta) % count;
     if (at < 0)
         at += count;
@@ -202,22 +234,30 @@ void ui_cycle_tab(int delta)
 /// Close the tab at `index`, resolving unsaved edits first (the document is
 /// brought to the front for the prompt, and a cancel leaves it open). Closing
 /// the last one closes the editor too, the way a tabbed application does.
+///
+/// It is the view that closes. The document behind it only goes when nothing
+/// else is looking at it, so closing one half of a split leaves the file open in
+/// the other half - and, since the bytes are not going anywhere, that close has
+/// nothing to prompt about either.
 void ui_close_tab(size_t index)
 {
-    if (index >= docs.length)
-        return;
-    if (ui_confirm_discard(index, "Close document") != Confirm.proceed)
+    if (index >= views.length)
         return;
 
-    if (docs[index].editor)
-        docs[index].editor.close();
-    docs = docs[0 .. index] ~ docs[index + 1 .. $];
+    Document* d = views[index].doc;
+    bool last = ui_view_count(d) <= 1;
+    if (last && ui_confirm_discard(d, "Close document") != Confirm.proceed)
+        return;
 
-    if (docs.length == 0)
+    views = views[0 .. index] ~ views[index + 1 .. $];
+    if (last)
+        ui_drop_document(d);
+
+    if (views.length == 0)
     {
-        // Out of documents: quit, through SDL's own event queue so it meets the
-        // same route as the window close button. That lands next frame, and the
-        // rest of this one still has a panel to draw, so put a scratch buffer up
+        // Out of views: quit, through SDL's own event queue so it meets the same
+        // route as the window close button. That lands next frame, and the rest
+        // of this one still has a panel to draw, so put a scratch buffer up
         // meanwhile - it has no edits, so it cannot hold the quit up.
         ui_new_tab(); // it sets current itself
         SDL_Event quit; // .init zeroes the union
@@ -231,9 +271,49 @@ void ui_close_tab(size_t index)
     // tab, when the front one was the last).
     if (index < current)
         --current;
-    if (current >= docs.length)
-        current = docs.length - 1;
-    doc.hex.takeFocus = true; // the tab that took its place is ready to type in
+    if (current >= views.length)
+        current = views.length - 1;
+    view.hex.takeFocus = true; // the tab that took its place is ready to type in
+}
+
+/// How many views are currently showing `d`. Closing the last of them is what
+/// closes the document itself.
+private size_t ui_view_count(const(Document)* d)
+{
+    size_t n;
+    foreach (View* v; views)
+        if (v.doc is d)
+            ++n;
+    return n;
+}
+
+/// Close `d`'s editor and drop it from `docs`. Only for a document no view is
+/// left showing: every View.doc still in `views` has to stay valid.
+private void ui_drop_document(Document* d)
+{
+    if (d.editor)
+        d.editor.close();
+    foreach (size_t i, Document* other; docs)
+    {
+        if (other !is d)
+            continue;
+        docs = docs[0 .. i] ~ docs[i + 1 .. $];
+        return;
+    }
+}
+
+/// Bring a view of `d` to the front, so a prompt about it is a prompt about what
+/// is on screen. Does nothing when no view is showing it.
+private void ui_focus_document(const(Document)* d)
+{
+    foreach (size_t i, View* v; views)
+    {
+        if (v.doc is d)
+        {
+            current = i;
+            return;
+        }
+    }
 }
 
 /// Close the tab on screen. The Ctrl+W and File > Close Tab route.
@@ -348,6 +428,10 @@ private void ui_wakeup() nothrow
 
 /// ddui-side byte source: hand the panel's window request straight to the editor,
 /// which fills only those bytes. `user` is the editor stashed in hex.readUser.
+///
+/// The editor rather than the view, because this doubles as the byte source the
+/// search module walks a document with (see ui_find_step), where there is no
+/// panel involved at all.
 private ubyte[] hexRead(long pos, ubyte[] buf, void* user)
 {
     IDocumentEditor ed = cast(IDocumentEditor) user;
@@ -355,12 +439,13 @@ private ubyte[] hexRead(long pos, ubyte[] buf, void* user)
 }
 
 /// ddui-side colour scheme: bookmarked bytes stand out, everything else is
-/// classified the way the panel would have classified it anyway. Only the front
-/// document is ever drawn, so the marks to check are its own - the same
-/// assumption the history hooks below make.
+/// classified the way the panel would have classified it anyway. `user` is the
+/// Document stashed in hex.colorUser - the marks belong to the bytes being drawn,
+/// not to whichever document happens to be in front.
 private mu_Color hexColor(size_t offset, ubyte value, void* user)
 {
-    if (bookmark_has(doc.marks, cast(long) offset))
+    Document* d = cast(Document*) user;
+    if (d && bookmark_has(d.marks, cast(long) offset))
         return BOOKMARK_TINT;
     return hex_classify(offset, value, null);
 }
@@ -369,22 +454,26 @@ private mu_Color hexColor(size_t offset, ubyte value, void* user)
 /// The editor holds them in its piece table (nothing touches disk until a Save),
 /// so these work even on a file opened read-only. A rejected edit (a fixed-size
 /// document, say) throws; swallow it with a log rather than unwinding the frame.
+///
+/// `user` is the View that owns the panel, from hex.writeUser, which is what
+/// says whose bytes are being edited: the panel taking keys is not necessarily
+/// a view of the document in front once panels can sit side by side.
 private void hexReplace(long pos, ubyte value, void* user)
 {
-    IDocumentEditor ed = cast(IDocumentEditor) user;
+    View* v = cast(View*) user;
     try
-        ed.replace(pos, &value, 1);
+        v.doc.editor.replace(pos, &value, 1);
     catch (Exception e)
         logWarn("replace failed: %s", e.msg);
 }
 /// Ditto.
 private void hexInsert(long pos, ubyte value, void* user)
 {
-    IDocumentEditor ed = cast(IDocumentEditor) user;
+    View* v = cast(View*) user;
     try
     {
-        ed.insert(pos, &value, 1);
-        bookmark_shift(doc.marks, pos, 1); // the bytes past it all moved up one
+        v.doc.editor.insert(pos, &value, 1);
+        bookmark_shift(v.doc.marks, pos, 1); // the bytes past it all moved up one
     }
     catch (Exception e)
         logWarn("insert failed: %s", e.msg);
@@ -392,11 +481,11 @@ private void hexInsert(long pos, ubyte value, void* user)
 /// Ditto.
 private void hexRemove(long pos, long len, void* user)
 {
-    IDocumentEditor ed = cast(IDocumentEditor) user;
+    View* v = cast(View*) user;
     try
     {
-        ed.remove(pos, len);
-        bookmark_shift(doc.marks, pos, -len);
+        v.doc.editor.remove(pos, len);
+        bookmark_shift(v.doc.marks, pos, -len);
     }
     catch (Exception e)
         logWarn("remove failed: %s", e.msg);
@@ -404,48 +493,55 @@ private void hexRemove(long pos, long len, void* user)
 
 /// ddui-side history hooks: step the editor's undo/redo and hand back where the
 /// change landed so the panel can chase it with the caret. The editor's size can
-/// jump either way here, so refresh the panel's copy before returning. Only the
-/// panel on screen takes input, so the size to refresh is the front document's.
+/// jump either way here, so refresh the panel's copy before returning - the copy
+/// belonging to the view that took the keystroke, which `user` names. Any other
+/// view of the same document picks the new size up from ui_frame next frame.
 private long hexUndo(void* user)
 {
-    IDocumentEditor ed = cast(IDocumentEditor) user;
+    View* v = cast(View*) user;
     long at = -1;
     try
-        at = ed.undo();
+        at = v.doc.editor.undo();
     catch (Exception e)
         logWarn("undo failed: %s", e.msg);
-    doc.hex.dataSize = ed.size();
+    v.hex.dataSize = v.doc.editor.size();
     return at;
 }
 /// Ditto.
 private long hexRedo(void* user)
 {
-    IDocumentEditor ed = cast(IDocumentEditor) user;
+    View* v = cast(View*) user;
     long at = -1;
     try
-        at = ed.redo();
+        at = v.doc.editor.redo();
     catch (Exception e)
         logWarn("redo failed: %s", e.msg);
-    doc.hex.dataSize = ed.size();
+    v.hex.dataSize = v.doc.editor.size();
     return at;
 }
 
-/// Point a document's panel at its own editor: read, write and history hooks,
-/// plus the size the panel starts from. Called on every new tab and every Open,
-/// so editing always targets the document the tab holds.
-private void wireEditor(ref Document d)
+/// Point a view's panel at its document: read, colour, write and history hooks,
+/// plus the size the panel starts from. Called on every new view and whenever a
+/// view is pointed at a different document, so editing always targets the bytes
+/// that panel is showing.
+///
+/// The view is taken by pointer because that pointer is what the hooks above are
+/// handed back on every call, long after this returns.
+private void wireView(View* v)
 {
-    d.hex.readFn    = &hexRead;
-    d.hex.readUser  = cast(void*) d.editor;
-    d.hex.replaceFn = &hexReplace;
-    d.hex.insertFn  = &hexInsert;
-    d.hex.removeFn  = &hexRemove;
-    d.hex.undoFn    = &hexUndo;
-    d.hex.redoFn    = &hexRedo;
-    d.hex.colorFn   = &hexColor;
-    d.hex.writeUser = cast(void*) d.editor;
-    d.hex.data      = null;
-    d.hex.dataSize  = d.editor ? d.editor.size() : 0;
+    IDocumentEditor ed = v.doc.editor;
+    v.hex.readFn    = &hexRead;
+    v.hex.readUser  = cast(void*) ed;
+    v.hex.replaceFn = &hexReplace;
+    v.hex.insertFn  = &hexInsert;
+    v.hex.removeFn  = &hexRemove;
+    v.hex.undoFn    = &hexUndo;
+    v.hex.redoFn    = &hexRedo;
+    v.hex.writeUser = cast(void*) v;
+    v.hex.colorFn   = &hexColor;
+    v.hex.colorUser = cast(void*) v.doc;
+    v.hex.data      = null;
+    v.hex.dataSize  = ed ? ed.size() : 0;
 }
 
 /// Put up the native Open dialog. It runs async: ui_on_file_picked stashes the
@@ -478,29 +574,39 @@ void ui_open(string path)
     }
 
     // Built the editor without throwing, so the tab it goes in is settled now.
-    if (scratchEmpty(doc))
+    // A scratch buffer nothing else is looking at is taken over rather than left
+    // behind as an empty tab; one another view is showing has to stay put, since
+    // pulling its editor out from under that view would strand it.
+    Document* d = views[current].doc;
+    if (scratchEmpty(*d) && ui_view_count(d) == 1)
     {
-        if (doc.editor)
-            doc.editor.close(); // release the placeholder and its handle
+        if (d.editor)
+            d.editor.close(); // release the placeholder and its handle
     }
     else
     {
-        docs ~= Document.init;
-        current = docs.length - 1;
+        d = new Document;
+        docs ~= d;
+
+        View* fresh = new View;
+        fresh.doc = d;
+        views ~= fresh;
+        current = views.length - 1;
     }
 
-    Document* d = &docs[current];
     d.editor = ed;
     d.path   = path; // in-place Save now has a target
     d.title  = baseName(path);
-    wireEditor(*d);
-    d.hex.baseAddress = 0;
-    d.hex.active = true;    // show the caret right away on the first byte
-    d.hex.takeFocus = true; // and let it take keys without a click first
-    d.hex.cursor = 0;
-    d.hex.anchor = 0;
-    hex_reset_scroll(d.hex); // and scroll to the top so that first byte is visible
-    logInfo("opened %s (%s bytes)", path, d.hex.dataSize);
+
+    View* v = views[current];
+    wireView(v); // picks the new editor up, on a fresh view and a reused one alike
+    v.hex.baseAddress = 0;
+    v.hex.active = true;    // show the caret right away on the first byte
+    v.hex.takeFocus = true; // and let it take keys without a click first
+    v.hex.cursor = 0;
+    v.hex.anchor = 0;
+    hex_reset_scroll(v.hex); // and scroll to the top so that first byte is visible
+    logInfo("opened %s (%s bytes)", path, v.hex.dataSize);
 }
 
 /// Whether `d` is a scratch buffer nothing has been done to: no path, no edits
@@ -609,11 +715,11 @@ void ui_save_as()
 /// can have moved while the dialog was up. A closed one drops the write.
 private void ui_save_pending(string dest)
 {
-    foreach (ref Document d; docs)
+    foreach (Document* d; docs)
     {
         if (d.editor !is pendingSaveTarget)
             continue;
-        if (saveTo(d, dest))
+        if (saveTo(*d, dest))
         {
             d.path  = dest;
             d.title = baseName(dest);
@@ -628,18 +734,24 @@ private void ui_save_pending(string dest)
 /// rather than quietly spending the memory (and the time) on it.
 private enum COPY_MAX = 16 * 1024 * 1024;
 
-/// Resolve the byte range Copy and Cut act on, clamped to the document. Returns
-/// false when there is nothing to act on: no document, no caret placed yet, or
-/// the caret parked on the append slot past the last byte. A bare caret gives a
-/// single byte, matching what the status bar reports and what Delete removes.
-private bool ui_selection(out size_t low, out size_t high)
+/// Resolve the byte range Copy and Cut act on in `v`, clamped to its document.
+/// Returns false when there is nothing to act on: no document, no caret placed
+/// yet, or the caret parked on the append slot past the last byte. A bare caret
+/// gives a single byte, matching what the status bar reports and what Delete
+/// removes.
+///
+/// The view is a parameter rather than read off `current` because a selection is
+/// a property of a panel: with panes on screen at once, the one being copied out
+/// of is whichever has focus, not whichever the tab strip has in front. Taking
+/// the View also reaches its document, so the pair never has to be passed apart.
+private bool ui_selection(ref View v, out size_t low, out size_t high)
 {
-    if (doc.editor is null || doc.hex.active == false)
+    if (v.doc.editor is null || v.hex.active == false)
         return false;
 
-    size_t total = hex_total(doc.hex);
-    low  = hex_sel_low(doc.hex);
-    high = hex_sel_high(doc.hex);
+    size_t total = hex_total(v.hex);
+    low  = hex_sel_low(v.hex);
+    high = hex_sel_high(v.hex);
     if (total == 0 || low >= total)
         return false;
     if (high >= total)
@@ -658,7 +770,7 @@ private bool ui_selection(out size_t low, out size_t high)
 bool ui_copy()
 {
     size_t low, high;
-    if (ui_selection(low, high) == false)
+    if (ui_selection(view, low, high) == false)
         return false;
 
     size_t len = high - low + 1;
@@ -669,7 +781,7 @@ bool ui_copy()
     }
 
     static immutable string digits = "0123456789abcdef";
-    int cols = doc.hex.columns > 0 ? doc.hex.columns : 16;
+    int cols = view.hex.columns > 0 ? view.hex.columns : 16;
     Appender!(char[]) text = appender!(char[]);
     text.reserve(len * 3 + 1); // two digits and a separator each, plus the terminator
 
@@ -712,7 +824,7 @@ bool ui_copy()
 void ui_cut()
 {
     size_t low, high;
-    if (ui_selection(low, high) == false)
+    if (ui_selection(view, low, high) == false)
         return;
     if (ui_copy() == false)
         return;
@@ -726,8 +838,8 @@ void ui_cut()
     }
     bookmark_shift(doc.marks, cast(long) low, -cast(long)(high - low + 1));
 
-    doc.hex.dataSize = doc.editor.size();
-    hex_set_caret(doc.hex, low); // the caret closes onto the gap the cut left
+    view.hex.dataSize = doc.editor.size();
+    hex_set_caret(view.hex, low); // the caret closes onto the gap the cut left
 }
 
 /// Paste hex text from the clipboard at the caret.
@@ -763,9 +875,9 @@ void ui_paste()
     }
 
     IDocumentEditor editor = doc.editor;
-    size_t total = hex_total(doc.hex);
-    size_t low   = doc.hex.active ? hex_sel_low(doc.hex) : 0;
-    size_t high  = doc.hex.active ? hex_sel_high(doc.hex) : 0;
+    size_t total = hex_total(view.hex);
+    size_t low   = view.hex.active ? hex_sel_low(view.hex) : 0;
+    size_t high  = view.hex.active ? hex_sel_high(view.hex) : 0;
     if (low > total) low = total;   // a caret left stale by an outside change
     if (high > total) high = total;
     long pos = cast(long) low;
@@ -790,7 +902,7 @@ void ui_paste()
             else replacing = false;
         }
         // Past EOF there is nothing to overwrite, so append there whatever the mode.
-        if (replacing || doc.hex.insertMode || low >= total)
+        if (replacing || view.hex.insertMode || low >= total)
         {
             editor.insert(pos, bytes.ptr, bytes.length);
             bookmark_shift(doc.marks, pos, cast(long) bytes.length);
@@ -804,8 +916,8 @@ void ui_paste()
 
     // The document may have moved even on a failed insert-after-remove, so refresh
     // the panel and put the caret past the pasted run either way.
-    doc.hex.dataSize = editor.size();
-    hex_set_caret(doc.hex, ok ? low + bytes.length : low);
+    view.hex.dataSize = editor.size();
+    hex_set_caret(view.hex, ok ? low + bytes.length : low);
     if (ok)
         logInfo("pasted %s byte(s) at %#x", bytes.length, low);
 }
@@ -872,22 +984,22 @@ private enum Confirm { proceed, cancel }
 /// Button ids for the prompt, kept distinct from the unset -1 sentinel.
 private enum { btnSave = 1, btnDontSave = 2, btnCancel = 3 }
 
-/// Resolve unsaved edits in the document at `index` before an action that would
-/// discard them (closing its tab, or quitting). With no edits pending it
-/// proceeds silently; otherwise it brings that document to the front - so the
+/// Resolve unsaved edits in `d` before an action that would discard them
+/// (closing the last view of it, or quitting). With no edits pending it proceeds
+/// silently; otherwise it brings a view of that document to the front - so the
 /// prompt is about what is on screen, and a Save As raised from here lands on
 /// it - and puts up a native Save / Don't Save / Cancel prompt titled `title`.
 /// Returns Confirm.proceed when the caller may go ahead (saved or discarded) and
 /// Confirm.cancel when the user backed out, a chosen save has yet to finish, or
 /// the prompt itself failed (fail safe: never lose data on an error).
-private Confirm ui_confirm_discard(size_t index, const(char)* title)
+private Confirm ui_confirm_discard(Document* d, const(char)* title)
 {
-    if (index >= docs.length)
+    if (d is null)
         return Confirm.proceed;
-    if ((docs[index].editor && docs[index].editor.edited()) == false)
+    if ((d.editor && d.editor.edited()) == false)
         return Confirm.proceed;
 
-    current = index;
+    ui_focus_document(d);
 
     static immutable SDL_MessageBoxButtonData[3] buttons = [
         { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, btnSave,     "Save" },
@@ -896,7 +1008,7 @@ private Confirm ui_confirm_discard(size_t index, const(char)* title)
     ];
     // Name the document: with several tabs open, "the document" is not enough
     // to tell the user which one they are about to lose.
-    string message = format("%s has unsaved changes.", docs[index].title);
+    string message = format("%s has unsaved changes.", d.title);
     SDL_MessageBoxData data = {
         flags:      SDL_MESSAGEBOX_WARNING,
         window:     uiWindow,
@@ -923,12 +1035,13 @@ private Confirm ui_confirm_discard(size_t index, const(char)* title)
 
 /// Ask the user to resolve unsaved edits before quitting. True to go ahead.
 /// main calls this on every quit route so the window keeps running on Cancel.
-/// Every open tab is asked about in turn, each prompt naming its own document,
-/// and the first cancel stops the quit with the rest left untouched.
+/// Every open document is asked about in turn, each prompt naming its own, and
+/// the first cancel stops the quit with the rest left untouched. Documents
+/// rather than tabs, so a file open in two panels is only asked about once.
 bool ui_may_quit()
 {
-    foreach (size_t i, ref Document d; docs)
-        if (ui_confirm_discard(i, "Quit vddhx") != Confirm.proceed)
+    foreach (Document* d; docs)
+        if (ui_confirm_discard(d, "Quit vddhx") != Confirm.proceed)
             return false;
     return true;
 }
@@ -1044,7 +1157,7 @@ void ui_omni_toggle(char prefix = 0)
 {
     omni_toggle(omni, prefix);
     if (omni_shown(omni) == false)
-        doc.hex.takeFocus = true; // typing goes back to the bytes
+        view.hex.takeFocus = true; // typing goes back to the bytes
 }
 
 /// Put the omnibar away, whatever it was showing. The Esc route.
@@ -1053,7 +1166,7 @@ void ui_omni_close()
     if (omni_shown(omni) == false)
         return;
     omni_hide(omni);
-    doc.hex.takeFocus = true;
+    view.hex.takeFocus = true;
 }
 
 /// Fill the omnibar's row list for the mode it is currently in. Rebuilt every
@@ -1072,11 +1185,13 @@ private const(OmniItem)[] ui_omni_items()
     final switch (omni_mode(omni))
     {
     case OmniMode.switcher:
-        // The path is what tells two same-named files apart, so it is both the
-        // detail column and, through the omnibar's matching, searchable itself.
-        foreach (size_t i, ref Document d; docs)
-            put(d.title, d.path.length ? d.path : "not saved yet", cast(int) i,
-                d.editor && d.editor.edited());
+        // One row per tab, not per document: the switcher picks a panel to go
+        // to, and two views of one file are two places to be. The path is what
+        // tells two same-named files apart, so it is both the detail column and,
+        // through the omnibar's matching, searchable itself.
+        foreach (size_t i, View* v; views)
+            put(v.doc.title, v.doc.path.length ? v.doc.path : "not saved yet",
+                cast(int) i, v.doc.editor && v.doc.editor.edited());
         break;
     case OmniMode.command:
         foreach (ref immutable Entry e; COMMANDS)
@@ -1141,8 +1256,8 @@ private const(OmniItem)[] ui_omni_items()
 /// counts as an offset.
 private Address ui_goto_target()
 {
-    return address_parse(omni_query(omni), cast(long) doc.hex.cursor,
-        cast(long) hex_total(doc.hex));
+    return address_parse(omni_query(omni), cast(long) view.hex.cursor,
+        cast(long) hex_total(view.hex));
 }
 
 /// Storage the omnibar's row text is composed into, and how much of it this
@@ -1180,7 +1295,7 @@ private void ui_goto_preview(out string label, out string detail)
     }
 
     char[96] buf = void;
-    size_t total = hex_total(doc.hex);
+    size_t total = hex_total(view.hex);
     label = ui_row_text(sformat(buf, "Go to 0x%08x", a.pos));
 
     // What that offset means in the document: the decimal count and how far in
@@ -1282,8 +1397,8 @@ private ubyte[] ui_inspect_bytes(ubyte[] buf)
 {
     if (doc.editor is null)
         return null;
-    long total = cast(long) hex_total(doc.hex);
-    long at = cast(long) hex_sel_low(doc.hex);
+    long total = cast(long) hex_total(view.hex);
+    long at = cast(long) hex_sel_low(view.hex);
     if (at >= total)
         return null;
     return doc.editor.view(at, buf);
@@ -1318,10 +1433,10 @@ private void ui_omni_accept(OmniMode mode, int id)
         Address a = ui_goto_target();
         if (a.ok)
         {
-            hex_set_caret(doc.hex, cast(size_t) a.pos); // scrolls it into view
+            hex_set_caret(view.hex, cast(size_t) a.pos); // scrolls it into view
             logInfo("went to %#x", a.pos);
         }
-        doc.hex.takeFocus = true;
+        view.hex.takeFocus = true;
         break;
     case OmniMode.find:
         // Take the pattern as the one to repeat, then look for it from just past
@@ -1331,9 +1446,9 @@ private void ui_omni_accept(OmniMode mode, int id)
         {
             lastNeedle = needle;
             haveNeedle = true;
-            ui_find_step(false, cast(long) doc.hex.cursor + 1);
+            ui_find_step(view, false, cast(long) view.hex.cursor + 1);
         }
-        doc.hex.takeFocus = true;
+        view.hex.takeFocus = true;
         break;
     case OmniMode.inspect:
         // Nothing to jump to: the reading itself is the answer, so it goes to
@@ -1350,15 +1465,15 @@ private void ui_omni_accept(OmniMode mode, int id)
             else
                 logWarn("copy failed: %s", SDL_GetError().fromStringz);
         }
-        doc.hex.takeFocus = true;
+        view.hex.takeFocus = true;
         break;
     case OmniMode.bookmark:
         if (id >= 0 && id < doc.marks.length)
-            ui_mark_select(id);
-        doc.hex.takeFocus = true;
+            ui_mark_select(view, id);
+        view.hex.takeFocus = true;
         break;
     case OmniMode.help:
-        doc.hex.takeFocus = true; // nothing to run: the sheet is there to be read
+        view.hex.takeFocus = true; // nothing to run: the sheet is there to be read
         break;
     }
 }
@@ -1395,28 +1510,29 @@ private __gshared Needle lastNeedle;
 /// Ditto.
 private __gshared bool haveNeedle;
 
-/// Look for the last pattern from `from`, in whichever direction, and put the
-/// selection on what turns up. Reports through the status bar either way: a
-/// search that found nothing has to say so, or it reads as a dropped keystroke.
-private void ui_find_step(bool backward, long from)
+/// Look through `v`'s document for the last pattern from `from`, in whichever
+/// direction, and put that view's selection on what turns up. Reports through the
+/// status bar either way: a search that found nothing has to say so, or it reads
+/// as a dropped keystroke.
+private void ui_find_step(ref View v, bool backward, long from)
 {
     if (haveNeedle == false)
     {
         ui_status("no pattern to find yet");
         return;
     }
-    if (doc.editor is null)
+    if (v.doc.editor is null)
         return;
 
-    long at = search_find(lastNeedle, from, cast(long) hex_total(doc.hex),
-        backward, &hexRead, cast(void*) doc.editor);
+    long at = search_find(lastNeedle, from, cast(long) hex_total(v.hex),
+        backward, &hexRead, cast(void*) v.doc.editor);
     if (at < 0)
     {
         ui_status("not found");
         return;
     }
 
-    ui_select_range(cast(size_t) at, lastNeedle.length);
+    ui_select_range(v, cast(size_t) at, lastNeedle.length);
     ui_status("found at %#x", at);
 }
 
@@ -1424,8 +1540,8 @@ private void ui_find_step(bool backward, long from)
 /// what keeps a repeat moving instead of finding the same match again.
 void ui_find_repeat(bool backward)
 {
-    long from = cast(long) doc.hex.cursor + (backward ? -1 : 1);
-    ui_find_step(backward, from);
+    long from = cast(long) view.hex.cursor + (backward ? -1 : 1);
+    ui_find_step(view, backward, from);
 }
 
 /// Move past the run of identical elements at the caret, the way ddhx's skip-back
@@ -1445,15 +1561,15 @@ void ui_skip_element(bool backward)
     if (doc.editor is null)
         return;
 
-    long total = cast(long) hex_total(doc.hex);
+    long total = cast(long) hex_total(view.hex);
     if (total <= 0)
         return;
 
     // The selection is the element, taken from its low end the way ddhx takes it,
     // so both directions step in the same lane. A selection can outlive the bytes
     // it covered (a delete under it), so it is clamped to the document first.
-    long from = cast(long) hex_sel_low(doc.hex);
-    long high = cast(long) hex_sel_high(doc.hex);
+    long from = cast(long) hex_sel_low(view.hex);
+    long high = cast(long) hex_sel_high(view.hex);
     if (high >= total)
         high = total - 1;
     long len = high >= from ? high - from + 1 : 1;
@@ -1471,24 +1587,24 @@ void ui_skip_element(bool backward)
     if (at < 0)
         return;
     if (len > 1)
-        ui_select_range(cast(size_t) at, cast(size_t) len);
+        ui_select_range(view, cast(size_t) at, cast(size_t) len);
     else
-        hex_set_caret(doc.hex, cast(size_t) at);
+        hex_set_caret(view.hex, cast(size_t) at);
 }
 
-/// Put the selection over `len` bytes at `start` and scroll it into view. The
+/// Put `v`'s selection over `len` bytes at `start` and scroll it into view. The
 /// caret lands on the run's last byte, so the panel's own reveal keeps the run
 /// on screen and Shift+arrows carry on extending from there.
-private void ui_select_range(size_t start, size_t len)
+private void ui_select_range(ref View v, size_t start, size_t len)
 {
-    hex_set_caret(doc.hex, start); // clamps, actives, and scrolls onto it
+    hex_set_caret(v.hex, start); // clamps, actives, and scrolls onto it
     if (len > 1)
     {
-        size_t total = hex_total(doc.hex);
+        size_t total = hex_total(v.hex);
         size_t end = start + len - 1;
         if (end >= total && total)
             end = total - 1;
-        doc.hex.cursor = end;
+        v.hex.cursor = end;
     }
 }
 
@@ -1497,8 +1613,8 @@ private void ui_select_range(size_t start, size_t len)
 /// header is worth coming back to, a lone byte of it rarely is.
 void ui_mark_toggle()
 {
-    long at  = cast(long) hex_sel_low(doc.hex);
-    long len = cast(long) hex_sel_high(doc.hex) - at + 1;
+    long at  = cast(long) hex_sel_low(view.hex);
+    long len = cast(long) hex_sel_high(view.hex) - at + 1;
 
     bool set = bookmark_toggle(doc.marks, at, len);
     if (len > 1)
@@ -1512,20 +1628,20 @@ void ui_mark_toggle()
 /// select the whole of what was marked there.
 void ui_mark_step(int dir)
 {
-    ptrdiff_t index = bookmark_step(doc.marks, cast(long) hex_sel_low(doc.hex), dir);
+    ptrdiff_t index = bookmark_step(doc.marks, cast(long) hex_sel_low(view.hex), dir);
     if (index < 0)
     {
         ui_status("no bookmarks in this document");
         return;
     }
-    ui_mark_select(index);
+    ui_mark_select(view, index);
 }
 
-/// Put the selection over the bookmark at `index` in the front document's list.
-private void ui_mark_select(ptrdiff_t index)
+/// Put `v`'s selection over the bookmark at `index` in its document's list.
+private void ui_mark_select(ref View v, ptrdiff_t index)
 {
-    ui_select_range(cast(size_t) doc.marks[index].at,
-        cast(size_t) doc.marks[index].length);
+    ui_select_range(v, cast(size_t) v.doc.marks[index].at,
+        cast(size_t) v.doc.marks[index].length);
 }
 
 /// Run one command from the '>' list. Everything here is an entry point the
@@ -1573,7 +1689,7 @@ private void ui_omni_run(int id)
     default:
         return;
     }
-    doc.hex.takeFocus = true; // whatever it was, the bytes take keys again after
+    view.hex.takeFocus = true; // whatever it was, the bytes take keys again after
 }
 
 /// Build one frame of UI. Call between mu_begin and mu_end.
@@ -1648,13 +1764,13 @@ void ui_frame(mu_Context* ctx, int width, int height)
 
         // Tabs last, so the strip sits directly on top of the document it names.
         ui_tabs(ctx);
-        doc.hex.minimap = minimapOn != 0;
+        view.hex.minimap = minimapOn != 0;
 
         // The editor's size shifts as inserts and deletes land, so refresh the
         // panel's copy each frame before it draws; the panel keeps it live within
         // a frame, this keeps it authoritative across them.
         if (doc.editor)
-            doc.hex.dataSize = doc.editor.size();
+            view.hex.dataSize = doc.editor.size();
 
         // The panel takes the rest of the window, save a strip at the bottom
         // reserved for the status bar. Feed it the monospace face. Every tab
@@ -1662,7 +1778,7 @@ void ui_frame(mu_Context* ctx, int width, int height)
         // ddui container is shared and the per-document state lives in HexView.
         int statusH = ctx.text_height(ctx.style.font) + 6;
         // Check return with `& MU_RES_CHANGE`
-        cast(void)hex_view(ctx, "hexpanel", doc.hex, render_font_mono(), statusH);
+        cast(void)hex_view(ctx, "hexpanel", view.hex, render_font_mono(), statusH);
 
         // Status bar: edit mode, a dirty marker, caret offset and selection length,
         // echoing what the panel reports back through its state. Pinned to the
@@ -1672,12 +1788,12 @@ void ui_frame(mu_Context* ctx, int width, int height)
         mu_Rect sr = mu_layout_next(ctx);
         mu_draw_rect(ctx, sr, mu_Color(30, 30, 40, 255));
         char[80] statusbuf = void;
-        size_t selLen = hex_total(doc.hex) ?
-            hex_sel_high(doc.hex) - hex_sel_low(doc.hex) + 1 : 0;
-        string mode  = doc.hex.insertMode ? "INS" : "OVR";
+        size_t selLen = hex_total(view.hex) ?
+            hex_sel_high(view.hex) - hex_sel_low(view.hex) + 1 : 0;
+        string mode  = view.hex.insertMode ? "INS" : "OVR";
         string dirty = (doc.editor && doc.editor.edited()) ? " *" : "";
         char[] status = sformat(statusbuf, "%s%s  offset %08X  selected %u byte(s)",
-            mode, dirty, doc.hex.cursor, selLen);
+            mode, dirty, view.hex.cursor, selLen);
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
         mu_draw_text(ctx, ctx.style.font, cast(string) status,
@@ -1715,27 +1831,28 @@ void ui_frame(mu_Context* ctx, int width, int height)
     {
     case OmniAction.none:    break;
     case OmniAction.accept:  ui_omni_accept(mode, chosen); break;
-    case OmniAction.dismiss: doc.hex.takeFocus = true;     break;
+    case OmniAction.dismiss: view.hex.takeFocus = true;     break;
     }
 }
 
-/// Draw the tab strip and act on what was clicked: one tab per open document,
-/// showing its name and an unsaved-changes dot, plus the trailing + button.
+/// Draw the tab strip and act on what was clicked: one tab per view, named after
+/// the document it shows and carrying its unsaved-changes dot, plus the trailing
+/// + button. Two views of one file are two tabs, both named the same.
 ///
-/// The item slice is rebuilt every frame from `docs` (titles and dirty flags
+/// The item slice is rebuilt every frame from `views` (titles and dirty flags
 /// both move under us) into storage that only ever grows, so a steady tab count
-/// costs no allocation. Actions land straight away: a close can drop the
-/// document the rest of this frame would have drawn, which is why everything
-/// below the strip reads through `doc` rather than holding a reference.
+/// costs no allocation. Actions land straight away: a close can drop the view
+/// the rest of this frame would have drawn, which is why everything below the
+/// strip reads through `view` and `doc` rather than holding a reference.
 private void ui_tabs(mu_Context* ctx)
 {
-    if (tabItems.length < docs.length)
-        tabItems.length = docs.length;
-    foreach (size_t i, ref Document d; docs)
-        tabItems[i] = TabItem(d.title, d.editor && d.editor.edited());
+    if (tabItems.length < views.length)
+        tabItems.length = views.length;
+    foreach (size_t i, View* v; views)
+        tabItems[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited());
 
     int index;
-    TabAction action = tab_bar(ctx, "tabs", tabstrip, tabItems[0 .. docs.length],
+    TabAction action = tab_bar(ctx, "tabs", tabstrip, tabItems[0 .. views.length],
         cast(int) current, index);
     switch (action)
     {
