@@ -1003,34 +1003,37 @@ void ui_open(string path)
     }
 
     // Built the editor without throwing, so the tab it goes in is settled now.
-    // A scratch buffer nothing else is looking at is taken over rather than left
-    // behind as an empty tab; one another view is showing has to stay put, since
-    // pulling its editor out from under that view would strand it. The tab lands
-    // in the focused pane, which is where the user was working.
+    // The tab lands in the focused pane, which is where the user was working - or,
+    // on a drop, the pane the file was let go over.
     Pane* p = focused;
-    Document* d = p.views[p.current].doc;
-    if (scratchEmpty(*d) && ui_view_count(d) == 1)
-    {
-        if (d.editor)
-            d.editor.close(); // release the placeholder and its handle
-    }
-    else
-    {
-        d = new Document;
-        docs ~= d;
+    View* v = p.views[p.current];
+    Document* scratch = v.doc;
 
-        View* fresh = new View;
-        fresh.doc = d;
-        p.views ~= fresh;
-        p.current = p.views.length - 1;
-    }
-
+    Document* d = new Document;
+    docs ~= d;
     d.editor = ed;
     d.path   = path; // in-place Save now has a target
     d.title  = baseName(path);
 
-    View* v = p.views[p.current];
-    v.doc = d;
+    if (scratchEmpty(*scratch))
+    {
+        // The tab in front has nothing in it, so the file takes it over rather
+        // than leaving an empty tab behind. It is the *view* that is reused: the
+        // scratch document itself only goes if this was the last view of it, since
+        // another pane showing the same one (the state a fresh split leaves) still
+        // has bytes to draw and an editor to draw them through.
+        v.doc = d;
+        if (ui_view_count(scratch) == 0)
+            ui_drop_document(scratch);
+    }
+    else
+    {
+        v = new View;
+        v.doc = d;
+        p.views ~= v;
+        p.current = p.views.length - 1;
+    }
+
     wireView(v); // picks the new editor up, on a fresh view and a reused one alike
     v.hex.baseAddress = 0;
     v.hex.active = true;    // show the caret right away on the first byte
