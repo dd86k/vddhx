@@ -320,6 +320,18 @@ int screenshot_run(string[] args)
     frame();
     shot("shot-pane-focus.bmp");
 
+    // A file dragged over the window picks out the pane under the pointer, and
+    // dropping it opens it there rather than in whichever pane had the keyboard.
+    // The focus is on the left pane after the click above, so a drop aimed at the
+    // rightmost one is only in the right place if the coordinates are honoured.
+    ui_drop_hover(700, 300);
+    frame();
+    shot("shot-drop-hover.bmp");
+
+    ui_drop_file("/tmp/other.bin", 700, 300);
+    frame(); frame();
+    shot("shot-drop-landed.bmp");
+
     // Scenario 11: the omnibar. Ctrl+E is a main-loop chord, so the scripted
     // driver calls the entry point that key does, then types into the box the
     // way SDL's text input would. The list is matched against the query as it

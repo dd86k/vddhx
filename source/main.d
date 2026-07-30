@@ -180,11 +180,24 @@ void main(string[] args)
                 }
                 mu_input_text(ctx, event.text.text);
                 break;
+            case SDL_EVENT_DROP_POSITION:
+                // The drag is over the window and still moving: light up the pane
+                // it is pointing at, so where the file would land is visible
+                // before the button comes up.
+                ui_drop_hover(cast(int) event.drop.x, cast(int) event.drop.y);
+                break;
+            case SDL_EVENT_DROP_BEGIN, SDL_EVENT_DROP_COMPLETE:
+                // Either end of a drag: nothing is being pointed at yet, or the
+                // drag has finished (dropped or carried back out of the window).
+                ui_drop_clear();
+                break;
             case SDL_EVENT_DROP_FILE:
-                // A file was dropped onto the window: open it. SDL3 owns the
-                // path string (no free), so copy it before it goes away.
+                // A file was dropped onto the window: open it in the pane it
+                // landed on, which the event carries the coordinates of. SDL3
+                // owns the path string (no free), so copy it before it goes away.
                 if (event.drop.data)
-                    ui_open(event.drop.data.fromStringz.idup);
+                    ui_drop_file(event.drop.data.fromStringz.idup,
+                        cast(int) event.drop.x, cast(int) event.drop.y);
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_EVENT_MOUSE_BUTTON_UP:
                 int btn = mouseButton(event.button.button);

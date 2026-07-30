@@ -98,6 +98,12 @@ private struct Pane
     /// different number of pixels.
     int weight = SPLIT_WEIGHT;
 
+    /// Where this pane was last drawn. Recorded by ui_panes so that a hit test
+    /// can be made from outside a frame: a file dragged over the window arrives
+    /// as an SDL event carrying a window coordinate and nothing else, and the
+    /// pane it is pointing at has to be worked out from that alone.
+    mu_Rect rect;
+
     /// ddui id strings for the panel, the strip and the splitter on this pane's
     /// right, NUL-terminated. Built once from a serial number that is never
     /// reused, so a pane keeps its ddui container state - and its scroll position
@@ -778,6 +784,57 @@ private void wireView(View* v)
     v.hex.colorUser = cast(void*) v.doc;
     v.hex.data      = null;
     v.hex.dataSize  = ed ? ed.size() : 0;
+}
+
+/// The pane a file is currently being dragged over, or -1 for none. Only ever
+/// set while a drag is in flight over the window; see ui_drop_hover.
+private __gshared ptrdiff_t dropPane = -1;
+
+/// Colour a pane is picked out in while a file is held over it.
+private enum mu_Color DROP_EDGE = mu_Color(110, 170, 255, 255);
+/// Ditto, the wash over the pane itself, translucent so the bytes read through.
+private enum mu_Color DROP_WASH = mu_Color(110, 170, 255, 40);
+/// Thickness of the edge, in pixels.
+private enum int DROP_EDGE_W = 2;
+
+/// The pane at a window coordinate, or -1 when the point is not in one (the
+/// menubar, the status bar, a splitter between two panes).
+private ptrdiff_t ui_pane_at(int x, int y)
+{
+    foreach (size_t i, Pane* p; panes)
+    {
+        mu_Rect r = p.rect;
+        if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+            return cast(ptrdiff_t) i;
+    }
+    return -1;
+}
+
+/// A file is being dragged over the window: mark the pane under the pointer so
+/// the user can see where it would land before letting go. Called for every
+/// position report SDL sends while the drag is in flight.
+void ui_drop_hover(int x, int y)
+{
+    dropPane = ui_pane_at(x, y);
+}
+
+/// The drag is over, dropped or not: stop marking anything.
+void ui_drop_clear()
+{
+    dropPane = -1;
+}
+
+/// Open a dropped file in the pane it was dropped on, rather than in whichever
+/// pane happened to have the keyboard. Dropping is a pointing gesture: the pane
+/// under the cursor is the one being asked for, and it takes the focus with the
+/// file. A drop that misses every pane falls back to the focused one.
+void ui_drop_file(string path, int x, int y)
+{
+    ptrdiff_t at = ui_pane_at(x, y);
+    if (at >= 0)
+        focused = cast(size_t) at;
+    ui_drop_clear();
+    ui_open(path);
 }
 
 /// Put up the native Open dialog. It runs async: ui_on_file_picked stashes the
@@ -2133,6 +2190,7 @@ private void ui_panes(mu_Context* ctx, int statusH)
     {
         mu_Rect r = mu_Rect(x, row.y, paneWidths[i], row.h);
         x += r.w;
+        p.rect = r; // for the out-of-frame hit test; see Pane.rect
 
         // Clicking anywhere in a pane is what moves the keyboard to it, so the
         // menus, the omnibar and every chord act on the pane last worked in. The
@@ -2158,6 +2216,20 @@ private void ui_panes(mu_Context* ctx, int statusH)
                 foreach (size_t j, Pane* q; panes)
                     q.weight = paneWeights[j];
         }
+    }
+
+    // A file held over the window picks out the pane it would land in. Drawn
+    // after the loop so it washes over the panel rather than under it: a hex
+    // panel is a ddui panel, not a root container, so its commands sit inline in
+    // this window's list and anything added later paints on top.
+    if (dropPane >= 0 && dropPane < panes.length)
+    {
+        mu_Rect r = panes[dropPane].rect;
+        mu_draw_rect(ctx, r, DROP_WASH);
+        mu_draw_rect(ctx, mu_Rect(r.x, r.y, r.w, DROP_EDGE_W), DROP_EDGE);
+        mu_draw_rect(ctx, mu_Rect(r.x, r.y + r.h - DROP_EDGE_W, r.w, DROP_EDGE_W), DROP_EDGE);
+        mu_draw_rect(ctx, mu_Rect(r.x, r.y, DROP_EDGE_W, r.h), DROP_EDGE);
+        mu_draw_rect(ctx, mu_Rect(r.x + r.w - DROP_EDGE_W, r.y, DROP_EDGE_W, r.h), DROP_EDGE);
     }
 
     // Now that the loop is done with `panes`, whatever a strip asked for is safe
