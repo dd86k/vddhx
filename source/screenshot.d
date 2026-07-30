@@ -332,6 +332,50 @@ int screenshot_run(string[] args)
     frame(); frame();
     shot("shot-drop-landed.bmp");
 
+    // A tab dragged out of its own strip and into another pane. other.bin sits in
+    // the rightmost pane after the drop above; press its tab, pull the pointer
+    // left across the window, and it comes out of the strip - drawn over the
+    // panes it crosses, with the pane it would land in picked out.
+    mu_Vec2 leaving = find("othe");
+    int leavingY = leaving.y + 3;
+    mu_input_mousemove(&ctx, leaving.x + 3, leavingY); frame(); frame();
+    mu_input_mousedown(&ctx, leaving.x + 3, leavingY, MU_MOUSE_LEFT); frame();
+    mu_input_mousemove(&ctx, 300, leavingY + 120); frame(); frame();
+    shot("shot-tab-detached.bmp");
+
+    // Letting go over the leftmost pane hands the tab to it: the view goes across
+    // whole, caret and all, and the destination takes the keyboard.
+    mu_input_mouseup(&ctx, 300, leavingY + 120, MU_MOUSE_LEFT); frame(); frame();
+    shot("shot-tab-handed-over.bmp");
+
+    // Dragging out a pane's *last* tab leaves that pane with nothing to show, so
+    // the row shuts over it and its width goes to a neighbour. The rightmost pane
+    // is down to one tab after the handover above; its strip sits around x=630.
+    mu_input_mousemove(&ctx, 630, leavingY); frame(); frame();
+    mu_input_mousedown(&ctx, 630, leavingY, MU_MOUSE_LEFT); frame();
+    mu_input_mousemove(&ctx, 200, leavingY + 200); frame(); frame();
+    mu_input_mouseup(&ctx, 200, leavingY + 200, MU_MOUSE_LEFT); frame(); frame();
+    shot("shot-pane-emptied.bmp");
+
+    // Dragging a tab down over its own pane's grid must not drag the selection
+    // with it. The panel is handed focus when its tab is picked (so typing lands
+    // in the bytes after a tab switch), which put it in reach of a drag it never
+    // started. Give this pane the keyboard so the status bar is reporting its
+    // caret, then pull the front tab down across the grid: the offset has to read
+    // the same in both shots. It used to sweep out a 208-byte selection.
+    //
+    // The pull is straight down, which also covers the drag threshold: measured
+    // on x alone, this gesture lifted nothing at all.
+    click(100, 150);
+    frame();
+    shot("shot-tab-drag-caret.bmp");
+
+    mu_input_mousemove(&ctx, 330, 49); frame(); frame();
+    mu_input_mousedown(&ctx, 330, 49, MU_MOUSE_LEFT); frame();
+    mu_input_mousemove(&ctx, 330, 300); frame(); frame();
+    shot("shot-tab-drag-held.bmp");
+    mu_input_mouseup(&ctx, 330, 300, MU_MOUSE_LEFT); frame(); frame();
+
     // Scenario 11: the omnibar. Ctrl+E is a main-loop chord, so the scripted
     // driver calls the entry point that key does, then types into the box the
     // way SDL's text input would. The list is matched against the query as it

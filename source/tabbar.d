@@ -59,16 +59,30 @@ struct TabBar
     // the press and cleared on the release, whether or not it turned into a drag.
     int held = -1;
 
-    // Mouse x when the button went down, against which the drag threshold is
-    // measured, and the grab point inside the tab, so a tab picked up by its
-    // right edge does not jump under the pointer.
-    int heldX;
+    // Where the pointer was when the button went down, against which the drag
+    // threshold is measured, and the grab point inside the tab, so a tab picked
+    // up by its right edge does not jump under the pointer. Both axes: a tab
+    // pulled straight down out of its strip - the way one moves between panes
+    // stacked vertically - never shifts by a pixel horizontally.
+    mu_Vec2 heldAt;
     // Ditto.
     int grabDX;
+    // Ditto.
+    int grabDY;
 
     // Whether the pointer has moved far enough for this to be a drag rather than
     // a click. Until it has, the tab stays in its slot.
     bool dragging;
+
+    // Whether the drag has left this strip altogether. The tab is then on its way
+    // somewhere the strip knows nothing about, so it stops reordering, stops
+    // painting the tab itself, and leaves both to the caller. See tab_drag_out.
+    bool detached;
+
+    // Where the dragged tab currently is, in window coordinates. Within the strip
+    // this is its slot on the row; once detached it is wherever the pointer has
+    // taken it.
+    mu_Rect ghost;
 }
 
 /// What the user did to the strip this frame.
@@ -79,6 +93,8 @@ enum TabAction
     close,  /// Its close box was clicked (or the tab middle-clicked): close it.
     add,    /// The trailing + button: open a new tab.
     move,   /// A tab was dragged: move it from the reported index to `target`.
+    detach, /// A tab was dragged out of the strip and let go: it is leaving, and
+            /// where it goes is for the caller to decide from the pointer.
 }
 
 // Tab colours. The active tab takes the window body's own colour from the style,
@@ -133,10 +149,17 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     // A release ends any drag, wherever the pointer let go. First of everything,
     // so a strip that empties out mid-drag cannot leave a tab held: the press
     // that starts the next drag would otherwise read as a continuation of it.
+    //
+    // Letting go outside the strip is the tab being handed over, so what was held
+    // is remembered across the reset and reported once the tab count is known.
+    int handed = -1;
     if ((ctx.mouse_down & MU_MOUSE_LEFT) == 0)
     {
+        if (bar.dragging && bar.detached && bar.held >= 0)
+            handed = bar.held;
         bar.held = -1;
         bar.dragging = false;
+        bar.detached = false;
     }
 
     mu_Font font = ctx.style.font;
@@ -193,8 +216,13 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     // the button went down rather than frame to frame, so a slow drag crosses it
     // just the same. Settled before the draw loop, so the tab lifts out on the
     // very frame the pointer takes it rather than the one after.
+    //
+    // Either axis counts. Reordering only cares about sideways travel, but a tab
+    // is also dragged out of its strip - straight down, into a pane below it -
+    // and going by x alone left that gesture doing nothing at all.
     if (bar.held >= 0 && bar.dragging == false &&
-        abs(ctx.mouse_pos.x - bar.heldX) >= TAB_DRAG_MIN)
+        (abs(ctx.mouse_pos.x - bar.heldAt.x) >= TAB_DRAG_MIN ||
+         abs(ctx.mouse_pos.y - bar.heldAt.y) >= TAB_DRAG_MIN))
         bar.dragging = true;
 
     // Follow the selection: scroll the least that brings its tab fully into the
@@ -264,9 +292,11 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
                 // only shows once the pointer moves, so take hold of the tab now
                 // and let the threshold below decide.
                 bar.held     = cast(int) i;
-                bar.heldX    = ctx.mouse_pos.x;
+                bar.heldAt   = ctx.mouse_pos;
                 bar.grabDX   = ctx.mouse_pos.x - r.x;
+                bar.grabDY   = ctx.mouse_pos.y - r.y;
                 bar.dragging = false;
+                bar.detached = false;
             }
         }
         else if (ctx.mouse_pressed == MU_MOUSE_MIDDLE &&
@@ -294,24 +324,47 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     {
         int from = bar.held; // `items` is still in this frame's order
         int w = slots[from] - TAB_GAP;
-        int floatX = tab_float_x(ctx.mouse_pos.x - bar.grabDX,
-            lane, origin, total, slots[from]);
-        int to = tab_drop_index(slots, from, origin, floatX + w / 2);
-        if (to != from)
+
+        // Has the pointer carried the tab clean out of this strip? Then it is on
+        // its way to another one, and nothing here can say where: the strip stops
+        // reordering, stops drawing it, and hands both jobs to the caller.
+        bar.detached = tab_inside(strip, ctx.mouse_pos) == false;
+
+        if (bar.detached)
         {
-            action = TabAction.move;
-            index  = from;
-            target = to;
-            bar.held = to; // the caller reorders; next frame lays out the result
+            // Free of the row now, so it follows the pointer in both axes and can
+            // be seen to have left. Drawn by the caller, outside this strip's
+            // clip, which the tab could not escape from in here.
+            bar.ghost = mu_Rect(ctx.mouse_pos.x - bar.grabDX,
+                ctx.mouse_pos.y - bar.grabDY, w, h);
         }
-        if (dragHeld)
+        else
         {
-            dragRect.x = floatX;
-            tab_paint(ctx, bar, items[from], dragRect, true, true, false,
-                closeW, inset, th, font);
+            int floatX = tab_float_x(ctx.mouse_pos.x - bar.grabDX,
+                lane, origin, total, slots[from]);
+            int to = tab_drop_index(slots, from, origin, floatX + w / 2);
+            if (to != from)
+            {
+                action = TabAction.move;
+                index  = from;
+                target = to;
+                bar.held = to; // the caller reorders; next frame lays out the result
+            }
+            bar.ghost = mu_Rect(floatX, lane.y, w, h);
+            if (dragHeld)
+                tab_paint(ctx, bar, items[from], bar.ghost, true, true, false,
+                    closeW, inset, th, font);
         }
     }
     mu_pop_clip_rect(ctx);
+
+    // A tab let go outside the strip. Reported after everything else, so a strip
+    // losing its tab cannot also claim a click this frame.
+    if (handed >= 0 && handed < count)
+    {
+        action = TabAction.detach;
+        index  = handed;
+    }
 
     // Trailing + button, outside the lane's clip so scrolling never hides it.
     mu_Id nid = mu_get_id(ctx, "+".ptr, 1);
@@ -328,7 +381,58 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     return action;
 }
 
+/// Whether a tab is currently being dragged out of `bar`'s strip, and if so
+/// which one and where the pointer has it.
+///
+/// For a caller that owns several strips: while this holds, the tab belongs to
+/// neither the strip it came from nor any it has reached, so somebody above them
+/// both has to draw it and work out where it would land. `r` comes back in window
+/// coordinates and `index` names the item in the same slice the strip was handed.
+/// Returns: True while a tab is out; false whenever the drag is inside its own
+///          strip, or when nothing is being dragged at all.
+bool tab_drag_out(ref const(TabBar) bar, out mu_Rect r, out int index)
+{
+    r = bar.ghost;
+    index = bar.held;
+    return bar.detached && bar.held >= 0;
+}
+
+/// Paint a dragged-out tab at `r`, for the caller drawing what tab_drag_out
+/// reported. Drawn as an active, hovered tab, so it reads as the thing in hand.
+///
+/// Call it where the tab should land in the paint order - after everything it is
+/// meant to sit over - and under a clip that admits it: the strip it came from
+/// clips to its own lane, which is the one place this must not be drawn.
+void tab_ghost(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it, mu_Rect r)
+{
+    mu_Font font = ctx.style.font;
+    int th = ctx.text_height(font);
+    tab_paint(ctx, bar, it, r, true, true, false,
+        th, ctx.style.padding + TAB_PAD, th, font);
+}
+
 private:
+
+// Whether `p` is inside `r`. The strip's own hit test, for deciding a drag has
+// left it: ddui's mu_mouse_over is no use here, since it also asks whether the
+// pointer is inside the current clip and hover root, and the whole question is
+// about a pointer that has gone somewhere else.
+bool tab_inside(mu_Rect r, mu_Vec2 p)
+{
+    return p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
+}
+
+unittest
+{
+    static immutable mu_Rect r = mu_Rect(10, 20, 100, 30);
+    assert(tab_inside(r, mu_Vec2(10, 20)));   // top-left corner is in
+    assert(tab_inside(r, mu_Vec2(60, 35)));   // the middle
+    assert(tab_inside(r, mu_Vec2(109, 49)));  // last pixel in
+    assert(tab_inside(r, mu_Vec2(110, 35)) == false); // one past the right edge
+    assert(tab_inside(r, mu_Vec2(60, 50))  == false); // one past the bottom
+    assert(tab_inside(r, mu_Vec2(9, 35))   == false);
+    assert(tab_inside(r, mu_Vec2(60, 19))  == false);
+}
 
 // Width one tab asks for: its label, the close box, the three insets around them
 // (one each side, one between) and the gap to the next tab, held between the

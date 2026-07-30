@@ -2163,6 +2163,14 @@ private void ui_panes(mu_Context* ctx, int statusH)
     split_layout(paneWeights[0 .. n], avail, paneWidths[0 .. n]);
 
     TabRequest req = { action: TabAction.none };
+
+    // A tab dragged clean out of its strip, which belongs to no pane while it is
+    // in the air: the pane it came from, which item it is, and where the pointer
+    // has it. Drawn once every pane is down, so it passes over them all.
+    mu_Rect ghost;
+    int ghostTab = -1;
+    size_t ghostPane;
+
     int x = row.x;
     foreach (size_t i, Pane* p; panes)
     {
@@ -2195,6 +2203,15 @@ private void ui_panes(mu_Context* ctx, int statusH)
         ui_pane(ctx, *p, i, req);
         mu_layout_end_column(ctx);
 
+        mu_Rect out_;
+        int outTab;
+        if (tab_drag_out(p.tabs, out_, outTab))
+        {
+            ghost = out_;
+            ghostTab = outTab;
+            ghostPane = i;
+        }
+
         // A splitter between each pair, dragged to trade width across it. The
         // weights are written back through the scratch the layout was built from,
         // so the panes redraw at the new sizes on the very next frame.
@@ -2214,13 +2231,20 @@ private void ui_panes(mu_Context* ctx, int statusH)
     // panel is a ddui panel, not a root container, so its commands sit inline in
     // this window's list and anything added later paints on top.
     if (dropPane >= 0 && dropPane < panes.length)
+        ui_mark_pane(ctx, panes[dropPane].rect);
+
+    // A tab in the air between panes. The pane it would land in is picked out
+    // first, then the tab itself over the top of everything - here rather than in
+    // the strip it came from, which clips to its own lane and so could never have
+    // shown it crossing into a neighbour.
+    if (ghostTab >= 0 && ghostPane < panes.length)
     {
-        mu_Rect r = panes[dropPane].rect;
-        mu_draw_rect(ctx, r, DROP_WASH);
-        mu_draw_rect(ctx, mu_Rect(r.x, r.y, r.w, DROP_EDGE_W), DROP_EDGE);
-        mu_draw_rect(ctx, mu_Rect(r.x, r.y + r.h - DROP_EDGE_W, r.w, DROP_EDGE_W), DROP_EDGE);
-        mu_draw_rect(ctx, mu_Rect(r.x, r.y, DROP_EDGE_W, r.h), DROP_EDGE);
-        mu_draw_rect(ctx, mu_Rect(r.x + r.w - DROP_EDGE_W, r.y, DROP_EDGE_W, r.h), DROP_EDGE);
+        Pane* src = panes[ghostPane];
+        ptrdiff_t onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
+        if (onto >= 0 && cast(size_t) onto != ghostPane)
+            ui_mark_pane(ctx, panes[onto].rect);
+        if (ghostTab < src.items.length)
+            tab_ghost(ctx, src.tabs, src.items[ghostTab], ghost);
     }
 
     // Now that the loop is done with `panes`, whatever a strip asked for is safe
@@ -2231,8 +2255,28 @@ private void ui_panes(mu_Context* ctx, int statusH)
     case TabAction.close:  ui_close_tab_in(req.pane, req.index);  break;
     case TabAction.add:    focused = req.pane; ui_new_tab();      break;
     case TabAction.move:   ui_move_tab(req.pane, req.index, req.target); break;
+    // Let go outside its own strip: it goes to whichever pane the pointer is
+    // over. Released over nothing - a splitter, the status bar - and it stays
+    // where it was, which is the way out of a drag begun by accident.
+    case TabAction.detach:
+        ptrdiff_t onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
+        if (onto >= 0)
+            ui_move_view(req.pane, req.index, cast(size_t) onto);
+        break;
     default:
     }
+}
+
+/// Pick a pane out as somewhere a drag would land: a wash over it and an edge
+/// around it. Shared by the two things that can be dropped into one, a file from
+/// outside the window and a tab from another pane.
+private void ui_mark_pane(mu_Context* ctx, mu_Rect r)
+{
+    mu_draw_rect(ctx, r, DROP_WASH);
+    mu_draw_rect(ctx, mu_Rect(r.x, r.y, r.w, DROP_EDGE_W), DROP_EDGE);
+    mu_draw_rect(ctx, mu_Rect(r.x, r.y + r.h - DROP_EDGE_W, r.w, DROP_EDGE_W), DROP_EDGE);
+    mu_draw_rect(ctx, mu_Rect(r.x, r.y, DROP_EDGE_W, r.h), DROP_EDGE);
+    mu_draw_rect(ctx, mu_Rect(r.x + r.w - DROP_EDGE_W, r.y, DROP_EDGE_W, r.h), DROP_EDGE);
 }
 
 /// Draw one pane: its tab strip, then the hex panel filling what is left of the
@@ -2301,6 +2345,49 @@ private void ui_move_tab(size_t paneIndex, size_t from, size_t to)
     p.views[to] = moved;
 
     p.current = tab_reindex(p.current, from, to);
+}
+
+/// Hand the view at `index` in pane `fromPane` over to pane `toPane`, where it
+/// joins the end of the strip and comes to the front. The drag-between-panes
+/// route: the tab leaves one pane and lands in another.
+///
+/// The view goes across whole - its caret, its scroll position, its document -
+/// so what was on screen in the old pane is what appears in the new one. A pane
+/// emptied by the move is closed, since an empty pane is not a view of anything,
+/// and the destination takes the keyboard either way.
+private void ui_move_view(size_t fromPane, size_t index, size_t toPane)
+{
+    if (fromPane >= panes.length || toPane >= panes.length || fromPane == toPane)
+        return;
+
+    Pane* src = panes[fromPane];
+    Pane* dst = panes[toPane];
+    if (index >= src.views.length)
+        return;
+
+    View* v = src.views[index];
+    src.views = src.views[0 .. index] ~ src.views[index + 1 .. $];
+    if (index < src.current)
+        --src.current;
+    if (src.views.length && src.current >= src.views.length)
+        src.current = src.views.length - 1;
+
+    dst.views ~= v;
+    dst.current = dst.views.length - 1;
+    v.hex.takeFocus = true;
+
+    // The pane it came from may have nothing left in it. Dropping it shifts the
+    // indices, so the destination is found again by identity rather than trusted
+    // to still be where it was.
+    if (src.views.length == 0 && panes.length > 1)
+        ui_drop_pane(fromPane);
+
+    foreach (size_t i, Pane* q; panes)
+        if (q is dst)
+        {
+            focused = i;
+            break;
+        }
 }
 
 /// Where the tab at `at` ends up once the one at `from` is moved to `to`. The

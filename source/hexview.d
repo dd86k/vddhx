@@ -175,6 +175,15 @@ struct HexView
     bool editLow;
     ubyte editByte;
 
+    // Whether the mouse button now held went down inside this panel's grid.
+    //
+    // A drag only extends the selection when it began here. Focus alone will not
+    // do: the panel can be handed focus between frames (see takeFocus, which a
+    // tab switch sets), and a button held for something else entirely - a tab
+    // being dragged across the window - would then be read as a selection drag
+    // the moment the pointer crossed the grid.
+    bool dragSel;
+
     // Reused scratch for the visible window when reading through readFn: the
     // buffer grows to fit the on-screen rows and is refilled every frame, so a
     // huge document costs only a screenful of bytes here.
@@ -706,6 +715,11 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     // and join the tab ring so the panel is reachable without a mouse.
     mu_update_control(ctx, id, body, MU_OPT_HOLDFOCUS | MU_OPT_TABSTOP);
 
+    // The button coming up ends any selection drag this panel had begun. Ahead of
+    // the bail-outs below, so an empty read-only panel cannot leave it set.
+    if ((ctx.mouse_down & MU_MOUSE_LEFT) == 0)
+        v.dragSel = false;
+
     int res = 0;
     size_t total = hex_total(v);
     bool editable = hex_editable(v);
@@ -722,8 +736,15 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
 
     // Press: place the caret; drag: extend it. mu_mouse_over honours the panel
     // clip, so presses on the scrollbar or header do not land here.
+    //
+    // The drag arm asks whether the press landed in this grid, not whether the
+    // panel has focus. Focus can arrive without a press - a tab switch hands it
+    // over between frames - and a button held for something else would otherwise
+    // sweep a selection out the moment it passed overhead. See HexView.dragSel.
     if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, body))
     {
+        v.dragSel = true; // this panel owns the drag until the button comes up
+
         long hit = hex_hit(lay, body, v.topRow, rowH, cols, total,
             ctx.mouse_pos.x, ctx.mouse_pos.y);
         if (hit >= 0)
@@ -736,7 +757,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
             res |= MU_RES_CHANGE;
         }
     }
-    else if (ctx.focus == id && (ctx.mouse_down & MU_MOUSE_LEFT) && v.active)
+    else if (v.dragSel && (ctx.mouse_down & MU_MOUSE_LEFT) && v.active)
     {
         long hit = hex_hit(lay, body, v.topRow, rowH, cols, total,
             ctx.mouse_pos.x, ctx.mouse_pos.y);
