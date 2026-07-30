@@ -103,16 +103,6 @@ private struct Pane
     /// as an SDL event carrying a window coordinate and nothing else, and the
     /// pane it is pointing at has to be worked out from that alone.
     mu_Rect rect;
-
-    /// ddui id strings for the panel, the strip and the splitter on this pane's
-    /// right, NUL-terminated. Built once from a serial number that is never
-    /// reused, so a pane keeps its ddui container state - and its scroll position
-    /// with it - when a pane to its left closes and the indices all shift down.
-    char[16] hexId;
-    /// Ditto.
-    char[16] tabId;
-    /// Ditto.
-    char[16] barId;
 }
 
 /// Every open document, every view onto one, and every pane showing views.
@@ -133,9 +123,6 @@ private __gshared Pane*[] panes;
 /// Index into `panes` of the one taking the keyboard. Every action below acts on
 /// this pane's front tab.
 private __gshared size_t focused;
-
-/// Serial numbers behind the panes' ddui ids. Only ever counts up.
-private __gshared uint paneSerial;
 
 /// Scratch for laying the pane row out: the weights copied out of `panes` and the
 /// pixel widths they come to. Both only ever grow.
@@ -279,8 +266,7 @@ void ui_new_tab()
     v.hex.takeFocus = true; // ready to take bytes without a click first
 }
 
-/// A fresh pane with no tabs in it, its ddui ids stamped from a serial number
-/// nothing else will ever carry. Callers fill in `views` before the next frame.
+/// A fresh pane with no tabs in it. Callers fill in `views` before the next frame.
 private Pane* newPane()
 {
     Pane* p = new Pane;
@@ -289,14 +275,6 @@ private Pane* newPane()
     // takes the grid's colour rather than the window's and the two read as one
     // surface. ui_style cannot do it: panes come and go long after it has run.
     p.tabs.content = CANVAS;
-
-    uint serial = ++paneSerial;
-    // Formatted into all but the last byte, so there is always room to terminate
-    // whatever was written. Kept together so the panel, the strip and the
-    // splitter of one pane can never end up numbered differently.
-    p.hexId[sformat(p.hexId[0 .. $ - 1], "hex%u",  serial).length] = 0;
-    p.tabId[sformat(p.tabId[0 .. $ - 1], "tabs%u", serial).length] = 0;
-    p.barId[sformat(p.barId[0 .. $ - 1], "bar%u",  serial).length] = 0;
     return p;
 }
 
@@ -2199,6 +2177,19 @@ private void ui_panes(mu_Context* ctx, int statusH)
         if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, r))
             focused = i;
 
+        // Everything this pane draws is scoped under the pane's own identity, so
+        // the widgets inside can go on using plain constant names and still come
+        // out unique per pane: ddui seeds every id it hashes with the top of the
+        // id stack, containers included. That is what keeps two panes from
+        // sharing one panel's scroll offset and body rect.
+        //
+        // It is the pointer's value that is hashed - the bytes at `&p` - and not
+        // the array slot it was read from, which moves whenever `panes` grows. A
+        // pane is heap allocated and never moves, so the value is stable for as
+        // long as the pane is.
+        mu_push_id(ctx, &p, (Pane*).sizeof);
+        scope(exit) mu_pop_id(ctx);
+
         mu_layout_set_next(ctx, r, 0);
         mu_layout_begin_column(ctx);
         ui_pane(ctx, *p, i, req);
@@ -2211,7 +2202,7 @@ private void ui_panes(mu_Context* ctx, int statusH)
         {
             mu_Rect sr = mu_Rect(x, row.y, SPLIT_WIDTH, row.h);
             x += SPLIT_WIDTH;
-            int dx = split_bar(ctx, p.barId.ptr, sr);
+            int dx = split_bar(ctx, "bar", sr);
             if (dx && split_resize(paneWeights[0 .. n], i, dx, avail, PANE_MIN))
                 foreach (size_t j, Pane* q; panes)
                     q.weight = paneWeights[j];
@@ -2267,7 +2258,7 @@ private void ui_pane(mu_Context* ctx, ref Pane p, size_t index, ref TabRequest r
     p.tabs.unfocused = index != focused;
 
     int at, target;
-    TabAction action = tab_bar(ctx, p.tabId.ptr, p.tabs,
+    TabAction action = tab_bar(ctx, "tabs", p.tabs,
         p.items[0 .. p.views.length], cast(int) p.current, at, target);
     if (action != TabAction.none)
         req = TabRequest(index, action, at, target);
@@ -2283,9 +2274,10 @@ private void ui_pane(mu_Context* ctx, ref Pane p, size_t index, ref TabRequest r
         v.hex.dataSize = v.doc.editor.size();
 
     // The panel fills the rest of the column, so nothing is reserved below it:
-    // the status bar is the window's, not this pane's.
+    // the status bar is the window's, not this pane's. The name is a constant
+    // because ui_panes has this pane's id pushed: see the scope it sets up there.
     // Check return with `& MU_RES_CHANGE`
-    cast(void) hex_view(ctx, p.hexId.ptr, v.hex, render_font_mono(), 0);
+    cast(void) hex_view(ctx, "hex", v.hex, render_font_mono(), 0);
 }
 
 /// Reorder the tab strip: take the view at `from` and put it at `to`, shifting
