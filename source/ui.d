@@ -1851,16 +1851,73 @@ private void ui_tabs(mu_Context* ctx)
     foreach (size_t i, View* v; views)
         tabItems[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited());
 
-    int index;
+    int index, target;
     TabAction action = tab_bar(ctx, "tabs", tabstrip, tabItems[0 .. views.length],
-        cast(int) current, index);
+        cast(int) current, index, target);
     switch (action)
     {
     case TabAction.select: ui_select_tab(index); break;
     case TabAction.close:  ui_close_tab(index);  break;
     case TabAction.add:    ui_new_tab();         break;
+    case TabAction.move:   ui_move_tab(index, target); break;
     default:
     }
+}
+
+/// Reorder the tab strip: take the view at `from` and put it at `to`, shifting
+/// whatever it passes over the other way. The drag route, so the strip the
+/// pointer leaves behind is the order that sticks.
+private void ui_move_tab(size_t from, size_t to)
+{
+    if (from >= views.length || to >= views.length || from == to)
+        return;
+
+    View* moved = views[from];
+    if (from < to)
+        foreach (i; from .. to)
+            views[i] = views[i + 1];
+    else
+        foreach_reverse (i; to .. from)
+            views[i + 1] = views[i];
+    views[to] = moved;
+
+    current = tab_reindex(current, from, to);
+}
+
+/// Where the tab at `at` ends up once the one at `from` is moved to `to`. The
+/// moved tab lands on `to` itself; everything between the two shifts one place
+/// the other way, and everything outside that span stays where it is.
+private size_t tab_reindex(size_t at, size_t from, size_t to)
+{
+    if (at == from)
+        return to;
+    if (from < to)
+        return at > from && at <= to ? at - 1 : at;
+    return at >= to && at < from ? at + 1 : at;
+}
+
+unittest
+{
+    // [A B C D], A to the middle: B and C shuffle down, D is untouched.
+    assert(tab_reindex(0, 0, 2) == 2); // the moved tab itself
+    assert(tab_reindex(1, 0, 2) == 0);
+    assert(tab_reindex(2, 0, 2) == 1);
+    assert(tab_reindex(3, 0, 2) == 3);
+
+    // [A B C D], D to index 1: B and C shuffle up, A is untouched.
+    assert(tab_reindex(3, 3, 1) == 1);
+    assert(tab_reindex(1, 3, 1) == 2);
+    assert(tab_reindex(2, 3, 1) == 3);
+    assert(tab_reindex(0, 3, 1) == 0);
+
+    // A one-step swap either way, which is what a slow drag actually emits.
+    assert(tab_reindex(0, 0, 1) == 1);
+    assert(tab_reindex(1, 0, 1) == 0);
+    assert(tab_reindex(2, 0, 1) == 2);
+
+    // A move that goes nowhere leaves every index alone.
+    foreach (size_t i; 0 .. 4)
+        assert(tab_reindex(i, 2, 2) == i);
 }
 
 /// Draw the top menubar. Each menu opens a dropdown of actions that print to

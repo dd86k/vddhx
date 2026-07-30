@@ -248,6 +248,24 @@ int screenshot_run(string[] args)
     frame();
     shot("shot-tabs-select.bmp");
 
+    // Dragging a tab sideways reorders the strip. The press picks mid.bin up (and
+    // selects it, as a plain click would); each move past a neighbour's middle
+    // reports one step, so the two moves below walk it from the front of the
+    // strip to the back, and the release just lets go of what is already there.
+    //
+    // The tab is lifted out and drawn from the pointer while this is going on, so
+    // the middle shot catches it overlapping the tab it has just swapped with.
+    mu_Vec2 grab = find("mid.bin");
+    int grabY = grab.y + 3;
+    mu_input_mousemove(&ctx, grab.x + 3, grabY); frame(); frame();
+    mu_input_mousedown(&ctx, grab.x + 3, grabY, MU_MOUSE_LEFT); frame();
+    mu_input_mousemove(&ctx, grab.x + 43, grabY); frame(); frame();
+    shot("shot-tabs-drag.bmp");
+    mu_input_mousemove(&ctx, grab.x + 143, grabY); frame(); frame();
+    shot("shot-tabs-drag2.bmp");
+    mu_input_mouseup(&ctx, grab.x + 143, grabY, MU_MOUSE_LEFT); frame(); frame();
+    shot("shot-tabs-dropped.bmp");
+
     // Middle-clicking one closes it: the shortest route through the close path
     // without guessing where inside the tab its close box sits. other.bin has no
     // unsaved edits, so it goes without a prompt (which would need a display).
