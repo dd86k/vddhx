@@ -191,6 +191,72 @@ struct HexView
     ubyte[] mapProbe;    // reused per-cell sampling scratch
 }
 
+/// Copy `src` into a second panel onto the same bytes.
+///
+/// For splitting a view in two: the caret, selection, scroll position, column
+/// count and entry mode all carry over, so the new panel opens looking at exactly
+/// what the old one was, and the two then move independently.
+///
+/// A plain struct copy will not do. Several of the panel's fields are scratch
+/// buffers it refills every frame - the visible window it reads bytes into, the
+/// minimap's cell cache - and sharing those between two panels would have each
+/// one drawing through whatever the other last put there. They are dropped here
+/// so the new panel allocates its own on the frame it first draws.
+///
+/// The hooks come across as they are, which is only a starting point: they carry
+/// the source panel's user pointers, so a caller that routes them per view (the
+/// usual arrangement) has to point them at the new one before it draws.
+HexView hex_split(ref HexView src)
+{
+    HexView v = src;
+
+    v.windowBuf   = null;
+    v.windowStart = 0;
+    v.windowLen   = 0;
+
+    v.mapCells    = null;
+    v.mapForSize  = 0;
+    v.mapForCells = 0;
+    v.mapProbe    = null;
+
+    return v;
+}
+
+unittest
+{
+    HexView a;
+    a.cursor = 0x40;
+    a.anchor = 0x30;
+    a.active = true;
+    a.columns = 24;
+    a.insertMode = true;
+    a.topRow = 9;
+    a.windowBuf = new ubyte[64];
+    a.windowLen = 64;
+    a.mapCells = new mu_Color[8];
+    a.mapForCells = 8;
+
+    HexView b = hex_split(a);
+
+    // What the user was looking at comes across.
+    assert(b.cursor == 0x40);
+    assert(b.anchor == 0x30);
+    assert(b.active);
+    assert(b.columns == 24);
+    assert(b.insertMode);
+    assert(b.topRow == 9);
+
+    // The scratch does not: the two panels must not share a byte of it.
+    assert(b.windowBuf is null);
+    assert(b.windowLen == 0);
+    assert(b.mapCells is null);
+    assert(b.mapForCells == 0);
+
+    // ... and the source keeps its own.
+    assert(a.windowBuf.length == 64);
+    assert(a.mapCells.length == 8);
+}
+
 /// Scroll the view back to the top. Call when a fresh document is loaded so the
 /// panel never inherits the previous file's scroll offset and strands the caret
 /// (which the caller has just reset to the first byte) off screen.

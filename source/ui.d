@@ -14,6 +14,7 @@ import bookmarks;
 import hexview;
 import omnibar;
 import search;
+import split;
 import tabbar;
 import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector;
 import std.system : Endian;
@@ -61,7 +62,7 @@ private struct Document
 /// this was done for are what will make several of them at once.
 private struct View
 {
-    /// The document this is a view of. Never null while the view is in `views`.
+    /// The document this is a view of. Never null while the view is in a pane.
     Document* doc;
 
     /// Persisted hex panel state (the selection lives here across frames). The
@@ -70,26 +71,75 @@ private struct View
     HexView hex = { active: true };
 }
 
-/// Every open document, and every view onto one. Both are held by pointer: the
-/// panel's callbacks park a Document* and a View* for ddui to hand back on every
-/// read, colour and edit, and those have to survive a document being closed out
-/// of the middle of the array.
+/// One pane: a strip of tabs over a hex panel, filling its share of the window.
 ///
-/// Neither is ever empty: startup opens a scratch buffer and closing the last
-/// tab leaves a fresh one behind, so the panel - and every action below - always
-/// has something to work on.
+/// Panes sit side by side in a flat row with a splitter between each pair - the
+/// way an editor's groups do - rather than nesting. Each holds its own tabs and
+/// its own front tab, so the same file can be open on the left at one offset and
+/// on the right at another.
+private struct Pane
+{
+    /// The views this pane has tabs for, in strip order. Never empty while the
+    /// pane is in `panes`: a pane that loses its last tab is closed with it.
+    View*[] views;
+
+    /// Index into `views` of the one on screen.
+    size_t current;
+
+    /// The strip's own scroll offset and in-progress drag.
+    TabBar tabs;
+
+    /// Item slice handed to the strip, rebuilt each frame into storage that only
+    /// ever grows, so a steady tab count costs no allocation.
+    TabItem[] items;
+
+    /// Share of the row this pane takes, against its neighbours'. Relative, so a
+    /// window resize needs no arithmetic here: the same weights simply divide a
+    /// different number of pixels.
+    int weight = SPLIT_WEIGHT;
+
+    /// ddui id strings for the panel, the strip and the splitter on this pane's
+    /// right, NUL-terminated. Built once from a serial number that is never
+    /// reused, so a pane keeps its ddui container state - and its scroll position
+    /// with it - when a pane to its left closes and the indices all shift down.
+    char[16] hexId;
+    /// Ditto.
+    char[16] tabId;
+    /// Ditto.
+    char[16] barId;
+}
+
+/// Every open document, every view onto one, and every pane showing views.
+///
+/// All held by pointer: the panel's callbacks park a Document* and a View* for
+/// ddui to hand back on every read, colour and edit, and those have to survive a
+/// document being closed out of the middle of the array. Panes likewise, since a
+/// pane's ddui ids and tab state have to outlive its neighbours closing.
+///
+/// None is ever empty: startup opens a scratch buffer, closing the last tab of
+/// the last pane leaves a fresh one behind, and a pane that empties is closed
+/// unless it is the only one. So every action below always has a pane, a view
+/// and a document to work on.
 private __gshared Document*[] docs;
 /// Ditto.
-private __gshared View*[] views;
+private __gshared Pane*[] panes;
 
-/// Index into `views` of the one the tab strip has in front.
-private __gshared size_t current;
+/// Index into `panes` of the one taking the keyboard. Every action below acts on
+/// this pane's front tab.
+private __gshared size_t focused;
 
-/// Tab strip state, and the item slice handed to it. The slice is reused across
-/// frames so drawing the strip allocates nothing once the tabs settle.
-private __gshared TabBar tabstrip;
+/// Serial numbers behind the panes' ddui ids. Only ever counts up.
+private __gshared uint paneSerial;
+
+/// Scratch for laying the pane row out: the weights copied out of `panes` and the
+/// pixel widths they come to. Both only ever grow.
+private __gshared int[] paneWeights;
 /// Ditto.
-private __gshared TabItem[] tabItems;
+private __gshared int[] paneWidths;
+
+/// Narrowest a pane may be dragged, in pixels. Enough that the offset column and
+/// a few bytes stay legible: a pane squeezed below this is not a view of anything.
+private enum int PANE_MIN = 180;
 
 /// Scratch buffers are numbered in creation order: "untitled", "untitled 2"...
 private __gshared uint untitled;
@@ -100,17 +150,27 @@ private __gshared Omnibar omni;
 /// Ditto.
 private __gshared OmniItem[] omniItems;
 
-/// The view the tab strip has in front, and the document it is showing. Every
-/// action below acts on one or the other: `view` for anything about the caret
-/// and what is on screen, `doc` for anything about the bytes themselves.
+/// The pane and tab each switcher row stands for, parallel to `omniItems` while
+/// the switcher is the mode showing. A row's id indexes this.
+private __gshared size_t[2][] omniTabs;
+
+/// The pane taking the keyboard, the view it has in front, and the document that
+/// view is showing. Every action below acts on one of the three: `pane` for the
+/// tabs, `view` for anything about the caret and what is on screen, `doc` for
+/// anything about the bytes themselves.
+private ref Pane pane()
+{
+    return *panes[focused];
+}
+/// Ditto.
 private ref View view()
 {
-    return *views[current];
+    return *panes[focused].views[panes[focused].current];
 }
 /// Ditto.
 private ref Document doc()
 {
-    return *views[current].doc;
+    return *view().doc;
 }
 
 /// The main window, for parenting the native Open dialog. main sets it up front.
@@ -137,7 +197,6 @@ private enum mu_Color BOOKMARK_TINT = mu_Color(240, 180, 70, 255);
 void ui_style(mu_Context* ctx)
 {
     ctx.style.colors[MU_COLOR_PANELBG] = CANVAS;
-    tabstrip.content = CANVAS;
 }
 
 /// Last thing the application had to say, shown at the right of the status bar
@@ -201,31 +260,71 @@ void ui_new_tab()
 
     View* v = new View;
     v.doc = d;
-    views ~= v;
-    current = views.length - 1;
-
     wireView(v);
+
+    // The first tab of all has no pane to go in yet: ui_init opens it before
+    // anything has laid the window out.
+    if (panes.length == 0)
+        panes ~= newPane();
+
+    Pane* p = panes[focused];
+    p.views ~= v;
+    p.current = p.views.length - 1;
     v.hex.takeFocus = true; // ready to take bytes without a click first
 }
 
-/// Bring the tab at `index` to the front. Out-of-range indices are ignored, so
-/// a stale index from a strip built before a close cannot strand the panel.
+/// A fresh pane with no tabs in it, its ddui ids stamped from a serial number
+/// nothing else will ever carry. Callers fill in `views` before the next frame.
+private Pane* newPane()
+{
+    Pane* p = new Pane;
+
+    // The strip caps this pane's own canvas, not the window, so the active tab
+    // takes the grid's colour rather than the window's and the two read as one
+    // surface. ui_style cannot do it: panes come and go long after it has run.
+    p.tabs.content = CANVAS;
+
+    uint serial = ++paneSerial;
+    // Formatted into all but the last byte, so there is always room to terminate
+    // whatever was written. Kept together so the panel, the strip and the
+    // splitter of one pane can never end up numbered differently.
+    p.hexId[sformat(p.hexId[0 .. $ - 1], "hex%u",  serial).length] = 0;
+    p.tabId[sformat(p.tabId[0 .. $ - 1], "tabs%u", serial).length] = 0;
+    p.barId[sformat(p.barId[0 .. $ - 1], "bar%u",  serial).length] = 0;
+    return p;
+}
+
+/// Bring the tab at `index` to the front of the focused pane. Out-of-range
+/// indices are ignored, so a stale index from a strip built before a close
+/// cannot strand the panel.
 void ui_select_tab(size_t index)
 {
-    if (index >= views.length)
+    ui_select_tab_in(focused, index);
+}
+
+/// Ditto, in a named pane - which also becomes the focused one, since bringing a
+/// tab forward is asking to work in it.
+private void ui_select_tab_in(size_t paneIndex, size_t index)
+{
+    if (paneIndex >= panes.length)
         return;
-    current = index;
-    view.hex.takeFocus = true; // typing follows the tab that came forward
+    Pane* p = panes[paneIndex];
+    if (index >= p.views.length)
+        return;
+    focused = paneIndex;
+    p.current = index;
+    p.views[index].hex.takeFocus = true; // typing follows the tab that came forward
 }
 
 /// Step `delta` tabs along from the current one, wrapping at either end.
 void ui_cycle_tab(int delta)
 {
-    if (views.length <= 1)
+    Pane* p = panes[focused];
+    if (p.views.length <= 1)
         return;
 
-    long count = cast(long) views.length;
-    long at = (cast(long) current + delta) % count;
+    long count = cast(long) p.views.length;
+    long at = (cast(long) p.current + delta) % count;
     if (at < 0)
         at += count;
     ui_select_tab(cast(size_t) at);
@@ -241,25 +340,44 @@ void ui_cycle_tab(int delta)
 /// nothing to prompt about either.
 void ui_close_tab(size_t index)
 {
-    if (index >= views.length)
+    ui_close_tab_in(focused, index);
+}
+
+/// Ditto, in a named pane. The pane is named rather than taken by pointer
+/// because the prompt below can bring another pane forward on its way past.
+private void ui_close_tab_in(size_t paneIndex, size_t index)
+{
+    if (paneIndex >= panes.length || index >= panes[paneIndex].views.length)
         return;
 
-    Document* d = views[index].doc;
+    Document* d = panes[paneIndex].views[index].doc;
     bool last = ui_view_count(d) <= 1;
     if (last && ui_confirm_discard(d, "Close document") != Confirm.proceed)
         return;
 
-    views = views[0 .. index] ~ views[index + 1 .. $];
+    // Re-read the pane: the prompt above may have moved the focus to it, and a
+    // Save As raised from it may have run a frame's worth of work.
+    Pane* p = panes[paneIndex];
+    p.views = p.views[0 .. index] ~ p.views[index + 1 .. $];
     if (last)
         ui_drop_document(d);
 
-    if (views.length == 0)
+    if (p.views.length == 0)
     {
-        // Out of views: quit, through SDL's own event queue so it meets the same
-        // route as the window close button. That lands next frame, and the rest
-        // of this one still has a panel to draw, so put a scratch buffer up
-        // meanwhile - it has no edits, so it cannot hold the quit up.
-        ui_new_tab(); // it sets current itself
+        // An empty pane goes, and the row closes over it - unless it is the only
+        // one left, in which case there is nothing to close over it and the
+        // window itself is what is being shut.
+        if (panes.length > 1)
+        {
+            ui_drop_pane(paneIndex);
+            return;
+        }
+
+        // Out of tabs in the last pane: quit, through SDL's own event queue so it
+        // meets the same route as the window close button. That lands next frame,
+        // and the rest of this one still has a panel to draw, so put a scratch
+        // buffer up meanwhile - it has no edits, so it cannot hold the quit up.
+        ui_new_tab();
         SDL_Event quit; // .init zeroes the union
         quit.type = SDL_EVENT_QUIT;
         SDL_PushEvent(&quit);
@@ -269,26 +387,27 @@ void ui_close_tab(size_t index)
     // Closing a tab left of the front one shifts it down; closing the front one
     // keeps the index, which now names its right-hand neighbour (or the new last
     // tab, when the front one was the last).
-    if (index < current)
-        --current;
-    if (current >= views.length)
-        current = views.length - 1;
-    view.hex.takeFocus = true; // the tab that took its place is ready to type in
+    if (index < p.current)
+        --p.current;
+    if (p.current >= p.views.length)
+        p.current = p.views.length - 1;
+    p.views[p.current].hex.takeFocus = true; // ready to type in
 }
 
-/// How many views are currently showing `d`. Closing the last of them is what
-/// closes the document itself.
+/// How many views, in any pane, are currently showing `d`. Closing the last of
+/// them is what closes the document itself.
 private size_t ui_view_count(const(Document)* d)
 {
     size_t n;
-    foreach (View* v; views)
-        if (v.doc is d)
-            ++n;
+    foreach (Pane* p; panes)
+        foreach (View* v; p.views)
+            if (v.doc is d)
+                ++n;
     return n;
 }
 
 /// Close `d`'s editor and drop it from `docs`. Only for a document no view is
-/// left showing: every View.doc still in `views` has to stay valid.
+/// left showing: every View.doc still held by a pane has to stay valid.
 private void ui_drop_document(Document* d)
 {
     if (d.editor)
@@ -306,20 +425,137 @@ private void ui_drop_document(Document* d)
 /// is on screen. Does nothing when no view is showing it.
 private void ui_focus_document(const(Document)* d)
 {
-    foreach (size_t i, View* v; views)
+    foreach (size_t i, Pane* p; panes)
     {
-        if (v.doc is d)
+        foreach (size_t j, View* v; p.views)
         {
-            current = i;
-            return;
+            if (v.doc is d)
+            {
+                ui_select_tab_in(i, j);
+                return;
+            }
         }
     }
+}
+
+/// Drop the pane at `index` from the row, handing its share of the width to a
+/// neighbour so the panes still fill the window between them. Its views go with
+/// it, so the caller closes those first (ui_close_tab_in does).
+private void ui_drop_pane(size_t index)
+{
+    if (index >= panes.length || panes.length <= 1)
+        return;
+
+    // The pane on the left inherits the space, or the one on the right when the
+    // pane closing is the first: either way the row's total weight is unchanged
+    // and nothing else on it moves.
+    size_t heir = index > 0 ? index - 1 : index + 1;
+    panes[heir].weight += panes[index].weight;
+
+    panes = panes[0 .. index] ~ panes[index + 1 .. $];
+
+    // Closing a pane left of the focused one shifts it down; closing the focused
+    // one keeps the index, which now names its right-hand neighbour (or the new
+    // last pane, when the one that went was the last).
+    if (focused > index)
+        --focused;
+    if (focused >= panes.length)
+        focused = panes.length - 1;
+
+    pane.views[pane.current].hex.takeFocus = true; // the pane that took over
+}
+
+/// Split the focused pane in two: a second pane opens beside it, showing the
+/// same document at the same offset, and takes the keyboard.
+///
+/// The same document rather than a copy of it - one editor, one undo history,
+/// one set of bookmarks - so the two panes are two windows onto one file, and an
+/// edit made in either shows up in both. What they do not share is the looking:
+/// the new view carries the old one's caret and scroll position as a starting
+/// point and then moves on its own, which is the whole use of a split here.
+void ui_split()
+{
+    View* src = pane.views[pane.current];
+
+    View* v = new View;
+    v.doc = src.doc;
+    v.hex = hex_split(src.hex); // its own scratch buffers, the same place in the file
+    wireView(v);                // and its own hooks, pointing at itself
+    v.hex.takeFocus = true;
+
+    Pane* p = newPane();
+    p.views ~= v;
+
+    // The new pane takes half the space of the one it came out of, so the rest of
+    // the row is left exactly as it was.
+    p.weight = panes[focused].weight / 2;
+    panes[focused].weight -= p.weight;
+
+    panes = panes[0 .. focused + 1] ~ p ~ panes[focused + 1 .. $];
+    ++focused;
+}
+
+/// Close the focused pane, tab by tab, so each document still gets its say about
+/// unsaved changes. A cancelled prompt stops the whole thing where it stands.
+/// The last pane cannot be closed: there would be nothing left to draw.
+void ui_close_pane()
+{
+    if (panes.length <= 1)
+    {
+        ui_status("the last pane cannot be closed");
+        return;
+    }
+
+    Pane* p = panes[focused];
+    for (;;)
+    {
+        // Found again each round rather than held as an index: a prompt can bring
+        // another pane forward on its way past, and the last tab closing takes
+        // this pane out of the row altogether.
+        size_t at = size_t.max;
+        foreach (size_t i, Pane* q; panes)
+            if (q is p)
+            {
+                at = i;
+                break;
+            }
+        if (at == size_t.max)
+            return; // gone, which is what was asked for
+
+        size_t before = p.views.length;
+        ui_close_tab_in(at, p.current);
+        if (p.views.length == before) // a prompt was cancelled: leave it open
+            return;
+    }
+}
+
+/// Move the keyboard to the pane at `index`, counted from the left. Out of range
+/// does nothing, so Ctrl+9 on a two-pane window is simply ignored.
+void ui_focus_pane(size_t index)
+{
+    if (index >= panes.length)
+        return;
+    focused = index;
+    pane.views[pane.current].hex.takeFocus = true;
+}
+
+/// Step `delta` panes along from the focused one, wrapping at either end.
+void ui_cycle_pane(int delta)
+{
+    if (panes.length <= 1)
+        return;
+
+    long count = cast(long) panes.length;
+    long at = (cast(long) focused + delta) % count;
+    if (at < 0)
+        at += count;
+    ui_focus_pane(cast(size_t) at);
 }
 
 /// Close the tab on screen. The Ctrl+W and File > Close Tab route.
 void ui_close_current_tab()
 {
-    ui_close_tab(current);
+    ui_close_tab(pane.current);
 }
 
 /// The title text last handed to SDL, NUL-terminated, and its length. Kept so
@@ -576,8 +812,10 @@ void ui_open(string path)
     // Built the editor without throwing, so the tab it goes in is settled now.
     // A scratch buffer nothing else is looking at is taken over rather than left
     // behind as an empty tab; one another view is showing has to stay put, since
-    // pulling its editor out from under that view would strand it.
-    Document* d = views[current].doc;
+    // pulling its editor out from under that view would strand it. The tab lands
+    // in the focused pane, which is where the user was working.
+    Pane* p = panes[focused];
+    Document* d = p.views[p.current].doc;
     if (scratchEmpty(*d) && ui_view_count(d) == 1)
     {
         if (d.editor)
@@ -590,15 +828,16 @@ void ui_open(string path)
 
         View* fresh = new View;
         fresh.doc = d;
-        views ~= fresh;
-        current = views.length - 1;
+        p.views ~= fresh;
+        p.current = p.views.length - 1;
     }
 
     d.editor = ed;
     d.path   = path; // in-place Save now has a target
     d.title  = baseName(path);
 
-    View* v = views[current];
+    View* v = p.views[p.current];
+    v.doc = d;
     wireView(v); // picks the new editor up, on a fresh view and a reused one alike
     v.hex.baseAddress = 0;
     v.hex.active = true;    // show the caret right away on the first byte
@@ -1065,6 +1304,7 @@ private enum
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT,
     CMD_SKIP_NEXT, CMD_SKIP_PREV,
     CMD_MARK, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
+    CMD_SPLIT, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
     CMD_MINIMAP, CMD_ABOUT, CMD_QUIT,
 }
 
@@ -1090,6 +1330,10 @@ private immutable Entry[] COMMANDS = [
     Entry("Previous Bookmark","[",            CMD_MARK_PREV),
     Entry("Bookmarks...",     "",             CMD_MARK_LIST),
     Entry("Clear Bookmarks",  "",             CMD_MARK_CLEAR),
+    Entry("Split Pane",       "Ctrl+\\",      CMD_SPLIT),
+    Entry("Close Pane",       "",             CMD_CLOSE_PANE),
+    Entry("Next Pane",        "",             CMD_PANE_NEXT),
+    Entry("Previous Pane",    "",             CMD_PANE_PREV),
     Entry("Toggle Minimap",   "",             CMD_MINIMAP),
     Entry("About vddhx",      "",             CMD_ABOUT),
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT),
@@ -1125,6 +1369,8 @@ private immutable Entry[] SHORTCUTS = [
     Entry("Save as",                      "Ctrl+Shift+S"),
     Entry("Close tab",                    "Ctrl+W"),
     Entry("Next / previous tab",          "Ctrl+Tab / Ctrl+Shift+Tab"),
+    Entry("Split the pane",               "Ctrl+\\"),
+    Entry("Go to pane 1, 2, 3...",        "Ctrl+1 .. Ctrl+9"),
     Entry("Quit",                         "Ctrl+Q"),
     Entry("Find",                         "Ctrl+F"),
     Entry("Find next / previous",         "Ctrl+N / Ctrl+Shift+N"),
@@ -1185,13 +1431,27 @@ private const(OmniItem)[] ui_omni_items()
     final switch (omni_mode(omni))
     {
     case OmniMode.switcher:
-        // One row per tab, not per document: the switcher picks a panel to go
-        // to, and two views of one file are two places to be. The path is what
-        // tells two same-named files apart, so it is both the detail column and,
-        // through the omnibar's matching, searchable itself.
-        foreach (size_t i, View* v; views)
-            put(v.doc.title, v.doc.path.length ? v.doc.path : "not saved yet",
-                cast(int) i, v.doc.editor && v.doc.editor.edited());
+        // One row per tab across every pane, not per document: the switcher picks
+        // a panel to go to, and two views of one file are two places to be. The
+        // path is what tells two same-named files apart, so it is both the detail
+        // column and, through the omnibar's matching, searchable itself.
+        //
+        // A row's id is its place in this list rather than a tab index, since a
+        // tab index means nothing without the pane it counts within; omniTabs
+        // carries the pair back for ui_omni_accept to act on.
+        size_t at;
+        foreach (size_t pi, Pane* p; panes)
+        {
+            foreach (size_t ti, View* v; p.views)
+            {
+                if (at >= omniTabs.length)
+                    omniTabs.length = at + 16;
+                omniTabs[at] = [ pi, ti ];
+                put(v.doc.title, v.doc.path.length ? v.doc.path : "not saved yet",
+                    cast(int) at, v.doc.editor && v.doc.editor.edited());
+                ++at;
+            }
+        }
         break;
     case OmniMode.command:
         foreach (ref immutable Entry e; COMMANDS)
@@ -1420,8 +1680,10 @@ private void ui_omni_accept(OmniMode mode, int id)
     final switch (mode)
     {
     case OmniMode.switcher:
-        if (id >= 0)
-            ui_select_tab(cast(size_t) id); // hands the panel focus itself
+        // The id indexes the flat list the rows were built from, which carries
+        // the pane the tab lives in as well as the tab itself.
+        if (id >= 0 && id < omniTabs.length)
+            ui_select_tab_in(omniTabs[id][0], omniTabs[id][1]); // takes focus itself
         break;
     case OmniMode.command:
         ui_omni_run(id);
@@ -1666,6 +1928,10 @@ private void ui_omni_run(int id)
     case CMD_MARK:      ui_mark_toggle();      break;
     case CMD_MARK_NEXT: ui_mark_step(1);       break;
     case CMD_MARK_PREV: ui_mark_step(-1);      break;
+    case CMD_SPLIT:      ui_split();           break;
+    case CMD_CLOSE_PANE: ui_close_pane();      break;
+    case CMD_PANE_NEXT:  ui_cycle_pane(1);     break;
+    case CMD_PANE_PREV:  ui_cycle_pane(-1);    break;
     case CMD_MARK_CLEAR:
         ui_status("cleared %u bookmark(s)", doc.marks.length);
         doc.marks = null;
@@ -1762,23 +2028,10 @@ void ui_frame(mu_Context* ctx, int width, int height)
             120, toolbar.h), 0);
         mu_checkbox(ctx, "Minimap", &minimapOn);
 
-        // Tabs last, so the strip sits directly on top of the document it names.
-        ui_tabs(ctx);
-        view.hex.minimap = minimapOn != 0;
-
-        // The editor's size shifts as inserts and deletes land, so refresh the
-        // panel's copy each frame before it draws; the panel keeps it live within
-        // a frame, this keeps it authoritative across them.
-        if (doc.editor)
-            view.hex.dataSize = doc.editor.size();
-
-        // The panel takes the rest of the window, save a strip at the bottom
-        // reserved for the status bar. Feed it the monospace face. Every tab
-        // draws through this one panel - only one is ever on screen - so its
-        // ddui container is shared and the per-document state lives in HexView.
+        // The panes take the rest of the window, save a strip at the bottom
+        // reserved for the status bar.
         int statusH = ctx.text_height(ctx.style.font) + 6;
-        // Check return with `& MU_RES_CHANGE`
-        cast(void)hex_view(ctx, "hexpanel", view.hex, render_font_mono(), statusH);
+        ui_panes(ctx, statusH);
 
         // Status bar: edit mode, a dirty marker, caret offset and selection length,
         // echoing what the panel reports back through its state. Pinned to the
@@ -1835,53 +2088,155 @@ void ui_frame(mu_Context* ctx, int width, int height)
     }
 }
 
-/// Draw the tab strip and act on what was clicked: one tab per view, named after
-/// the document it shows and carrying its unsaved-changes dot, plus the trailing
-/// + button. Two views of one file are two tabs, both named the same.
+/// What a tab strip asked for this frame, held until every pane has been drawn.
 ///
-/// The item slice is rebuilt every frame from `views` (titles and dirty flags
-/// both move under us) into storage that only ever grows, so a steady tab count
-/// costs no allocation. Actions land straight away: a close can drop the view
-/// the rest of this frame would have drawn, which is why everything below the
-/// strip reads through `view` and `doc` rather than holding a reference.
-private void ui_tabs(mu_Context* ctx)
+/// A close can take a whole pane out of the row, which would leave the loop over
+/// `panes` walking an array that has moved under it. So the strips only report,
+/// and the one action a frame can carry is applied once the loop is done - still
+/// this frame, so nothing the user did is left waiting for the next one.
+private struct TabRequest
 {
-    if (tabItems.length < views.length)
-        tabItems.length = views.length;
-    foreach (size_t i, View* v; views)
-        tabItems[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited());
+    size_t pane;
+    TabAction action;
+    int index;
+    int target;
+}
 
-    int index, target;
-    TabAction action = tab_bar(ctx, "tabs", tabstrip, tabItems[0 .. views.length],
-        cast(int) current, index, target);
-    switch (action)
+/// Lay the panes out across the window and draw each one.
+///
+/// A row of panes, splitters between them, sharing the width by weight. The row
+/// takes the whole window below the toolbar bar `statusH` pixels at the bottom,
+/// which the status bar then lands in.
+private void ui_panes(mu_Context* ctx, int statusH)
+{
+    size_t n = panes.length;
+
+    // One full-width row for the lot, then every pane and splitter placed inside
+    // it by hand: ddui hands an absolute rect straight back without advancing its
+    // own layout, which is what lets a column be pinned to a computed rect.
+    static immutable int[1] full = [ -1 ];
+    mu_layout_row(ctx, 1, full.ptr, -(statusH + ctx.style.spacing + 1));
+    mu_Rect row = mu_layout_next(ctx);
+
+    int bars  = cast(int)(n - 1) * SPLIT_WIDTH;
+    int avail = mu_max(0, row.w - bars);
+
+    if (paneWeights.length < n) paneWeights.length = n;
+    if (paneWidths.length  < n) paneWidths.length  = n;
+    foreach (size_t i, Pane* p; panes)
+        paneWeights[i] = p.weight;
+    split_layout(paneWeights[0 .. n], avail, paneWidths[0 .. n]);
+
+    TabRequest req = { action: TabAction.none };
+    int x = row.x;
+    foreach (size_t i, Pane* p; panes)
     {
-    case TabAction.select: ui_select_tab(index); break;
-    case TabAction.close:  ui_close_tab(index);  break;
-    case TabAction.add:    ui_new_tab();         break;
-    case TabAction.move:   ui_move_tab(index, target); break;
+        mu_Rect r = mu_Rect(x, row.y, paneWidths[i], row.h);
+        x += r.w;
+
+        // Clicking anywhere in a pane is what moves the keyboard to it, so the
+        // menus, the omnibar and every chord act on the pane last worked in. The
+        // panel inside also takes ddui's own focus from the same press; this is
+        // the application's notion of where the user is, alongside it.
+        if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, r))
+            focused = i;
+
+        mu_layout_set_next(ctx, r, 0);
+        mu_layout_begin_column(ctx);
+        ui_pane(ctx, *p, i, req);
+        mu_layout_end_column(ctx);
+
+        // A splitter between each pair, dragged to trade width across it. The
+        // weights are written back through the scratch the layout was built from,
+        // so the panes redraw at the new sizes on the very next frame.
+        if (i + 1 < n)
+        {
+            mu_Rect sr = mu_Rect(x, row.y, SPLIT_WIDTH, row.h);
+            x += SPLIT_WIDTH;
+            int dx = split_bar(ctx, p.barId.ptr, sr);
+            if (dx && split_resize(paneWeights[0 .. n], i, dx, avail, PANE_MIN))
+                foreach (size_t j, Pane* q; panes)
+                    q.weight = paneWeights[j];
+        }
+    }
+
+    // Now that the loop is done with `panes`, whatever a strip asked for is safe
+    // to carry out, even where it drops the pane that asked.
+    switch (req.action)
+    {
+    case TabAction.select: ui_select_tab_in(req.pane, req.index); break;
+    case TabAction.close:  ui_close_tab_in(req.pane, req.index);  break;
+    case TabAction.add:    focused = req.pane; ui_new_tab();      break;
+    case TabAction.move:   ui_move_tab(req.pane, req.index, req.target); break;
     default:
     }
+}
+
+/// Draw one pane: its tab strip, then the hex panel filling what is left of the
+/// column it was given.
+///
+/// One tab per view, named after the document it shows and carrying that
+/// document's unsaved-changes dot. Two views of one file are two tabs, both named
+/// the same, whether they sit in one pane or in two.
+///
+/// The item slice is rebuilt every frame (titles and dirty flags both move under
+/// us) into storage that only ever grows, so a steady tab count costs no
+/// allocation. What the strip reports goes into `req` rather than happening here;
+/// see TabRequest.
+private void ui_pane(mu_Context* ctx, ref Pane p, size_t index, ref TabRequest req)
+{
+    if (p.items.length < p.views.length)
+        p.items.length = p.views.length;
+    foreach (size_t i, View* v; p.views)
+        p.items[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited());
+
+    // Only the pane taking keys lights its accent, so with several panes open it
+    // is never a guess which one a keystroke lands in.
+    p.tabs.unfocused = index != focused;
+
+    int at, target;
+    TabAction action = tab_bar(ctx, p.tabId.ptr, p.tabs,
+        p.items[0 .. p.views.length], cast(int) p.current, at, target);
+    if (action != TabAction.none)
+        req = TabRequest(index, action, at, target);
+
+    View* v = p.views[p.current];
+    v.hex.minimap = minimapOn != 0;
+
+    // The editor's size shifts as inserts and deletes land, so refresh the
+    // panel's copy each frame before it draws; the panel keeps it live within a
+    // frame, this keeps it authoritative across them - and across panes, where an
+    // edit made in one is a size change the other has yet to hear about.
+    if (v.doc.editor)
+        v.hex.dataSize = v.doc.editor.size();
+
+    // The panel fills the rest of the column, so nothing is reserved below it:
+    // the status bar is the window's, not this pane's.
+    // Check return with `& MU_RES_CHANGE`
+    cast(void) hex_view(ctx, p.hexId.ptr, v.hex, render_font_mono(), 0);
 }
 
 /// Reorder the tab strip: take the view at `from` and put it at `to`, shifting
 /// whatever it passes over the other way. The drag route, so the strip the
 /// pointer leaves behind is the order that sticks.
-private void ui_move_tab(size_t from, size_t to)
+private void ui_move_tab(size_t paneIndex, size_t from, size_t to)
 {
-    if (from >= views.length || to >= views.length || from == to)
+    if (paneIndex >= panes.length)
+        return;
+    Pane* p = panes[paneIndex];
+    if (from >= p.views.length || to >= p.views.length || from == to)
         return;
 
-    View* moved = views[from];
+    View* moved = p.views[from];
     if (from < to)
         foreach (i; from .. to)
-            views[i] = views[i + 1];
+            p.views[i] = p.views[i + 1];
     else
         foreach_reverse (i; to .. from)
-            views[i + 1] = views[i];
-    views[to] = moved;
+            p.views[i + 1] = p.views[i];
+    p.views[to] = moved;
 
-    current = tab_reindex(current, from, to);
+    p.current = tab_reindex(p.current, from, to);
 }
 
 /// Where the tab at `at` ends up once the one at `from` is moved to `to`. The

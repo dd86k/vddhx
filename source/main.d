@@ -303,6 +303,26 @@ void main(string[] args)
                         ui_cycle_tab(event.key.mod & SDL_KMOD_SHIFT ? -1 : 1);
                         break;
                     }
+                    // Panes: split the one in front, and jump straight to one by
+                    // number. Ctrl+1..9 is the editor-group binding rather than
+                    // the browser tab one - with panes on screen, a numbered jump
+                    // is far more use aimed at those than at tabs.
+                    //
+                    // Ctrl+\ is what VS Code splits with, and it is a keycode
+                    // rather than a typed character because SDL sends no text
+                    // input for a Ctrl chord. On a layout that puts backslash
+                    // behind AltGr this will not fire; the omnibar's "Split Pane"
+                    // is the route that always works.
+                    if (event.key.key == SDLK_BACKSLASH)
+                    {
+                        ui_split();
+                        break;
+                    }
+                    if (event.key.key >= SDLK_1 && event.key.key <= SDLK_9)
+                    {
+                        ui_focus_pane(event.key.key - SDLK_1);
+                        break;
+                    }
                     // Shift forces the Save As dialog; plain Ctrl+S writes in
                     // place, falling back to the dialog when there is no path yet.
                     if (event.key.key == SDLK_S)

@@ -261,9 +261,12 @@ int screenshot_run(string[] args)
     mu_input_mousedown(&ctx, grab.x + 3, grabY, MU_MOUSE_LEFT); frame();
     mu_input_mousemove(&ctx, grab.x + 43, grabY); frame(); frame();
     shot("shot-tabs-drag.bmp");
-    mu_input_mousemove(&ctx, grab.x + 143, grabY); frame(); frame();
+    // Yanked well past the last tab, into the bare strip a short row leaves in a
+    // wide window: the tab stops on the last slot instead of following the
+    // pointer out there, so it never comes away from the row it is landing in.
+    mu_input_mousemove(&ctx, grab.x + 500, grabY); frame(); frame();
     shot("shot-tabs-drag2.bmp");
-    mu_input_mouseup(&ctx, grab.x + 143, grabY, MU_MOUSE_LEFT); frame(); frame();
+    mu_input_mouseup(&ctx, grab.x + 500, grabY, MU_MOUSE_LEFT); frame(); frame();
     shot("shot-tabs-dropped.bmp");
 
     // Middle-clicking one closes it: the shortest route through the close path
@@ -274,6 +277,48 @@ int screenshot_run(string[] args)
     mu_input_mousedown(&ctx, other.x + 3, other.y + 3, MU_MOUSE_MIDDLE); frame();
     mu_input_mouseup(&ctx, other.x + 3, other.y + 3, MU_MOUSE_MIDDLE); frame();
     shot("shot-tabs-closed.bmp");
+
+    // Scenario 10d: panes. Splitting puts a second pane beside the first, showing
+    // the same document at the same offset through a view of its own. The two
+    // then move apart: scrolling the new one leaves the old one where it was, and
+    // only the focused pane lights its tab accent.
+    ui_split();
+    frame(); frame();
+    shot("shot-pane-split.bmp");
+
+    // Walk the right-hand pane a long way down. The left one is looking at the
+    // same bytes through its own caret and scroll position, so it must not move.
+    foreach (i; 0 .. 24) tap(HEX_KEY_DOWN);
+    frame();
+    shot("shot-pane-apart.bmp");
+
+    // An edit in one pane is an edit to the document, so it shows in both. Type
+    // over the byte under the right-hand caret and the left pane redraws with it.
+    mu_input_text(&ctx, "ff");
+    frame(); frame();
+    shot("shot-pane-shared-edit.bmp");
+
+    // A third pane, then the splitters dragged: the boundary between the first
+    // two moves right, taking width from the second.
+    ui_split();
+    frame(); frame();
+    shot("shot-pane-three.bmp");
+
+    // Dragging the first splitter right takes width from the pane on its right
+    // and gives it to the one on its left; the third pane is not on that boundary
+    // and does not move. Three panes at weights 500/250/250 over 788px of room
+    // put that boundary at x=394, so the bar spans 394..400.
+    mu_input_mousemove(&ctx, 397, 300); frame(); frame();
+    mu_input_mousedown(&ctx, 397, 300, MU_MOUSE_LEFT); frame();
+    mu_input_mousemove(&ctx, 500, 300); frame(); frame();
+    shot("shot-pane-resize.bmp");
+    mu_input_mouseup(&ctx, 500, 300, MU_MOUSE_LEFT); frame();
+
+    // Clicking into a pane is what moves the keyboard to it: the accent on the
+    // left pane's tab lights and the right one's goes dim.
+    click(60, 300);
+    frame();
+    shot("shot-pane-focus.bmp");
 
     // Scenario 11: the omnibar. Ctrl+E is a main-loop chord, so the scripted
     // driver calls the entry point that key does, then types into the box the

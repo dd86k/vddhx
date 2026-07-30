@@ -38,6 +38,11 @@ struct TabBar
     /// window and wrong when it caps a panel with a canvas of its own.
     mu_Color content;
 
+    /// Mute the active tab's accent edge. For a strip that is not the one taking
+    /// keys: with several side by side, every one of them has a tab in front, and
+    /// only the lit accent says which of those the keyboard is actually in.
+    bool unfocused;
+
     private:
 
     // Pixels the strip is scrolled right by when the tabs overflow it. Owned by
@@ -289,8 +294,8 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     {
         int from = bar.held; // `items` is still in this frame's order
         int w = slots[from] - TAB_GAP;
-        int floatX = mu_clamp(ctx.mouse_pos.x - bar.grabDX,
-            lane.x, mu_max(lane.x, lane.x + lane.w - w));
+        int floatX = tab_float_x(ctx.mouse_pos.x - bar.grabDX,
+            lane, origin, total, slots[from]);
         int to = tab_drop_index(slots, from, origin, floatX + w / 2);
         if (to != from)
         {
@@ -411,6 +416,62 @@ unittest
     assert(tab_drop_index(one, 0, 0, 5000) == 0);
 }
 
+// Where a dragged tab's left edge is allowed to be.
+//
+// The pointer can wander anywhere in the strip, but the tab should not follow it
+// off the row: with a few short tabs in a wide window most of the lane is bare,
+// and a tab floating out in it has visibly come away from the row it is being
+// dropped into. So it stops where its slot would be were it last in the strip -
+// or at the lane's own edge when the tabs overflow and that comes first, since
+// then the far end is somewhere the lane has to be scrolled to reach.
+// Params:
+//     wanted = Where the pointer would put the tab's left edge.
+//     lane = The visible strip, the + button excluded.
+//     originX = Left edge the slots are laid out from: the lane less the scroll.
+//     total = Every slot width added up, so the row's full extent.
+//     slotW = The dragged tab's own slot width.
+// Returns: The left edge to draw it at.
+int tab_float_x(int wanted, mu_Rect lane, int originX, int total, int slotW)
+{
+    int lo = mu_max(lane.x, originX);
+    int hi = mu_min(lane.x + lane.w - (slotW - TAB_GAP), originX + total - slotW);
+    return mu_clamp(wanted, lo, mu_max(lo, hi));
+}
+
+unittest
+{
+    // A wide lane with a short row in it: the tab stops on the last slot rather
+    // than carrying on into the bare strip past it. Three 100px slots from 0, so
+    // the last one starts at 200.
+    static immutable mu_Rect wide = mu_Rect(0, 0, 800, 20);
+    assert(tab_float_x(150,  wide, 0, 300, 100) == 150); // inside the row, as asked
+    assert(tab_float_x(200,  wide, 0, 300, 100) == 200); // exactly the last slot
+    assert(tab_float_x(400,  wide, 0, 300, 100) == 200); // out in the bare strip
+    assert(tab_float_x(9999, wide, 0, 300, 100) == 200);
+    assert(tab_float_x(-50,  wide, 0, 300, 100) == 0);   // and off the left end
+
+    // The lane's own inset is respected on both ends.
+    static immutable mu_Rect inset = mu_Rect(40, 0, 800, 20);
+    assert(tab_float_x(20,  inset, 40, 300, 100) == 40);
+    assert(tab_float_x(400, inset, 40, 300, 100) == 240); // 40 + 300 - 100
+
+    // A row wider than the lane: now the lane edge is what stops it, since the
+    // row's far end is off screen until the strip scrolls to it.
+    static immutable mu_Rect tight = mu_Rect(0, 0, 250, 20);
+    assert(tab_float_x(400, tight, 0, 900, 100) == 153); // 250 - (100 - TAB_GAP)
+    assert(tab_float_x(100, tight, 0, 900, 100) == 100); // still in the lane
+
+    // Scrolled right by 200: the row starts off the left of the lane, so the left
+    // stop is the lane edge rather than the row's own start.
+    assert(tab_float_x(-300, tight, -200, 900, 100) == 0);
+    assert(tab_float_x(50,   tight, -200, 900, 100) == 50);
+
+    // A lane too narrow to hold one tab still gives a usable answer rather than
+    // an inverted range.
+    static immutable mu_Rect sliver = mu_Rect(10, 0, 20, 20);
+    assert(tab_float_x(500, sliver, 10, 300, 100) == 10);
+}
+
 // Paint one tab in `r`. Split out of the strip's loop so a tab being dragged can
 // be drawn from the pointer once every other tab is down, and so land on top.
 void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
@@ -430,7 +491,8 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     int top = active ? 0 : TAB_LIFT;
     mu_draw_rect(ctx, mu_Rect(r.x, r.y + top, r.w, r.h - top), face);
     if (active)
-        mu_draw_rect(ctx, mu_Rect(r.x, r.y, r.w, TAB_ACCENT_H), TAB_ACCENT);
+        mu_draw_rect(ctx, mu_Rect(r.x, r.y, r.w, TAB_ACCENT_H),
+            bar.unfocused ? TAB_DIM : TAB_ACCENT);
 
     mu_Color ink = active ? ctx.style.colors[MU_COLOR_TEXT] : TAB_DIM;
 
