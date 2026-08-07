@@ -69,6 +69,91 @@ private struct View
     /// caret is active from the outset so it sits ready on a blank panel,
     /// letting a file be built from scratch before anything is opened.
     HexView hex = { active: true };
+
+    /// The comparison this view is one side of, null for an ordinary view. Which
+    /// side it is - and so whether it is the one carrying the colouring - is read
+    /// off the Diff; see diff_peer.
+    Diff* diff;
+
+    /// The counterpart's bytes, one block at a time. The colour hook is asked
+    /// about one byte at a time but is called in offset order, so a block read
+    /// ahead answers a screenful of them: a whole frame costs a read or two of
+    /// the other document rather than one per byte drawn.
+    ///
+    /// Dropped at the top of every frame the view draws (see ui_pane) rather than
+    /// invalidated on edits: the counterpart can be typed into in its own pane,
+    /// undone, or reloaded, and none of that passes through here. A stale block
+    /// would then have this side colouring against bytes that are no longer there.
+    ubyte[] peerBuf;
+    /// Ditto, the document offset `peerBuf[0]` holds.
+    size_t peerStart;
+    /// Ditto, how much of it is valid. Zero means nothing is cached.
+    size_t peerLen;
+
+    /// The counterpart's size, read once a frame alongside the block above. What
+    /// separates a byte that differs from one the other document simply does not
+    /// have, which is the whole story past the end of the shorter of the two.
+    long peerSize;
+
+    /// Where this view was scrolled to when it was last drawn, so the next frame
+    /// can tell whether the user moved it. Only the side that moved drives the
+    /// other; see ui_sync_diffs.
+    long topSeen;
+
+    /// Whether that position was put there by the counterpart rather than by the
+    /// user. What lets a scroll the panel could not honour in full - the shorter
+    /// of two files, stopped at its last screenful - be told from the user
+    /// scrolling this side, which otherwise look identical from the outside and
+    /// would have the two panes dragging each other back and forth.
+    bool topForced;
+}
+
+/// Two views held against each other and compared byte for byte.
+///
+/// The pairing is between views rather than documents: it is the two tabs the
+/// user put side by side, so one file can be compared against two others in two
+/// panes at once, and each pairing scrolls as its own unit. A view is in at most
+/// one comparison, and both sides always point at the same Diff.
+///
+/// The two sides are not alike, which is why they are named rather than indexed.
+/// The comparison is something done *to* a document the user already had open:
+/// that one goes on looking exactly as it did, and the file opened against it is
+/// the one that reports. So only `against` is tinted, and only `against` reads
+/// the other's bytes at all - `base` is an ordinary view that happens to be
+/// scrolled in step with its neighbour.
+///
+/// Strictly offset-aligned - byte n against byte n - which is the honest reading
+/// for firmware images, patched binaries and same-size structures, and visibly
+/// wrong the moment one side has an insertion: everything past it reads as
+/// changed. Aligning on content instead would need rows standing for no offset at
+/// all, and a hex panel row *is* its offset (`row * columns`), so the display
+/// offsets would part company with the document offsets that the caret, the
+/// status bar, the bookmarks and every edit are addressed in. That is a feature
+/// of its own, not a tweak to this one.
+private struct Diff
+{
+    /// The view the comparison was started from: the document the user was
+    /// already working in, left in its ordinary colours.
+    View* base;
+
+    /// The view opened against it, which carries the colouring. Never the same
+    /// view as `base`.
+    View* against;
+}
+
+/// The other side of `v`'s comparison, or null when it is not in one.
+private View* diff_peer(View* v)
+{
+    if (v is null || v.diff is null)
+        return null;
+    return v.diff.base is v ? v.diff.against : v.diff.base;
+}
+
+/// Whether `v` is the side that reports: the one drawn against the other, and so
+/// the only one that dims its matching bytes and colours its differing ones.
+private bool diff_reports(View* v)
+{
+    return v.diff && v.diff.against is v;
 }
 
 /// One pane: a strip of tabs over a hex panel, filling its share of the window.
@@ -281,6 +366,36 @@ private enum mu_Color CANVAS = mu_Color(0, 0, 0, 255);
 /// rather than as one more class of byte.
 private enum mu_Color BOOKMARK_TINT = mu_Color(240, 180, 70, 255);
 
+/// A byte that differs from the one at the same offset in the document it is
+/// being compared against.
+private enum mu_Color DIFF_CHANGED = mu_Color(255, 95, 95, 255);
+
+/// A byte past the end of that document: here, but with nothing to compare it
+/// against. Green, so a file that is simply longer than the other reads as a tail
+/// of additions rather than as a wall of changes.
+private enum mu_Color DIFF_ADDED = mu_Color(120, 230, 140, 255);
+
+/// How much of its brightness a matching byte keeps while a comparison is up, in
+/// percent.
+///
+/// Rather than flattening the matches to one grey, which is what a diff over
+/// *text* does: hex_classify's colouring is how the structure of a binary is read
+/// at all, and dropping it would leave the untouched 99% of a patched file
+/// unreadable. Dimming keeps the strings, the padding and the tables legible
+/// while the differences carry the eye - which is a choice a terminal hex editor
+/// does not get to make, but this one has the whole channel to spend.
+private enum int DIFF_MATCH_KEEP = 42;
+
+/// Ditto: `c` at DIFF_MATCH_KEEP percent, alpha untouched.
+private mu_Color diff_dim(mu_Color c)
+{
+    return mu_Color(
+        cast(ubyte)(c.r * DIFF_MATCH_KEEP / 100),
+        cast(ubyte)(c.g * DIFF_MATCH_KEEP / 100),
+        cast(ubyte)(c.b * DIFF_MATCH_KEEP / 100),
+        c.a);
+}
+
 /// Apply the application's own style over ddui's defaults. Call once after
 /// mu_init, before the first frame.
 ///
@@ -320,6 +435,18 @@ private __gshared int minimapOn = 1;
 /// so the ready flag is atomic and orders the buffer write against the read.
 private __gshared char[4096] pendingPath;
 private shared bool pendingReady;
+
+/// Whether that path was asked for by "Compare With..." rather than by Open, and
+/// the view it is to be compared against.
+///
+/// Only the main thread touches these: the dialog callback knows nothing about
+/// what raised it, and the flag is set before the dialog goes up and read on the
+/// frame the path comes back. The view is held by pointer and checked against the
+/// grid before use - the dialog is not modal, so tabs can be closed while it is
+/// up, including the one the comparison was started from.
+private __gshared bool pendingCompare;
+/// Ditto.
+private __gshared View* compareFrom;
 
 /// Ditto, for the async Save As dialog. The callback does no GC work, so the
 /// chosen path is stashed here and the actual write happens on the main thread.
@@ -444,6 +571,10 @@ private void ui_close_tab_in(Pane* p, size_t index)
     bool last = ui_view_count(d) <= 1;
     if (last && ui_confirm_discard(d, "Close document") != Confirm.proceed)
         return;
+
+    // The tab is going, so any comparison it was one side of is over. Done after
+    // the prompt, which can still be cancelled and leave everything as it was.
+    diff_unlink(p.views[index]);
 
     p.views = p.views[0 .. index] ~ p.views[index + 1 .. $];
     if (last)
@@ -592,16 +723,74 @@ private View* ui_split_view()
     return v;
 }
 
+/// Pair `base` and `against` up as the two sides of a comparison: `base` is the
+/// document already open, `against` the one opened to compare with it and the
+/// only one of the two that shows it (see Diff).
+///
+/// Either view already comparing something is taken out of that pairing first: a
+/// view has one counterpart, because it has one set of colours to say so with.
+/// Comparing a view with itself is not a comparison and is refused.
+private void diff_link(View* a, View* b)
+{
+    if (a is null || b is null || a is b)
+        return;
+
+    diff_unlink(a);
+    diff_unlink(b);
+
+    Diff* d = new Diff;
+    d.base    = a;
+    d.against = b;
+    a.diff = d;
+    b.diff = d;
+
+    // Neither has a cached block or a peer size yet, and the two are not looking
+    // at the same place. The next frame each draws sorts both out; the scroll
+    // comes across now so the pairing opens lined up rather than a frame later.
+    hex_set_top_offset(b.hex, hex_top_offset(a.hex));
+    a.topSeen  = hex_top_offset(a.hex);
+    b.topSeen  = a.topSeen;
+    b.topForced = true; // and if b is the shorter, its clamp is not a lead
+}
+
+/// Take `v` out of whatever comparison it is in, and the other side with it: a
+/// comparison with one side left is not one. Safe on a view that is not in one.
+///
+/// Called wherever a view stops being what it was - closed, or handed a different
+/// document - since the colours would otherwise go on claiming a counterpart that
+/// is gone or no longer the one being compared.
+private void diff_unlink(View* v)
+{
+    if (v is null || v.diff is null)
+        return;
+
+    Diff* d = v.diff;
+    foreach (View* side; [ d.base, d.against ])
+    {
+        if (side is null)
+            continue;
+        side.diff    = null;
+        side.peerLen = 0; // nothing to compare against; drop the stale block
+    }
+}
+
 /// Split the focused pane in two side by side: a second pane opens to the right
 /// of its column, in a new column of its own, and takes the keyboard.
 void ui_split()
+{
+    ui_split_pane(ui_split_view());
+}
+
+/// Ditto, with the view the new pane opens on given: a second look at the same
+/// document for a plain split, the file being compared against for a comparison.
+private void ui_split_pane(View* v)
 {
     size_t ci, pi;
     if (ui_locate(focused, ci, pi) == false)
         return;
 
     Pane* p = newPane();
-    p.views ~= ui_split_view();
+    p.views ~= v;
 
     // A column of one, taking half the width of the column it came out of, so the
     // rest of the window is left exactly as it was. Splitting a column that has
@@ -722,6 +911,36 @@ private void ui_window_title()
     SDL_SetWindowTitle(uiWindow, titleShown.ptr);
 }
 
+/// `s` cut back to at most `max` bytes, on a UTF-8 boundary so a name clipped to
+/// fit somewhere never ends in half a character (which the renderer would draw as
+/// a replacement glyph, or refuse outright).
+///
+/// Bytes rather than characters because what runs out is always a fixed buffer,
+/// and every caller here is fitting a file name into one.
+private string ui_clip(string s, size_t max)
+{
+    if (s.length <= max)
+        return s;
+
+    size_t cut = max;
+    while (cut > 0 && (s[cut] & 0xc0) == 0x80) // the cut landed mid-character
+        --cut;
+    return s[0 .. cut];
+}
+
+unittest
+{
+    assert(ui_clip("short", 32) == "short");
+    assert(ui_clip("exactly8", 8) == "exactly8");
+    assert(ui_clip("truncate me", 8) == "truncate");
+
+    // "é" is two bytes: a cut landing inside it takes the whole character out
+    // rather than leaving its lead byte behind.
+    assert(ui_clip("abécd", 3) == "ab");
+    assert(ui_clip("abécd", 4) == "abé");
+    assert(ui_clip("é", 1) == "");
+}
+
 /// Compose "name * - vddhx" into `buf` and return the slice written. A name too
 /// long for the buffer is cut back, on a UTF-8 boundary so the title never
 /// carries half a character. `buf` must have room for the fixed parts.
@@ -731,14 +950,7 @@ private char[] ui_title_text(char[] buf, string name, bool dirty)
     enum string SUFFIX = " - vddhx";
     assert(buf.length > DIRTY.length + SUFFIX.length);
 
-    size_t room = buf.length - DIRTY.length - SUFFIX.length;
-    if (name.length > room)
-    {
-        size_t cut = room;
-        while (cut > 0 && (name[cut] & 0xc0) == 0x80) // the cut landed mid-character
-            --cut;
-        name = name[0 .. cut];
-    }
+    name = ui_clip(name, buf.length - DIRTY.length - SUFFIX.length);
 
     size_t n = name.length;
     buf[0 .. n] = name;
@@ -815,15 +1027,78 @@ private ubyte[] hexRead(long pos, ubyte[] buf, void* user)
 
 /// ddui-side colour scheme: bookmarked bytes stand out, everything else is
 /// classified the way the panel would have classified it anyway. `user` is the
-/// Document stashed in hex.colorUser - the marks belong to the bytes being drawn,
-/// not to whichever document happens to be in front.
+/// View stashed in hex.colorUser - the marks belong to the bytes being drawn, not
+/// to whichever document happens to be in front, and so does the comparison.
+///
+/// Only the reporting side of a comparison is coloured by it. The document that
+/// was already open goes on looking exactly as it did: a comparison is something
+/// the user is doing to it, not something that happened to it, and marking up
+/// both halves would leave neither reading as the file itself.
 private mu_Color hexColor(size_t offset, ubyte value, void* user)
 {
-    Document* d = cast(Document*) user;
-    if (d && bookmark_has(d.marks, cast(long) offset))
+    View* v = cast(View*) user;
+    if (v is null)
+        return hex_classify(offset, value, null);
+
+    // A mark outranks the comparison: it is the one colour the user put there by
+    // hand, and it is still worth finding in a file being compared.
+    if (bookmark_has(v.doc.marks, cast(long) offset))
         return BOOKMARK_TINT;
+
+    if (diff_reports(v))
+    {
+        if (cast(long) offset >= v.peerSize)
+            return DIFF_ADDED;
+
+        // A byte the counterpart cannot produce - a read that came up short on a
+        // file being written from under us - is not a difference anyone can act
+        // on, so it is left to read as itself.
+        ubyte other;
+        if (diff_peer_byte(v, offset, other) && other != value)
+            return DIFF_CHANGED;
+        return diff_dim(hex_classify(offset, value, null));
+    }
+
     return hex_classify(offset, value, null);
 }
+
+/// The counterpart's byte at `offset`, through the view's one-block cache.
+///
+/// Refilled from the block the offset falls in, so walking a screenful in order
+/// costs one read of the other document (two where the screen straddles a block
+/// boundary) rather than one per byte. See View.peerBuf for why it is dropped
+/// every frame rather than kept.
+/// Returns: False when the counterpart has no byte there to compare against.
+private bool diff_peer_byte(View* v, size_t offset, out ubyte value)
+{
+    if (v.peerLen == 0 || offset < v.peerStart || offset - v.peerStart >= v.peerLen)
+    {
+        IDocumentEditor ed = diff_peer(v).doc.editor;
+        if (ed is null)
+            return false;
+
+        if (v.peerBuf.length < DIFF_BLOCK)
+            v.peerBuf.length = DIFF_BLOCK;
+
+        // Aligned down, so a screen crossing a boundary settles into the next
+        // block rather than re-reading from wherever the last byte happened to
+        // land and thrashing a read per byte.
+        size_t start = offset - (offset % DIFF_BLOCK);
+        ubyte[] got = ed.view(cast(long) start, v.peerBuf);
+        v.peerStart = start;
+        v.peerLen   = got.length;
+
+        if (offset - start >= v.peerLen)
+            return false;
+    }
+
+    value = v.peerBuf[offset - v.peerStart];
+    return true;
+}
+
+/// How much of the counterpart is pulled in at a time. A screenful of bytes is a
+/// couple of thousand at most, so one block covers a frame with room to spare.
+private enum size_t DIFF_BLOCK = 8 * 1024;
 
 /// ddui-side write hooks: forward the panel's single-byte edits to the editor.
 /// The editor holds them in its piece table (nothing touches disk until a Save),
@@ -914,7 +1189,8 @@ private void wireView(View* v)
     v.hex.redoFn    = &hexRedo;
     v.hex.writeUser = cast(void*) v;
     v.hex.colorFn   = &hexColor;
-    v.hex.colorUser = cast(void*) v.doc;
+    v.hex.colorUser = cast(void*) v; // the view, not the document: it holds the
+                                     // comparison as well as the way to the marks
     v.hex.data      = null;
     v.hex.dataSize  = ed ? ed.size() : 0;
 }
@@ -981,39 +1257,103 @@ void ui_open_dialog()
     SDL_ShowOpenFileDialog(&ui_on_file_picked, null, uiWindow, null, 0, null, false);
 }
 
+/// Put up the Open dialog to pick a file to compare the front tab against. The
+/// path comes back the same way an Open's does; pendingCompare is what tells the
+/// two apart when it lands.
+void ui_compare_dialog()
+{
+    pendingCompare = true;
+    compareFrom    = pane.views[pane.current];
+    SDL_ShowOpenFileDialog(&ui_on_file_picked, null, uiWindow, null, 0, null, false);
+}
+
+/// Open `path` beside the tab the comparison was started from and pair the two
+/// up, byte for byte.
+///
+/// The file gets a pane of its own to the right rather than a tab in the pane it
+/// is being compared with: the whole point is to see both at once. Failing to open
+/// it leaves the window exactly as it was - the pane is only made once the bytes
+/// are known to be there.
+///
+/// Public because it is the whole action with the dialog taken off the front: it
+/// is what the scripted driver calls, and what a command line naming two files
+/// would reach for.
+void ui_compare_with(string path)
+{
+    // The dialog is not modal, so the tab this was started from may have been
+    // closed, or dragged into another pane, while it was up. Whatever it is now,
+    // it has to be a view still in the grid to be compared against; the front tab
+    // of the focused pane is the honest fallback.
+    View* left = compareFrom;
+    compareFrom = null;
+    if (left is null || ui_view_pane(left) is null)
+        left = pane.views[pane.current];
+
+    Document* d = ui_load(path);
+    if (d is null)
+        return;
+
+    View* right = new View;
+    right.doc = d;
+    wireView(right);
+    right.hex.active = true;
+
+    // Beside the pane holding the left side, which is not necessarily the focused
+    // one once the dialog has been up and the user has clicked elsewhere.
+    focused = ui_view_pane(left);
+    ui_split_pane(right);
+    diff_link(left, right);
+
+    ui_status("comparing %s with %s", left.doc.title, right.doc.title);
+    logInfo("comparing %s with %s", left.doc.title, path);
+}
+
+/// End the comparison the front tab is part of, on both sides. Does nothing when
+/// it is not in one.
+void ui_compare_stop()
+{
+    View* v = pane.views[pane.current];
+    if (v.diff is null)
+    {
+        ui_status("not comparing");
+        return;
+    }
+
+    ui_status("comparison ended");
+    diff_unlink(v);
+}
+
+/// The pane `v` is a tab of, or null when it is not in the grid at all (a view
+/// closed while a dialog was up). The check that a View* held across frames is
+/// still a view of something.
+private Pane* ui_view_pane(const(View)* v)
+{
+    foreach (Column* c; columns)
+        foreach (Pane* p; c.panes)
+            foreach (View* q; p.views)
+                if (q is v)
+                    return p;
+    return null;
+}
+
 /// Open `path` through a fresh ddhx editor and give it a tab.
 ///
 /// The file lands in a new tab, unless the one in front is an untouched scratch
 /// buffer - the state the app starts in - which it takes over rather than
 /// leaving an empty tab behind. On failure nothing changes and the error is
 /// logged, so a bad path never disturbs what is already open.
-void ui_open(string path)
+bool ui_open(string path)
 {
-    IDocumentEditor ed;
-    try
-    {
-        IDocument document = new FileDocument(path); // read-only by default
-        ed = spawnEditor();                          // the default backend
-        ed.open(document);
-    }
-    catch (Exception e)
-    {
-        logWarn("open failed: %s", e.msg);
-        return;
-    }
+    Document* d = ui_load(path);
+    if (d is null)
+        return false;
 
-    // Built the editor without throwing, so the tab it goes in is settled now.
-    // The tab lands in the focused pane, which is where the user was working - or,
-    // on a drop, the pane the file was let go over.
+    // Loaded without throwing, so the tab it goes in is settled now. The tab lands
+    // in the focused pane, which is where the user was working - or, on a drop,
+    // the pane the file was let go over.
     Pane* p = focused;
     View* v = p.views[p.current];
     Document* scratch = v.doc;
-
-    Document* d = new Document;
-    docs ~= d;
-    d.editor = ed;
-    d.path   = path; // in-place Save now has a target
-    d.title  = baseName(path);
 
     if (scratchEmpty(*scratch))
     {
@@ -1022,6 +1362,10 @@ void ui_open(string path)
         // scratch document itself only goes if this was the last view of it, since
         // another pane showing the same one (the state a fresh split leaves) still
         // has bytes to draw and an editor to draw them through.
+        //
+        // It is a different file in the same view, so any comparison the view was
+        // part of was about the bytes that just left, not these.
+        diff_unlink(v);
         v.doc = d;
         if (ui_view_count(scratch) == 0)
             ui_drop_document(scratch);
@@ -1042,6 +1386,37 @@ void ui_open(string path)
     v.hex.anchor = 0;
     hex_reset_scroll(v.hex); // and scroll to the top so that first byte is visible
     logInfo("opened %s (%s bytes)", path, v.hex.dataSize);
+    return true;
+}
+
+/// Build a document around `path`, or null when it cannot be opened (the error is
+/// logged, and nothing already open is disturbed).
+///
+/// Split out of ui_open because a comparison needs the file loaded without a tab
+/// being found for it: it puts the second document in a pane of its own, beside
+/// the one it is being compared with, rather than wherever an Open would have
+/// landed. See ui_compare_with.
+private Document* ui_load(string path)
+{
+    IDocumentEditor ed;
+    try
+    {
+        IDocument document = new FileDocument(path); // read-only by default
+        ed = spawnEditor();                          // the default backend
+        ed.open(document);
+    }
+    catch (Exception e)
+    {
+        logWarn("open failed: %s", e.msg);
+        return null;
+    }
+
+    Document* d = new Document;
+    docs ~= d;
+    d.editor = ed;
+    d.path   = path; // in-place Save now has a target
+    d.title  = baseName(path);
+    return d;
 }
 
 /// Whether `d` is a scratch buffer nothing has been done to: no path, no edits
@@ -1488,6 +1863,18 @@ private struct Entry
     string label;
     string keys;
     int id = -1;
+
+    /// Words the command answers to but is not called: what someone types when
+    /// they know what they want and not what this application named it. Never
+    /// shown - the row still reads as its label - so they cost nothing on screen
+    /// and can be as generous as they need to be.
+    ///
+    /// Two things they are for. Vocabulary: "diff" finds Compare With, "goto" and
+    /// "jump" find Go to Offset, "vsplit" finds Split Pane Right, whichever
+    /// editor the user came here from. And, later, translation: a localised label
+    /// would leave these English, so the command list goes on answering to the
+    /// terms the documentation and every other tool use.
+    string keywords;
 }
 
 /// Commands the omnibar's '>' mode offers. The menus' own actions, so anything
@@ -1495,7 +1882,7 @@ private struct Entry
 /// commands (go to offset, search, ...) join this table as ddhx exposes them.
 private enum
 {
-    CMD_NEW_TAB, CMD_OPEN, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
+    CMD_NEW_TAB, CMD_OPEN, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
     CMD_CUT, CMD_COPY, CMD_PASTE, CMD_GOTO,
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT,
     CMD_SKIP_NEXT, CMD_SKIP_PREV,
@@ -1506,34 +1893,36 @@ private enum
 
 /// Ditto.
 private immutable Entry[] COMMANDS = [
-    Entry("New Tab",          "Ctrl+T",       CMD_NEW_TAB),
-    Entry("Open File...",     "Ctrl+O",       CMD_OPEN),
-    Entry("Save",             "Ctrl+S",       CMD_SAVE),
-    Entry("Save As...",       "Ctrl+Shift+S", CMD_SAVE_AS),
-    Entry("Close Tab",        "Ctrl+W",       CMD_CLOSE_TAB),
-    Entry("Cut",              "Ctrl+X",       CMD_CUT),
-    Entry("Copy",             "Ctrl+C",       CMD_COPY),
-    Entry("Paste",            "Ctrl+V",       CMD_PASTE),
-    Entry("Go to Offset...",  "Ctrl+G",       CMD_GOTO),
-    Entry("Find...",          "Ctrl+F",       CMD_FIND),
-    Entry("Find Next",        "Ctrl+N",       CMD_FIND_NEXT),
-    Entry("Find Previous",    "Ctrl+Shift+N", CMD_FIND_PREV),
-    Entry("Inspect Bytes...", "Alt+I",        CMD_INSPECT),
-    Entry("Skip Forward",     "Ctrl+Right",   CMD_SKIP_NEXT),
-    Entry("Skip Back",        "Ctrl+Left",    CMD_SKIP_PREV),
-    Entry("Toggle Bookmark",  "Ctrl+B",       CMD_MARK),
-    Entry("Next Bookmark",    "]",            CMD_MARK_NEXT),
-    Entry("Previous Bookmark","[",            CMD_MARK_PREV),
-    Entry("Bookmarks...",     "",             CMD_MARK_LIST),
-    Entry("Clear Bookmarks",  "",             CMD_MARK_CLEAR),
-    Entry("Split Pane Right", "Ctrl+\\",      CMD_SPLIT),
-    Entry("Split Pane Down",  "Ctrl+Shift+\\",CMD_SPLIT_DOWN),
-    Entry("Close Pane",       "",             CMD_CLOSE_PANE),
-    Entry("Next Pane",        "",             CMD_PANE_NEXT),
-    Entry("Previous Pane",    "",             CMD_PANE_PREV),
-    Entry("Toggle Minimap",   "",             CMD_MINIMAP),
-    Entry("About vddhx",      "",             CMD_ABOUT),
-    Entry("Quit",             "Ctrl+Q",       CMD_QUIT),
+    Entry("New Tab",          "Ctrl+T",       CMD_NEW_TAB,      "create buffer"),
+    Entry("Open File...",     "Ctrl+O",       CMD_OPEN,         "load edit read"),
+    Entry("Compare With...",  "",             CMD_COMPARE,      "diff difference against versus changes"),
+    Entry("Stop Comparing",   "",             CMD_COMPARE_STOP, "undiff end diff close comparison"),
+    Entry("Save",             "Ctrl+S",       CMD_SAVE,         "write store commit"),
+    Entry("Save As...",       "Ctrl+Shift+S", CMD_SAVE_AS,      "write export copy to"),
+    Entry("Close Tab",        "Ctrl+W",       CMD_CLOSE_TAB,    "shut document"),
+    Entry("Cut",              "Ctrl+X",       CMD_CUT,          "clipboard remove delete"),
+    Entry("Copy",             "Ctrl+C",       CMD_COPY,         "clipboard yank"),
+    Entry("Paste",            "Ctrl+V",       CMD_PASTE,        "clipboard insert put"),
+    Entry("Go to Offset...",  "Ctrl+G",       CMD_GOTO,         "goto jump seek address position"),
+    Entry("Find...",          "Ctrl+F",       CMD_FIND,         "search grep pattern bytes string"),
+    Entry("Find Next",        "Ctrl+N",       CMD_FIND_NEXT,    "search again forward"),
+    Entry("Find Previous",    "Ctrl+Shift+N", CMD_FIND_PREV,    "search back backward"),
+    Entry("Inspect Bytes...", "Alt+I",        CMD_INSPECT,      "data types decode value integer float"),
+    Entry("Skip Forward",     "Ctrl+Right",   CMD_SKIP_NEXT,    "run element next word"),
+    Entry("Skip Back",        "Ctrl+Left",    CMD_SKIP_PREV,    "run element previous word"),
+    Entry("Toggle Bookmark",  "Ctrl+B",       CMD_MARK,         "mark set flag"),
+    Entry("Next Bookmark",    "]",            CMD_MARK_NEXT,    "mark forward"),
+    Entry("Previous Bookmark","[",            CMD_MARK_PREV,    "mark back backward"),
+    Entry("Bookmarks...",     "",             CMD_MARK_LIST,    "marks list show all"),
+    Entry("Clear Bookmarks",  "",             CMD_MARK_CLEAR,   "marks remove delete none"),
+    Entry("Split Pane Right", "Ctrl+\\",      CMD_SPLIT,        "vsplit vertical side window new"),
+    Entry("Split Pane Down",  "Ctrl+Shift+\\",CMD_SPLIT_DOWN,   "hsplit horizontal below window new"),
+    Entry("Close Pane",       "",             CMD_CLOSE_PANE,   "unsplit window remove"),
+    Entry("Next Pane",        "",             CMD_PANE_NEXT,    "window forward switch"),
+    Entry("Previous Pane",    "",             CMD_PANE_PREV,    "window back backward switch"),
+    Entry("Toggle Minimap",   "",             CMD_MINIMAP,      "ribbon overview scrollbar sidebar"),
+    Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
+    Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
 ];
 
 /// The head of the '?' sheet: the omnibar's own prefixes, the characters that
@@ -1618,11 +2007,12 @@ private const(OmniItem)[] ui_omni_items()
 {
     rowUsed = 0; // this frame's rows start over the last frame's
     size_t n;
-    void put(string label, string detail, int id, bool marked = false, bool pinned = false)
+    void put(string label, string detail, int id, bool marked = false, bool pinned = false,
+        string keywords = null)
     {
         if (n >= omniItems.length)
             omniItems.length = n + 16;
-        omniItems[n++] = OmniItem(label, detail, id, marked, pinned);
+        omniItems[n++] = OmniItem(label, detail, keywords, id, marked, pinned);
     }
 
     final switch (omni_mode(omni))
@@ -1655,7 +2045,7 @@ private const(OmniItem)[] ui_omni_items()
         break;
     case OmniMode.command:
         foreach (ref immutable Entry e; COMMANDS)
-            put(e.label, e.keys, e.id);
+            put(e.label, e.keys, e.id, false, false, e.keywords);
         break;
     case OmniMode.address:
         // One row, pinned: it is a readout of the offset being typed rather than
@@ -2114,6 +2504,8 @@ private void ui_omni_run(int id)
     {
     case CMD_NEW_TAB:   ui_new_tab();          break;
     case CMD_OPEN:      ui_open_dialog();      break;
+    case CMD_COMPARE:   ui_compare_dialog();   break;
+    case CMD_COMPARE_STOP: ui_compare_stop();  break;
     case CMD_SAVE:      ui_save();             break;
     case CMD_SAVE_AS:   ui_save_as();          break;
     case CMD_CLOSE_TAB: ui_close_current_tab(); break;
@@ -2198,7 +2590,14 @@ void ui_frame(mu_Context* ctx, int width, int height)
         if (atomicLoad(pendingReady))
         {
             atomicStore(pendingReady, false);
-            ui_open(pendingPath.ptr.fromStringz.idup);
+            string picked = pendingPath.ptr.fromStringz.idup;
+            if (pendingCompare)
+            {
+                pendingCompare = false;
+                ui_compare_with(picked);
+            }
+            else
+                cast(void) ui_open(picked);
         }
 
         // Likewise a Save As destination: write there, and adopt it as the
@@ -2241,13 +2640,21 @@ void ui_frame(mu_Context* ctx, int width, int height)
         mu_layout_row(ctx, 1, srow.ptr, statusH);
         mu_Rect sr = mu_layout_next(ctx);
         mu_draw_rect(ctx, sr, mu_Color(30, 30, 40, 255));
-        char[80] statusbuf = void;
+        char[160] statusbuf = void;
         size_t selLen = hex_total(view.hex) ?
             hex_sel_high(view.hex) - hex_sel_low(view.hex) + 1 : 0;
         string mode  = view.hex.insertMode ? "INS" : "OVR";
         string dirty = (doc.editor && doc.editor.edited()) ? " *" : "";
-        char[] status = sformat(statusbuf, "%s%s  offset %08X  selected %u byte(s)",
-            mode, dirty, view.hex.cursor, selLen);
+        // Name the counterpart while a comparison is up. Without it the dimmed
+        // bytes and the red ones are a state the window gives no other account
+        // of - and the pane the eye is on is not necessarily the one the
+        // comparison was started from.
+        View* other = diff_peer(&view());
+        char[64] cmpbuf = void;
+        const(char)[] cmp = other ?
+            sformat(cmpbuf, "  vs %s", ui_clip(other.doc.title, 48)) : "";
+        char[] status = sformat(statusbuf, "%s%s  offset %08X  selected %u byte(s)%s",
+            mode, dirty, view.hex.cursor, selLen, cmp);
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
         mu_draw_text(ctx, ctx.style.font, cast(string) status,
@@ -2406,6 +2813,10 @@ private void ui_panes(mu_Context* ctx, int statusH)
             tab_ghost(ctx, src.tabs, src.items[ghost.index], ghost.rect);
     }
 
+    // Every pane has drawn, so where each one is scrolled to is settled: carry
+    // that across the comparisons before anything can rearrange the grid.
+    ui_sync_diffs();
+
     // Now that the loops are done with the grid, whatever a strip asked for is
     // safe to carry out, even where it drops the pane that asked.
     switch (req.action)
@@ -2421,6 +2832,59 @@ private void ui_panes(mu_Context* ctx, int statusH)
         ui_move_view(req.pane, req.index, ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y));
         break;
     default:
+    }
+}
+
+/// Put both halves of every comparison back on the same offset.
+///
+/// Two files are compared by reading across the window, so the panes have to hold
+/// the same offset on the same line: scrolling one scrolls the other. Which one
+/// leads is whichever the user just moved, told from the offset each was left at
+/// when it last drew - anything that scrolls a panel goes through its own topRow,
+/// mouse wheel, caret reveal, a jump to an address, so there is nothing to hook
+/// into but the result.
+///
+/// Only front tabs are read: a view sitting in a background tab did not draw and
+/// so cannot have moved. It is still written to, so a comparison whose other half
+/// is behind a tab is lined up already when that tab comes forward.
+///
+/// Called once every pane has drawn. Both sides moving in the same frame is not a
+/// thing a user can do - one panel has the keyboard and the pointer is in one
+/// place - so the first found leading is enough.
+private void ui_sync_diffs()
+{
+    foreach (Column* c; columns)
+    {
+        foreach (Pane* p; c.panes)
+        {
+            View* v = p.views[p.current];
+            if (v.diff is null)
+                continue;
+
+            long top = hex_top_offset(v.hex);
+            bool forced = v.topForced;
+            v.topForced = false;
+
+            if (top == v.topSeen)
+                continue; // this side stayed put; it is not the one leading
+
+            // It went where it was put, but not as far: a panel stops at its own
+            // last screenful, so the shorter of two files runs out first and sits
+            // there while the longer one goes on. That is the honest end of the
+            // file, not this side taking the lead, and reading it as a lead would
+            // have it hauling the longer pane back up every frame.
+            if (forced && top < v.topSeen)
+            {
+                v.topSeen = top;
+                continue;
+            }
+
+            View* peer = diff_peer(v);
+            hex_set_top_offset(peer.hex, top);
+            peer.topSeen  = top;
+            peer.topForced = true;
+            v.topSeen = top;
+        }
     }
 }
 
@@ -2531,6 +2995,22 @@ private void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     // edit made in one is a size change the other has yet to hear about.
     if (v.doc.editor)
         v.hex.dataSize = v.doc.editor.size();
+
+    // The same for the document this one is being compared against, which is a
+    // whole document the panel knows nothing about: its size for the colours to
+    // tell a changed byte from one this side simply has more of, and its cached
+    // block dropped so the frame reads it afresh. Both are one call a frame, and
+    // between them they mean an edit in either pane shows up in the colours.
+    //
+    // Only the reporting side needs any of it: the other is drawn as an ordinary
+    // view and never asks what the bytes beside it are, so it never allocates a
+    // block or reads the other document at all.
+    if (diff_reports(v))
+    {
+        IDocumentEditor peer = diff_peer(v).doc.editor;
+        v.peerSize = peer ? peer.size() : 0;
+        v.peerLen  = 0;
+    }
 
     // The panel fills the rest of the column, so nothing is reserved below it:
     // the status bar is the window's, not this pane's. The name is a constant
@@ -2669,6 +3149,11 @@ private void ui_menubar(mu_Context* ctx)
         // anything, the way every desktop toolkit marks them.
         if (mu_menu_item_ex(ctx, "New Tab",    "Ctrl+T",       0, 0)) ui_new_tab();
         if (mu_menu_item_ex(ctx, "Open...",    "Ctrl+O",       0, 0)) ui_open_dialog();
+        mu_menu_separator(ctx);
+        // The pair reads as one thing, so the end of a comparison sits with its
+        // start rather than being hunted for in another menu.
+        if (mu_menu_item_ex(ctx, "Compare With...", "",        0, 0)) ui_compare_dialog();
+        if (mu_menu_item_ex(ctx, "Stop Comparing",  "",        0, 0)) ui_compare_stop();
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Save",       "Ctrl+S",       0, 0)) ui_save();
         if (mu_menu_item_ex(ctx, "Save As...", "Ctrl+Shift+S", 0, 0)) ui_save_as();

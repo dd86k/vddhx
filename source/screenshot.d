@@ -435,6 +435,13 @@ int screenshot_run(string[] args)
     frame(); frame();
     shot("shot-omni-command.bmp");
 
+    // The unshown aliases: "diff" is not a word on any row, and it should still
+    // bring "Compare With..." up - reading as its own label, with no sign of the
+    // term that found it.
+    mu_input_text(&ctx, "diff");
+    frame(); frame();
+    shot("shot-omni-alias.bmp");
+
     ui_omni_toggle(OMNI_HELP);
     frame(); frame();
     shot("shot-omni-help.bmp");
@@ -628,6 +635,59 @@ int screenshot_run(string[] args)
     click(400, 400);
     frame();
     shot("shot-omni-dismissed.bmp");
+
+    // Scenario 17: comparing two documents. A pair of fixtures rather than the
+    // documents above, which by now carry a scenario's worth of edits: the point
+    // to see is a mostly-matching file with a few bytes changed, which is what a
+    // comparison is for and what the tint has to make obvious. diff-b.bin is
+    // diff-a.bin with a handful of bytes overwritten and a tail added.
+    //
+    // The two panes should not look alike. diff-a.bin was already open, so it goes
+    // on drawing as an ordinary view at full brightness; diff-b.bin is the one
+    // opened against it and carries the whole comparison - dimmed where the two
+    // agree, red where they do not. Both land on the same offset.
+    ui_open("/tmp/diff-a.bin");
+    frame();
+    ui_compare_with("/tmp/diff-b.bin");
+    frame();
+    shot("shot-diff.bmp");
+
+    // Scrolling one side carries the other: the sync runs off what each pane was
+    // left at, so a wheel over either pane moves both. Both should still show the
+    // same offsets against each other afterwards.
+    mu_input_mousemove(&ctx, 300, 300); // over the pane diff-b.bin opened in
+    frame();
+    mu_input_scroll(&ctx, 0, 200);
+    frame(); frame();
+    shot("shot-diff-scrolled.bmp");
+
+    // On past the end of the shorter file. diff-b.bin is the longer, so it leads
+    // and diff-a.bin runs out first: the left pane stops at its own last
+    // screenful and stays there (rather than hauling the right one back up with
+    // it every frame), while the right carries on into bytes it alone has, which
+    // read as added rather than as a wall of changes.
+    // The follower is a frame behind while a scroll is in flight: a panel drains
+    // the wheel at the top of a frame and the sync runs at the bottom of it, so
+    // the other side shows the new position on the next one. A wheel notch at a
+    // time that is a frame, but a scripted burst of a screenful per frame leaves
+    // the two visibly apart, so let go and let them settle - which is also the
+    // check that they do.
+    foreach (i; 0 .. 10)
+    {
+        mu_input_scroll(&ctx, 0, 600);
+        frame();
+    }
+    frame(); frame(); frame();
+    shot("shot-diff-tail.bmp");
+
+    // Closing one side ends the comparison rather than leaving the other half
+    // colouring against a document that is gone. diff-a.bin was never tinted, so
+    // what there is to see here is its pane back to the width it had, the
+    // counterpart gone from the status bar, and no comparison left to scroll it.
+    // diff-b.bin has no edits, so nothing prompts.
+    ui_close_current_tab(); // the focused pane is the one the comparison opened
+    frame(); frame();
+    shot("shot-diff-closed.bmp");
 
     return 0;
 }

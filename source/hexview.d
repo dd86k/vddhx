@@ -275,6 +275,73 @@ void hex_reset_scroll(ref HexView v)
     v.wheelAccum = 0;
 }
 
+/// Document offset of the first byte on screen.
+///
+/// For a caller keeping two panels in step - a byte-for-byte comparison, where
+/// the same offset has to sit on the same line in both. In offsets rather than
+/// rows because two panels need not agree on their bytes per row, and it is the
+/// byte the user is looking at that has to match, not the row number it landed
+/// on.
+long hex_top_offset(ref const(HexView) v)
+{
+    int cols = v.columns > 0 ? v.columns : 16;
+    return v.topRow * cols;
+}
+
+/// Ditto, the other way: scroll so that the row holding `offset` is the first on
+/// screen.
+///
+/// Rounded down to the start of that row, since a panel scrolls by whole rows, so
+/// asking for an offset mid-row puts its row on top rather than nothing at all.
+/// The pending sub-row wheel movement goes with it: it belongs to the scrolling
+/// the panel was doing on its own, and applying it after a jump would drag the
+/// panel a row off wherever it was just put.
+///
+/// No clamping here - what fits on screen is only known while drawing - so an
+/// offset past the end is safe to ask for and the next frame pulls it back to the
+/// last screenful.
+void hex_set_top_offset(ref HexView v, long offset)
+{
+    int cols = v.columns > 0 ? v.columns : 16;
+    v.topRow     = offset > 0 ? offset / cols : 0;
+    v.wheelAccum = 0;
+}
+
+unittest
+{
+    HexView v;
+    v.columns = 16;
+    v.topRow = 4;
+    assert(hex_top_offset(v) == 0x40);
+
+    // A round offset lands exactly, and reads back as it was set.
+    hex_set_top_offset(v, 0x100);
+    assert(v.topRow == 16);
+    assert(hex_top_offset(v) == 0x100);
+
+    // One mid-row puts that row on top: 0x10a is in the row starting at 0x100.
+    hex_set_top_offset(v, 0x10a);
+    assert(hex_top_offset(v) == 0x100);
+
+    // Pending wheel movement is dropped rather than dragging the panel off the
+    // row it was just put on.
+    v.wheelAccum = 7;
+    hex_set_top_offset(v, 0x200);
+    assert(v.wheelAccum == 0);
+
+    // A negative offset is the top, not a negative row.
+    hex_set_top_offset(v, -32);
+    assert(v.topRow == 0);
+
+    // Two panels at different widths agree on the byte, not on the row: the same
+    // offset is row 16 in one and row 8 in the other.
+    HexView wide;
+    wide.columns = 32;
+    hex_set_top_offset(wide, hex_top_offset(v) + 0x100);
+    assert(wide.topRow == 8);
+    assert(hex_top_offset(wide) == 0x100);
+}
+
 /// Total byte count on display, from the editor size or the in-memory slice.
 size_t hex_total(ref const(HexView) v)
 {

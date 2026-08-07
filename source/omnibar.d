@@ -84,6 +84,20 @@ struct OmniItem
     /// Secondary text, right-aligned and dimmed: a path, a shortcut, a hint.
     /// Also matched against the query, though it ranks below a label match.
     string detail;
+    /// Extra terms the row answers to, matched but never drawn: the words a user
+    /// reaches for that are not what the row happens to be called ("diff" for a
+    /// row labelled "Compare With..."). Space-separated by convention, though the
+    /// matcher does not care - it is one more string to score against.
+    ///
+    /// Ranked with the detail column, below a label match, so a row named for what
+    /// was typed always comes first and an alias only decides between rows that
+    /// would otherwise not be there at all.
+    ///
+    /// Kept apart from the label rather than folded into it so the two can differ
+    /// in kind: the label is what this build shows the user, these are the terms
+    /// it answers to. A translated list would keep its English aliases here, and
+    /// go on answering to them alongside the translated names.
+    string keywords;
     /// Handed back to the caller when the row is accepted; its meaning is the
     /// caller's (a tab index, a command code). -1 for a row that does nothing.
     int id = -1;
@@ -410,10 +424,15 @@ const(OmniItem)[] omni_filter(ref Omnibar o, const(OmniItem)[] items)
             score = omni_score(it.label, query);
             // A hit in the detail column counts too - typing a directory should
             // find the file under it - but at half weight, so a name match
-            // outranks it.
+            // outranks it. The row's unshown aliases are weighed the same way and
+            // for the same reason: they are there to find a row that its own name
+            // would have hidden, not to reorder the rows that name already found.
             int alt = omni_score(it.detail, query);
             if (alt > 0 && alt / 2 > score)
                 score = alt / 2;
+            int key = omni_score(it.keywords, query);
+            if (key > 0 && key / 2 > score)
+                score = key / 2;
         }
         if (score < 0)
             continue;
@@ -504,6 +523,59 @@ unittest
     assert(omni_score("readme", "rea") > omni_score("readme", "rdm"));
     assert(omni_score("Save As...", "sa") > omni_score("Close Tab", "sa"));
     assert(omni_score("save.bin", "s") > omni_score("class", "s"));
+}
+
+/// The unshown aliases: a row is found by a word it does not carry, without that
+/// word being able to push it past a row actually named for what was typed.
+unittest
+{
+    static immutable OmniItem[] rows = [
+        OmniItem("Compare With...", "",       "diff against", 1),
+        OmniItem("Find...",         "Ctrl+F", "search",       2),
+        OmniItem("Split Pane Down", "",       "hsplit",       3),
+        OmniItem("Search Marks",    "",       "",             4),
+    ];
+
+    Omnibar o;
+    void type(string q)
+    {
+        o.text[0 .. q.length] = q;
+        o.text[q.length] = 0;
+    }
+
+    // The word the row is not called finds it, and nothing else.
+    type("diff");
+    const(OmniItem)[] got = omni_filter(o, rows);
+    assert(got.length == 1);
+    assert(got[0].id == 1);
+
+    // An alias only reaches its own row: "hsplit" says nothing about the others.
+    type("hsplit");
+    got = omni_filter(o, rows);
+    assert(got.length == 1);
+    assert(got[0].id == 3);
+
+    // A row named for the query wins over one that only answers to it as an alias,
+    // which is what keeps the aliases from reordering the obvious answers: "Search
+    // Marks" is called that, "Find..." merely answers to "search".
+    type("search");
+    got = omni_filter(o, rows);
+    assert(got.length == 2);
+    assert(got[0].id == 4); // named for it
+    assert(got[1].id == 2); // only aliased to it
+
+    // Aliases are searched, never shown: the row still reads as its label.
+    type("diff");
+    got = omni_filter(o, rows);
+    assert(got[0].label == "Compare With...");
+
+    // A row with no aliases is unaffected by the extra pass.
+    static immutable OmniItem[] bare = [ OmniItem("Quit", "Ctrl+Q", null, 9) ];
+    type("quit");
+    got = omni_filter(o, bare);
+    assert(got.length == 1);
+    type("zzz");
+    assert(omni_filter(o, bare).length == 0);
 }
 
 /// Draw one row's text: the label on the left, elided to what is left after the
