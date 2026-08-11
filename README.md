@@ -6,6 +6,8 @@ SDL3 and [ddui](https://github.com/dd86k/ddui), while using the same robust docu
 Tabs and splits, byte-class colouring, a minimap, ddhx's find and goto syntax,
 bookmarks, byte-for-byte compare, and an omnibar over the lot.
 
+![vddhx: two panes and the omnibar](assets/screenshot.png)
+
 Status: 0.1.0, in development.
 
 ## Building
