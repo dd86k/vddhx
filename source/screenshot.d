@@ -7,6 +7,8 @@
 ///   - screenshot_run: a headless, scripted driver (offscreen SDL) that renders
 ///     canned UI states and captures each, so visual regressions can be checked
 ///     without a display. Convert the BMPs with `ffmpeg -y -i x.bmp x.png`.
+///     Adding `--readme` runs one posed scenario instead of the regression set,
+///     which is where assets/screenshot.png comes from.
 /// Authors: dd
 module screenshot;
 
@@ -38,7 +40,13 @@ bool screenshot_save(SDL_Renderer* renderer, const(char)* path)
 /// `SDL_VIDEODRIVER=offscreen dub run -b screenshot -- --screenshot`.
 int screenshot_run(string[] args)
 {
-    enum int W = 800, H = 600;
+    // `--readme` asks for the one showcase frame the project page uses instead of
+    // the regression scenarios: a wider window, real files, and a state posed to
+    // be looked at rather than diffed against a previous run.
+    import std.algorithm.searching : canFind;
+    const bool readme = args.canFind("--readme");
+    const int W = readme ? 1280 : 800;
+    const int H = readme ?  800 : 600;
 
     if (SDL_Init(SDL_INIT_VIDEO) == false)
         return 1;
@@ -94,6 +102,17 @@ int screenshot_run(string[] args)
         mu_input_mouseup(&ctx, x, y, MU_MOUSE_LEFT); frame();
     }
 
+    // Press one mapped key for a frame (down, render, up).
+    void tap(int key) { mu_input_keydown(&ctx, key); frame(); mu_input_keyup(&ctx, key); }
+
+    // Hold `mod` down across one press of `key`, for chords like Ctrl+Z.
+    void chord(int mod, int key)
+    {
+        mu_input_keydown(&ctx, mod);
+        mu_input_keydown(&ctx, key); frame(); mu_input_keyup(&ctx, key);
+        mu_input_keyup(&ctx, mod);
+    }
+
     // Render the current command list and write it out.
     bool shot(const(char)* path)
     {
@@ -101,6 +120,45 @@ int screenshot_run(string[] args)
         SDL_RenderClear(renderer);
         render_commands(renderer, &ctx);
         return screenshot_save(renderer, path);
+    }
+
+    // The showcase frame, off the repo's own files (run it from the repo root):
+    // a binary on the left for the byte-class colours, with a bookmark and a
+    // selection on it, text on the right in a pane of its own, and the omnibar
+    // open over the pair of them mid-query.
+    //
+    // Both extra tabs go in the left pane: the box floats over the middle of the
+    // window, which is where the right pane's strip is, and a tab nobody can see
+    // shows nothing off. The keyboard is handed back to the left pane at the end
+    // (without clicking into it, which would drop the selection) so the status
+    // bar reads off the pane the shot is about.
+    if (readme)
+    {
+        ui_open("vddhx");
+        ui_open("source/ui.d");
+        ui_select_tab(0);
+        frame();
+
+        foreach (i; 0 .. 3) tap(HEX_KEY_DOWN);
+        ui_mark_toggle();
+        foreach (i; 0 .. 2) tap(HEX_KEY_DOWN);
+        tap(HEX_KEY_RIGHT); tap(HEX_KEY_RIGHT); tap(HEX_KEY_RIGHT);
+        mu_input_keydown(&ctx, MU_KEY_SHIFT);
+        foreach (i; 0 .. 5) tap(HEX_KEY_RIGHT);
+        mu_input_keyup(&ctx, MU_KEY_SHIFT);
+        frame();
+
+        ui_split();
+        ui_open("README.md");
+        frame(); frame();
+        ui_focus_pane(0);
+
+        ui_omni_toggle(OMNI_COMMAND);
+        frame();
+        mu_input_text(&ctx, "book");
+        frame(); frame();
+        shot("shot-readme.bmp");
+        return 0;
     }
 
     // Scenario 0 (debug): open a multi-row file so offsets past 0x0F appear.
@@ -126,17 +184,6 @@ int screenshot_run(string[] args)
     mu_input_text(&ctx, "deadbeefcafe");
     frame();
     shot("shot-edit.bmp");
-
-    // Press one mapped key for a frame (down, render, up).
-    void tap(int key) { mu_input_keydown(&ctx, key); frame(); mu_input_keyup(&ctx, key); }
-
-    // Hold `mod` down across one press of `key`, for chords like Ctrl+Z.
-    void chord(int mod, int key)
-    {
-        mu_input_keydown(&ctx, mod);
-        mu_input_keydown(&ctx, key); frame(); mu_input_keyup(&ctx, key);
-        mu_input_keyup(&ctx, mod);
-    }
 
     // Scenario 4: overwrite and delete. Home to the row start, overwrite the first
     // byte in place, then Delete the byte now under the caret.

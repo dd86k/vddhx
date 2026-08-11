@@ -25,6 +25,10 @@ vddhx-test-*
 /SDL_ttf/
 /install/
 
+# Screenshots (-b screenshot)
+shot-*.bmp
+vddhx.bmp
+
 # Archives
 *.zip
 *.gz
