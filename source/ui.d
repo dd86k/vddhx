@@ -361,10 +361,32 @@ private __gshared SDL_Window* uiWindow;
 /// and lose most of their contrast on a mid grey.
 private enum mu_Color CANVAS = mu_Color(0, 0, 0, 255);
 
-/// Colour a bookmarked byte is drawn in, in the grid and in the minimap ribbon.
-/// Amber: nothing hex_classify hands out is near it, so a mark reads as a mark
-/// rather than as one more class of byte.
-private enum mu_Color BOOKMARK_TINT = mu_Color(240, 180, 70, 255);
+/// Wash behind a bookmarked byte in the grid. Amber: nothing hex_classify hands
+/// out is near it, so a mark reads as a mark rather than as one more class of
+/// byte.
+///
+/// A background rather than a foreground because the two channels answer
+/// different questions - the foreground says what a byte is, the background what
+/// was done to it - and because a wash fills the cell, so a marked run comes out
+/// as a band the eye catches rather than as recoloured glyphs.
+///
+/// Kept this dark for BOOKMARK_TEXT's sake. Amber is a light hue, and the obvious
+/// bright one leaves white sitting on it at under 2:1; at this depth white lands
+/// around 6.6:1, which is what makes the pair read as hard as it does.
+private enum mu_Color BOOKMARK_WASH = mu_Color(125, 85, 22, 255);
+
+/// Colour a bookmarked byte's glyphs are drawn in, over BOOKMARK_WASH.
+///
+/// The one place a mark does overrule hex_classify. What class a byte falls in is
+/// worth knowing everywhere else in the document; inside a run the user marked by
+/// hand, standing out is worth more, and white on amber is as far from anything
+/// else on screen as the two channels together can get.
+private enum mu_Color BOOKMARK_TEXT = mu_Color(255, 255, 255, 255);
+
+/// This is the one bookmark colour the panel is told. Where the amber has to
+/// come back at full strength - the outline of a run, a cell of the minimap
+/// ribbon - the panel lifts it there itself, so the two can never drift apart.
+/// See hex_wash_lift.
 
 /// A byte that differs from the one at the same offset in the document it is
 /// being compared against.
@@ -1025,10 +1047,17 @@ private ubyte[] hexRead(long pos, ubyte[] buf, void* user)
     return ed.view(pos, buf);
 }
 
-/// ddui-side colour scheme: bookmarked bytes stand out, everything else is
-/// classified the way the panel would have classified it anyway. `user` is the
-/// View stashed in hex.colorUser - the marks belong to the bytes being drawn, not
-/// to whichever document happens to be in front, and so does the comparison.
+/// ddui-side colour scheme: every byte classified the way the panel would have
+/// classified it anyway, dimmed or called out where a comparison is up. `user` is
+/// the View stashed in hex.colorUser - the comparison belongs to the bytes being
+/// drawn, not to whichever document happens to be in front, and so do the marks
+/// hexBack reads.
+///
+/// A mark takes the byte white, over the wash hexBack puts behind it. That much
+/// still outranks the comparison: a marked run is the one thing on screen the
+/// user put there by hand, and it stays worth finding in a file being compared.
+/// The comparison is not lost either way - a differing byte inside a run keeps
+/// its wash, and DIFF_CHANGED is what the bytes around it are drawn in.
 ///
 /// Only the reporting side of a comparison is coloured by it. The document that
 /// was already open goes on looking exactly as it did: a comparison is something
@@ -1040,10 +1069,8 @@ private mu_Color hexColor(size_t offset, ubyte value, void* user)
     if (v is null)
         return hex_classify(offset, value, null);
 
-    // A mark outranks the comparison: it is the one colour the user put there by
-    // hand, and it is still worth finding in a file being compared.
     if (bookmark_has(v.doc.marks, cast(long) offset))
-        return BOOKMARK_TINT;
+        return BOOKMARK_TEXT;
 
     if (diff_reports(v))
     {
@@ -1060,6 +1087,42 @@ private mu_Color hexColor(size_t offset, ubyte value, void* user)
     }
 
     return hex_classify(offset, value, null);
+}
+
+/// Background hook for the grid: a wash behind the bookmarked bytes, nothing
+/// behind the rest. `user` is the View in hex.backUser, for the same reason
+/// hexColor takes one - the marks belong to the document being drawn.
+///
+/// The panel puts the selection over whatever comes back from here, so a mark
+/// under the selection is hidden until the caret moves off it. That is the
+/// intended order: the selection is where the user is now.
+private mu_Color hexBack(size_t offset, ubyte value, void* user)
+{
+    View* v = cast(View*) user;
+    if (v is null)
+        return mu_Color(0, 0, 0, 0);
+
+    return bookmark_has(v.doc.marks, cast(long) offset)
+        ? BOOKMARK_WASH : mu_Color(0, 0, 0, 0);
+}
+
+/// Ditto asked of a whole segment at a time: whether any byte in it is marked.
+/// bookmark_hits answers that off the run list, so a mark of a few bytes shows on
+/// the ribbon of a document far too large to have been sampled closely enough to
+/// find it.
+///
+/// Answers in the same colour hexBack does, deliberately: the panel probes this
+/// one byte at a time as well, to find where a run's outline should have edges,
+/// and two bytes of one mark have to come back matching or every cell is drawn
+/// boxed in on its own.
+private mu_Color hexBackSpan(long at, long length, void* user)
+{
+    View* v = cast(View*) user;
+    if (v is null)
+        return mu_Color(0, 0, 0, 0);
+
+    return bookmark_hits(v.doc.marks, at, length)
+        ? BOOKMARK_WASH : mu_Color(0, 0, 0, 0);
 }
 
 /// The counterpart's byte at `offset`, through the view's one-block cache.
@@ -1191,6 +1254,9 @@ private void wireView(View* v)
     v.hex.colorFn   = &hexColor;
     v.hex.colorUser = cast(void*) v; // the view, not the document: it holds the
                                      // comparison as well as the way to the marks
+    v.hex.backFn     = &hexBack;
+    v.hex.backSpanFn = &hexBackSpan;
+    v.hex.backUser   = cast(void*) v;
     v.hex.data      = null;
     v.hex.dataSize  = ed ? ed.size() : 0;
 }

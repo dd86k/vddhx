@@ -7,9 +7,10 @@
 /// was marked there.
 ///
 /// The list is searched by halving: the hex panel asks whether a byte is
-/// bookmarked for every byte it draws (and again for every cell of the minimap),
-/// so the question has to be cheap to answer. Nothing here knows about the UI or
-/// the editor, which keeps the list testable on its own.
+/// bookmarked for every byte it draws, and asks bookmark_hits the same of a whole
+/// segment for every cell of the minimap, so both questions have to be cheap to
+/// answer. Nothing here knows about the UI or the editor, which keeps the list
+/// testable on its own.
 /// Authors: dd
 module bookmarks;
 
@@ -36,6 +37,32 @@ bool bookmark_covers(const(Bookmark)[] list, long at, long length)
     if (index < 0)
         return false;
     return list[index].at + list[index].length >= at + length;
+}
+
+/// Whether any byte of the run of `length` bytes from `at` is bookmarked.
+///
+/// Where bookmark_covers asks about all of a run, this asks about any of it,
+/// which is what a minimap cell standing for a whole segment of the document
+/// needs: one marked byte anywhere in the segment has to colour it, and the
+/// sampled read the ribbon is built from would walk straight past a short mark.
+bool bookmark_hits(const(Bookmark)[] list, long at, long length)
+{
+    if (length < 1)
+        return false;
+
+    // The first run ending past `at` is the only candidate: the ones before it
+    // end earlier still, and the ones after it start later than it does.
+    size_t low;
+    size_t high = list.length;
+    while (low < high)
+    {
+        size_t mid = low + (high - low) / 2;
+        if (list[mid].at + list[mid].length <= at)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+    return low < list.length && list[low].at < at + length;
 }
 
 /// Bookmark the run of `length` bytes from `at`, or clear it when all of it is
@@ -228,6 +255,16 @@ unittest
     assert(bookmark_has(list, 0x14) == false);
     assert(bookmark_covers(list, 0x10, 4));
     assert(bookmark_covers(list, 0x10, 5) == false);
+
+    // Overlap, which a span only has to touch rather than fill.
+    assert(bookmark_hits(list, 0x00, 0x40));      // spans the lot
+    assert(bookmark_hits(list, 0x13, 1));         // the run's last byte
+    assert(bookmark_hits(list, 0x00, 0x11));      // ends one byte inside it
+    assert(bookmark_hits(list, 0x14, 0x0c) == false); // the gap between two runs
+    assert(bookmark_hits(list, 0x00, 0x10) == false); // stops where a run starts
+    assert(bookmark_hits(list, 0x31, 0x10) == false); // past the last one
+    assert(bookmark_hits(list, 0x10, 0) == false);    // an empty span hits nothing
+    assert(bookmark_hits(null, 0, long.max) == false);
 
     // Setting the same run again clears it.
     assert(bookmark_toggle(list, 0x10, 4) == false);

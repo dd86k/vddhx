@@ -40,6 +40,25 @@ enum
 /// outside context (a type map, a diff mask, a search hit set...).
 alias HexColorFn = mu_Color function(size_t offset, ubyte value, void* user);
 
+/// Per-byte background hook. Return the wash to fill the byte's cell with before
+/// its glyphs go down, or any colour with alpha 0 for none.
+///
+/// Separate from HexColorFn because the two channels answer different questions:
+/// the foreground says what a byte *is* (hex_classify's scheme), the background
+/// what has been *done* to it (marked, hit by a find). Overloading the foreground
+/// for the second costs the first, on exactly the bytes the user singled out.
+/// `user` is HexView.backUser. Runs of one colour are drawn as a single band.
+alias HexBackFn = mu_Color function(size_t offset, ubyte value, void* user);
+
+/// Ditto, asked of a whole span for the minimap: the wash for the run of
+/// `length` bytes from `at`, or alpha 0 when no byte in it carries one.
+///
+/// The ribbon cannot go through HexBackFn per byte - one cell stands for a
+/// segment that may be gigabytes - and it cannot go through the sampled read
+/// hex_dominant uses either, which would step over a short mark and lose the one
+/// thing worth finding in a large file. So it asks the span outright.
+alias HexBackSpanFn = mu_Color function(long at, long length, void* user);
+
 /// On-demand byte source, for showing a slice of something too large to hold in
 /// memory (a multi-gigabyte file behind a ddhx editor, say). Fill `buf` starting
 /// at document offset `pos` and return the bytes actually read (a short slice at
@@ -78,7 +97,12 @@ private enum
     MINIMAP_VIEW_OUT = 2,  // px the marker overhangs each ribbon edge, for visibility
     SCROLLBAR_WIDTH = 14,   // plain scroll strip width (minimap off)
     SCROLLBAR_THUMB_MIN = 24, // floor for the plain thumb so it stays grabbable
+    WASH_EDGE_LIFT = 200, // how much brighter a wash's outline is, in percent
 }
+
+/// Wash behind the selected bytes, in the grid and on the minimap ribbon. The
+/// topmost of the panel's backgrounds: see the rendering priority in hex_draw_row.
+enum mu_Color HEX_SEL_WASH = mu_Color(48, 84, 140, 255);
 
 /// State and configuration for one hex panel. Persist it across frames (the
 /// selection lives here); the byte buffer and options can change frame to frame.
@@ -116,6 +140,16 @@ struct HexView
     HexColorFn colorFn;
     /// Opaque pointer forwarded to colorFn.
     void* colorUser;
+
+    /// Optional per-byte background wash, drawn under the glyphs. Null means no
+    /// wash at all. See HexBackFn.
+    HexBackFn backFn;
+    /// Optional span form of the same, for the minimap ribbon. Supply it
+    /// alongside backFn to have the wash show up there too; null leaves the
+    /// ribbon coloured by class alone. See HexBackSpanFn.
+    HexBackSpanFn backSpanFn;
+    /// Opaque pointer forwarded to both background hooks.
+    void* backUser;
 
     /// Optional on-demand byte source. When set, the panel reads only the
     /// visible rows through it and `data` is ignored; see HexReadFn.
@@ -1107,7 +1141,15 @@ void hex_minimap(mu_Context* ctx, ref HexView v, mu_Rect strip,
     foreach (i, c; v.mapCells)
     {
         int y = strip.y + cast(int) i * MINIMAP_BLOCK;
-        mu_draw_rect(ctx, mu_Rect(strip.x, y, strip.w, MINIMAP_BLOCK), c);
+        mu_Rect cell = mu_Rect(strip.x, y, strip.w, MINIMAP_BLOCK);
+        mu_draw_rect(ctx, cell, c);
+
+        // Then the backgrounds over it, in the grid's own priority. Neither is
+        // baked into mapCells: both move far more often than the cache is
+        // rebuilt, which is only on a change of size or ribbon height.
+        mu_Color wash = hex_map_wash(v, cast(long) i, cells, cast(long) total);
+        if (wash.a)
+            mu_draw_rect(ctx, cell, wash);
     }
 
     // Viewport marker: the visible row span mapped onto the ribbon. On big files
@@ -1135,6 +1177,35 @@ void hex_minimap(mu_Context* ctx, ref HexView v, mu_Rect strip,
         long target = cast(long) localY * rows / strip.h - visibleRows / 2;
         v.topRow = mu_clamp(target, 0L, maxTop);
     }
+}
+
+// The wash for minimap cell `index` of `cells`, over a document of `total`
+// bytes, or alpha 0 for none. Follows hex_draw_row's priority - selection over
+// the hook's wash - so the ribbon and the grid mark the same regions the same
+// way, and asks about the cell's whole span rather than the sample the cell's
+// class colour came from, so a mark of a few bytes in a huge file still shows.
+//
+// Both come back lifted, the way a run's outline does. A wash is dark because it
+// has to hold glyphs; three pixels of ribbon hold nothing, and are all a mark has
+// to be spotted by from across the whole document, so the same colour is worth
+// far more here at full strength.
+mu_Color hex_map_wash(ref const(HexView) v, long index, int cells, long total)
+{
+    long start = index * total / cells;
+    long end   = (index + 1) * total / cells;
+    if (end <= start)
+        return mu_Color(0, 0, 0, 0);
+
+    size_t selLow  = hex_sel_low(v);
+    size_t selHigh = hex_sel_high(v);
+    if (v.active && selLow != selHigh && cast(long) selHigh >= start && cast(long) selLow < end)
+        return hex_wash_lift(HEX_SEL_WASH);
+
+    if (v.backSpanFn is null)
+        return mu_Color(0, 0, 0, 0);
+
+    mu_Color wash = v.backSpanFn(start, end - start, cast(void*) v.backUser);
+    return wash.a ? hex_wash_lift(wash) : wash;
 }
 
 // The plain scroll strip shown when the minimap is off: a track with a thumb
@@ -1223,7 +1294,9 @@ ubyte[] hex_probe(ref HexView v, long pos, ubyte[] buf)
 
 // Dominant colour of a sampled chunk: classify each byte through the panel's
 // scheme (hex_classify by default) and return the most common colour, so the
-// ribbon and the byte grid always agree on how a region looks.
+// ribbon and the byte grid always agree on how a region looks. This is the class
+// layer only; the backgrounds go over it in hex_map_wash, which is asked of the
+// whole span because a vote taken over a sample can miss what it is marking.
 mu_Color hex_dominant(ref const(HexView) v, const(ubyte)[] chunk, long baseOff)
 {
     if (chunk.length == 0)
@@ -1307,8 +1380,8 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     for (long row = firstRow; row <= lastRow; ++row)
     {
         int y = body.y + cast(int)((row - topRow) * rowH);
-        hex_draw_row(ctx, v, lay, colorFn, body.x, y, row, cols, rowH, charW,
-            selLow, selHigh, font);
+        hex_draw_row(ctx, v, lay, colorFn, v.backFn, body.x, y, row, cols, rowH,
+            charW, selLow, selHigh, font);
     }
 
     // Append caret: when editing parks the caret one slot past the last byte, it
@@ -1327,15 +1400,14 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
 }
 
 void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
-    HexColorFn colorFn, int originX, int y, long row, int cols, int rowH,
-    int charW, size_t selLow, size_t selHigh, mu_Font font)
+    HexColorFn colorFn, HexBackFn backFn, int originX, int y, long row, int cols,
+    int rowH, int charW, size_t selLow, size_t selHigh, mu_Font font)
 {
     size_t total = hex_total(v);
     size_t rowStart = cast(size_t)(row * cols);
     int count = cast(int) mu_min(cast(size_t) cols, total - rowStart);
 
     mu_Color offColor = mu_Color(150, 150, 160, 255);
-    mu_Color selColor = mu_Color(48, 84, 140, 255); // selection wash
 
     // Offset label.
     char[24] off = void;
@@ -1343,22 +1415,31 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     hex_format(off.ptr, cast(ulong)(v.baseAddress + row * cols), digits);
     mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, y), offColor);
 
-    // Selection wash, drawn before the glyphs so text sits on top. A row's
-    // selected bytes are contiguous, so at most one hex band and one ASCII band.
+    // Backgrounds, all of them under the glyphs so the text sits on top, and in
+    // rendering priority: the hook's wash, the selection over it, the wash's own
+    // outline over that.
+    //
+    // The selection takes the fill because it is where the user is looking *now*,
+    // while a mark is there whether or not it is being looked at. But an opaque
+    // fill over a mark would leave it with nothing on screen at all, and the one
+    // moment that happens is the moment the mark was just set - so the outline
+    // goes over the selection and the mark keeps its shape either way. Fill and
+    // outline are two channels the same way foreground and background are.
+    if (backFn)
+        hex_wash_fill(ctx, v, lay, backFn, originX, y, rowStart, count, charW, rowH);
+
+    // Selection wash. A row's selected bytes are contiguous, so at most one band.
     // A bare caret (selLow == selHigh) draws no wash; only the outline below.
     if (v.active && selLow != selHigh && selHigh >= rowStart && selLow < rowStart + count)
     {
         int lo = selLow  > rowStart ? cast(int)(selLow - rowStart) : 0;
         int hi = selHigh < rowStart + count ? cast(int)(selHigh - rowStart) : count - 1;
-
-        int hx = originX + hex_col_for(lay, lo) * charW;
-        int hw = (hex_col_for(lay, hi) + 2 - hex_col_for(lay, lo)) * charW;
-        mu_draw_rect(ctx, mu_Rect(hx, y, hw, rowH), selColor);
-
-        int ax = originX + (lay.asciiStart + lo) * charW;
-        int aw = (hi - lo + 1) * charW;
-        mu_draw_rect(ctx, mu_Rect(ax, y, aw, rowH), selColor);
+        hex_draw_band(ctx, lay, originX, y, lo, hi, charW, rowH, HEX_SEL_WASH);
     }
+
+    if (backFn)
+        hex_wash_outline(ctx, v, lay, backFn, originX, y, rowStart, count, cols,
+            charW, rowH);
 
     // Byte cells: each hex pair and its ASCII glyph share the byte's colour.
     char[2] cell = void;
@@ -1393,6 +1474,139 @@ int hex_caret_nib(ref const(HexView) v)
     if (hex_editable(v) == false)
         return -1;
     return v.editLow ? 1 : 0;
+}
+
+// Fill the row's washed cells, banded: neighbouring bytes of one colour merge
+// into a single rect, the gaps between the hex pairs included, so a marked run
+// reads as one block rather than as a row of cells with seams between them.
+void hex_wash_fill(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
+    HexBackFn backFn, int originX, int y, size_t rowStart, int count, int charW,
+    int rowH)
+{
+    int runStart;
+    mu_Color runColor; // .init is transparent, so the first washed cell flushes it
+    for (int i; i <= count; ++i)
+    {
+        mu_Color c;
+        if (i < count)
+            c = backFn(rowStart + i, hex_byte(v, rowStart + i), cast(void*) v.backUser);
+        if (i < count && hex_coleq(c, runColor))
+            continue;
+        if (runColor.a)
+            hex_draw_band(ctx, lay, originX, y, runStart, i - 1, charW, rowH, runColor);
+        runStart = i;
+        runColor = c;
+    }
+}
+
+// Outline the row's washed cells, in a lifted version of each cell's own wash.
+// The outline is what survives the selection being drawn over the fill; see the
+// rendering priority in hex_draw_row.
+//
+// Per cell rather than per run, and an edge is dropped wherever the neighbour
+// across it carries the same wash - so a run comes out as one outlined region,
+// including when it wraps over several rows, rather than as a stack of boxes with
+// lines through it. The neighbours above and below are asked of backSpanFn, which
+// answers by offset alone: hex_byte cannot be trusted past the window the panel
+// read, and a row off the top or bottom of the screen is exactly that. Without a
+// backSpanFn there is no way to ask, so there is no outline either.
+void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
+    HexBackFn backFn, int originX, int y, size_t rowStart, int count, int cols,
+    int charW, int rowH)
+{
+    if (v.backSpanFn is null || count <= 0)
+        return;
+
+    void* user = cast(void*) v.backUser;
+    mu_Color left;  // the cell before this one, carried along rather than re-asked
+    mu_Color here = backFn(rowStart, hex_byte(v, rowStart), user);
+
+    for (int i; i < count; ++i)
+    {
+        // Transparent at the row's end, so a run that wraps is closed off here
+        // and opened again at column 0 of the next row, which is where it is.
+        mu_Color right;
+        if (i + 1 < count)
+            right = backFn(rowStart + i + 1, hex_byte(v, rowStart + i + 1), user);
+
+        if (here.a)
+        {
+            long idx = cast(long)(rowStart + i);
+            mu_Color above = idx >= cols
+                ? v.backSpanFn(idx - cols, 1, user) : mu_Color(0, 0, 0, 0);
+            mu_Color below = v.backSpanFn(idx + cols, 1, user);
+
+            bool joinR = hex_coleq(here, right);
+            bool top    = hex_coleq(here, above) == false;
+            bool bottom = hex_coleq(here, below) == false;
+            bool onL    = hex_coleq(here, left) == false;
+            mu_Color edge = hex_wash_lift(here);
+
+            // The hex lane's cell runs to where the next one starts when the two
+            // are joined, so the outline covers the gap the fill covered.
+            int hx0 = originX + hex_col_for(lay, i) * charW;
+            int hx1 = originX + charW *
+                (joinR ? hex_col_for(lay, i + 1) : hex_col_for(lay, i) + 2);
+            hex_draw_edges(ctx, hx0, hx1, y, rowH, top, bottom, onL, joinR == false, edge);
+
+            // The ASCII lane has no gaps, so its cells are one character wide.
+            int ax0 = originX + (lay.asciiStart + i) * charW;
+            hex_draw_edges(ctx, ax0, ax0 + charW, y, rowH, top, bottom, onL,
+                joinR == false, edge);
+        }
+
+        left = here;
+        here = right;
+    }
+}
+
+// The same colour carried brighter, for a wash's outline. Scaling rather than
+// blending towards white so the edge keeps the wash's hue: a colour dark enough
+// to hold text comes back saturated, which is what makes the outline read as the
+// wash's own rather than as a highlight of its own.
+mu_Color hex_wash_lift(mu_Color c)
+{
+    return mu_Color(hex_lift(c.r), hex_lift(c.g), hex_lift(c.b), 255);
+}
+
+private ubyte hex_lift(ubyte v)
+{
+    int n = v * WASH_EDGE_LIFT / 100;
+    return cast(ubyte)(n > 255 ? 255 : n);
+}
+
+unittest
+{
+    // A wash comes back brighter in the same hue, and a channel already high
+    // clamps rather than wrapping around.
+    assert(hex_coleq(hex_wash_lift(mu_Color(125, 85, 22, 255)), mu_Color(250, 170, 44, 255)));
+    assert(hex_coleq(hex_wash_lift(mu_Color(200, 0, 0, 128)), mu_Color(255, 0, 0, 255)));
+}
+
+// Draw the edges of one cell that its neighbours do not span, one pixel each.
+void hex_draw_edges(mu_Context* ctx, int x0, int x1, int y, int rowH,
+    bool top, bool bottom, bool left, bool right, mu_Color color)
+{
+    if (top)    mu_draw_rect(ctx, mu_Rect(x0, y, x1 - x0, 1), color);
+    if (bottom) mu_draw_rect(ctx, mu_Rect(x0, y + rowH - 1, x1 - x0, 1), color);
+    if (left)   mu_draw_rect(ctx, mu_Rect(x0, y, 1, rowH), color);
+    if (right)  mu_draw_rect(ctx, mu_Rect(x1 - 1, y, 1, rowH), color);
+}
+
+// Fill grid columns `lo` through `hi` of the row at `y`, in the hex lane and the
+// ASCII lane both. The hex band runs over the gaps between the pairs rather than
+// leaving them unpainted, so a span reads as one block; that is also why the two
+// lanes are filled by the same call, since a span means the same bytes in each.
+void hex_draw_band(mu_Context* ctx, ref const(HexLayout) lay, int originX, int y,
+    int lo, int hi, int charW, int rowH, mu_Color color)
+{
+    int hx = originX + hex_col_for(lay, lo) * charW;
+    int hw = (hex_col_for(lay, hi) + 2 - hex_col_for(lay, lo)) * charW;
+    mu_draw_rect(ctx, mu_Rect(hx, y, hw, rowH), color);
+
+    int ax = originX + (lay.asciiStart + lo) * charW;
+    int aw = (hi - lo + 1) * charW;
+    mu_draw_rect(ctx, mu_Rect(ax, y, aw, rowH), color);
 }
 
 // Draw the caret outline (hex and ASCII lanes) around grid column `col` of the

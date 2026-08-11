@@ -541,8 +541,9 @@ int screenshot_run(string[] args)
     frame();
 
     // Scenario 15: bookmarks. Mark the byte under the caret, step down two rows,
-    // select four bytes and mark the run, then list them; the panel tints every
-    // byte of both, grid and minimap.
+    // select four bytes and mark the run, then list them; the panel washes every
+    // byte of both, grid and minimap. The marked run is drawn under the selection
+    // that set it, so shot-mark-range shows it only once the caret has moved on.
     ui_mark_toggle();
     frame();
     shot("shot-mark-set.bmp");
