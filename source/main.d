@@ -134,7 +134,11 @@ void main(string[] args)
         //
         // The event is left in the queue (that is what the null does) so the
         // drain below can treat it like any other.
-        if (frames <= 0 && SDL_WaitEvent(null) == false)
+        //
+        // ui_animating is the one thing that can owe a frame to nothing: while
+        // it holds, the loop free-runs and vsync paces it, and the moment it
+        // drops the process goes back to sleeping on the queue.
+        if (frames <= 0 && ui_animating() == false && SDL_WaitEvent(null) == false)
         {
             // Only ever false on error, and a broken queue does not heal: going
             // back to sleep on it would spin the loop at full speed instead.

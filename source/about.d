@@ -8,6 +8,7 @@ import bindbc.sdl : SDL_OpenURL, SDL_GetVersion,
     SDL_VERSIONNUM_MAJOR, SDL_VERSIONNUM_MINOR, SDL_VERSIONNUM_MICRO;
 import ddlogger;
 import ddui;
+import elite : elite_open;
 
 /// Application version. Single source of truth: dub.sdl deliberately carries no
 /// version field, since dub derives package versions from git tags.
@@ -106,7 +107,15 @@ void about_frame(mu_Context* ctx, int width, int height)
 
     static immutable int[1] full = [ -1 ];
     mu_layout_row(ctx, 1, full.ptr, 0);
-    mu_label(ctx, "vddhx " ~ VERSION);
+    if (about_secret(ctx, "vddhx " ~ VERSION))
+    {
+        elite_open();
+        // Stand aside, the same way the Close button does. ddui promotes
+        // whichever root container the mouse was pressed on at the end of the
+        // frame (mu_end), and that press is this one, so a dialog left open
+        // here would sit on top of what it just launched.
+        mu_get_current_container(ctx).open = 0;
+    }
     mu_label(ctx, "Visual DDHX, a hex editor.");
 
     // Label column wide enough for the longest caption, value column fills.
@@ -140,6 +149,19 @@ void about_frame(mu_Context* ctx, int width, int height)
         mu_get_current_container(ctx).open = 0;
 
     mu_end_window(ctx);
+}
+
+/// A label that quietly answers to a click. Drawn exactly as mu_label draws it,
+/// with no colour of its own, no underline and no tab stop: the whole point is
+/// that there is nothing to notice. Whoever finds it went looking.
+/// Returns: true on the frame it is left-clicked.
+private bool about_secret(mu_Context* ctx, string text)
+{
+    mu_Id id = mu_get_id(ctx, text.ptr, text.length);
+    mu_Rect r = mu_layout_next(ctx);
+    mu_update_control(ctx, id, r, 0);
+    mu_draw_control_text(ctx, text, r, MU_COLOR_TEXT, 0);
+    return ctx.mouse_pressed == MU_MOUSE_LEFT && ctx.focus == id;
 }
 
 /// A clickable URL: link-coloured text, underlined while hovered or focused.

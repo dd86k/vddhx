@@ -9,6 +9,7 @@ import ddui;
 import ddhx.document : FileDocument, IDocument;
 import ddhx.editor : IDocumentEditor, spawnEditor;
 import about : about_open, about_frame;
+import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
 import bookmarks;
 import hexview;
@@ -2619,6 +2620,14 @@ void ui_omni_run(int id)
     view.hex.takeFocus = true; // whatever it was, the bytes take keys again after
 }
 
+/// True while something on screen moves on its own and the loop has to keep
+/// drawing rather than sleeping until the next event. Nothing in the editor
+/// proper animates (for now), so this is only ever the easter egg.
+public bool ui_animating()
+{
+    return elite_animating();
+}
+
 /// Build one frame of UI. Call between mu_begin and mu_end.
 /// Params:
 ///     ctx = ddui context.
@@ -2748,6 +2757,9 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 
     // Help > About, as its own root container so it floats over the main window.
     about_frame(ctx, width, height);
+
+    // What the About dialog is hiding, over the top of it.
+    elite_frame(ctx, width, height);
 
     // The omnibar goes last, over everything: it is the one thing that can be up
     // while the rest of the window carries on drawing behind it. The mode is read

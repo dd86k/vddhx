@@ -20,6 +20,7 @@ this is the map and the handful of things that span modules.
 | `render.d` | SDL3_ttf text engine and font faces |
 | `loader.d` | opens the SDL3 shared libraries (dynamic build only) |
 | `about.d`, `uitext.d` | About dialog, text helpers |
+| `elite.d` | the About dialog's easter egg |
 | `screenshot.d` | debug frame capture (`-b screenshot`) |
 
 ## Frame
@@ -40,10 +41,18 @@ loop:
   focus only reaches the screen on the frame after the one that read it. Any new
   path that changes the screen without an SDL event has to push one - that is
   what `ui_wakeup` is for, and how the async file dialogs get themselves drawn.
+  The one exception is `ui_animating`: while it holds, the loop skips the wait
+  and free-runs at vsync, because something on screen moves without being asked.
 - **Command replay order.** `render_commands` walks the command list with
   `mu_get_next_command`, not `mu_command_range`. The former follows the jumps
   ddui writes to splice containers into z-order; the latter walks raw and draws
   popups behind the content they sit over.
+- **Drawing outside ddui.** ddui's only shape is a filled rect, so anything else
+  (`elite.d`'s wireframe) reserves its rectangle in the layout and pushes a
+  command whose type is one past ddui's own. `render_commands` recognises it and
+  calls back, which is what keeps such drawing in z-order and clipped like the
+  rest. ddui reserves no user range for this; the type is a plain int and that
+  loop is the only thing that reads it.
 
 ## Ownership
 

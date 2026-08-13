@@ -737,5 +737,23 @@ int screenshot_run(string[] args)
     frame(); frame();
     shot("shot-diff-closed.bmp");
 
+    // Scenario 19: the easter egg. Last of the set, because it leaves two
+    // dialogs stacked and both of them own a control the label search would
+    // find first. The version line in the About dialog looks like a label and
+    // is not one; clicking it launches the ship.
+    mu_Vec2 helpMenu = find("Help");
+    click(helpMenu.x + 3, helpMenu.y + 3);
+    frame(); frame();
+    mu_Vec2 aboutItem = find("About");
+    click(aboutItem.x + 3, aboutItem.y + 3);
+    frame();
+    mu_Vec2 versionLine = find("vddhx ");
+    click(versionLine.x + 3, versionLine.y + 3);
+    // The ship tumbles a fixed step per frame under this build (see elite.d), so
+    // running a second's worth of them poses it at three quarters rather than
+    // nose-on, and does it identically on every run.
+    foreach (i; 0 .. 90) frame();
+    shot("shot-elite.bmp");
+
     return 0;
 }

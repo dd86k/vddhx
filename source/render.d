@@ -14,6 +14,7 @@ import std.file : exists;
 import std.string : toStringz;
 import bindbc.sdl; // publicly re-exports SDL3_ttf (TTF_*) under the static config
 import ddui;
+import elite : MU_COMMAND_SHIP, elite_draw;
 
 // Point size the faces are opened at. render_text_height reports the real TTF
 // line height of whichever face a command used, so this only sets the scale.
@@ -199,6 +200,9 @@ void render_commands(SDL_Renderer* renderer, mu_Context* ctx)
             break;
         case MU_COMMAND_ICON:
             draw_icon(cmd.icon.id, cmd.icon.rect, cmd.icon.color);
+            break;
+        case MU_COMMAND_SHIP: // The secret!
+            elite_draw(renderer, cmd.rect.rect);
             break;
         case MU_COMMAND_CLIP:
             SDL_Rect clip = SDL_Rect(cmd.clip.rect.x, cmd.clip.rect.y,
