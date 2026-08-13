@@ -9,9 +9,8 @@ dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="a7
 dependency "ddlogger" repository="git+https://github.com/dd86k/ddlogger.git" version="653364f91d3febed0116eb792a3a899418f49927"
 dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="3ffdac461a0cba77551fcc8ee228c2dcfe4d46d1"
 
-// SDL_TTF_3_2_2 turns on bindbc-sdl's SDL3_ttf bindings (guarded behind
-// sdlTTFVersion); without it the sdl_ttf module compiles to nothing.
-versions "SDL_3_4" "SDL_TTF_3_2_2"
+# bindbc-sdl baselines at SDL 3.2.0
+versions "SDL_TTF_3_2_2"
 
 // How SDL3 gets into the binary. The default configuration expects the SDL3 and
 // SDL3_ttf shared libraries on the system and opens them at startup

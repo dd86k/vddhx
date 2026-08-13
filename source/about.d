@@ -4,7 +4,8 @@ module about;
 
 import std.format : format;
 import std.string : toStringz;
-import bindbc.sdl : SDL_OpenURL;
+import bindbc.sdl : SDL_OpenURL, SDL_GetVersion,
+    SDL_VERSIONNUM_MAJOR, SDL_VERSIONNUM_MINOR, SDL_VERSIONNUM_MICRO;
 import ddlogger;
 import ddui;
 
@@ -32,12 +33,34 @@ private string frontendVersion(uint v)
     return format("%u.%03u", v / 1000, v % 1000);
 }
 
+/// The SDL actually in use, e.g. "3.4.12".
+///
+/// Reported at runtime rather than from bindbc-sdl's compile-time version: the
+/// default build opens whichever SDL3 the system has (source/loader.d), and the
+/// bindings are deliberately held at their 3.2.0 baseline (see dub.sdl), so the
+/// two rarely agree and only the runtime one says what is running.
+///
+/// Only valid once SDL is loaded, which it is by the time any dialog is drawn.
+/// Cached because the number cannot change while the process runs.
+private string sdlVersion()
+{
+    static string cached;
+    if (cached is null)
+    {
+        // SDL packs its version as major*1000000 + minor*1000 + patch.
+        int v = SDL_GetVersion();
+        cached = format("%d.%d.%d", SDL_VERSIONNUM_MAJOR(v), SDL_VERSIONNUM_MINOR(v),
+            SDL_VERSIONNUM_MICRO(v));
+    }
+    return cached;
+}
+
 /// Window title, and the key ddui pools the dialog's container under.
 private enum TITLE = "About vddhx";
 
 // Dialog size in pixels; it is centred on the window each time it is opened.
 private enum int WIDTH  = 460;
-private enum int HEIGHT = 190;
+private enum int HEIGHT = 214;
 
 // Link text, idle and hovered/focused.
 private enum mu_Color LINK_COLOR = mu_Color(110, 170, 255, 255);
@@ -100,6 +123,8 @@ void about_frame(mu_Context* ctx, int width, int height)
     }
     mu_label(ctx, "Compiler");
     mu_label(ctx, COMPILER);
+    mu_label(ctx, "SDL");
+    mu_label(ctx, sdlVersion());
 
     // Close button pushed to the right edge: the first cell eats all the width
     // but the button's own, leaving it flush with the dialog's right side.
