@@ -6,6 +6,7 @@ import ddlogger;
 import bindbc.sdl;
 import ddui;
 import hexview;
+import loader;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_KEY_UP, OMNI_KEY_DOWN;
 import render;
@@ -14,15 +15,23 @@ version (Screenshot) import screenshot;
 
 void main(string[] args)
 {
+    // Ideally, should be logging to a file (appdata etc.),
+    // but this is a stopgap to see if loader loads proper
+    logAddAppender(new ConsoleAppender());
+    logSetLevel(LogLevel.debugging);
+
+    // Under the dynamic configuration nothing may touch SDL_* or TTF_* before
+    // this, the screenshot driver included.
+    if (loader_init() == false)
+        return;
+    scope(exit) loader_quit();
+
     version (Screenshot)
     {
         import std.algorithm.searching : canFind;
         if (args.canFind("--screenshot"))
             return cast(void) screenshot_run(args);
     }
-
-    logAddAppender(new ConsoleAppender());
-    logSetLevel(LogLevel.debugging);
 
     if (SDL_Init(SDL_INIT_VIDEO) == false)
     {

@@ -18,6 +18,7 @@ this is the map and the handful of things that span modules.
 | `bookmarks.d` | bookmark list and edit shifting |
 | `menu.d` | menubar widgets (candidates for ddui itself) |
 | `render.d` | SDL3_ttf text engine and font faces |
+| `loader.d` | opens the SDL3 shared libraries (dynamic build only) |
 | `about.d`, `uitext.d` | About dialog, text helpers |
 | `screenshot.d` | debug frame capture (`-b screenshot`) |
 

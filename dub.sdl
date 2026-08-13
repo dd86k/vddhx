@@ -4,19 +4,61 @@ authors "dd86k <dd@dax.moe>"
 copyright "Copyright © 2026, dd86k <dd@dax.moe>"
 license "proprietary"
 
-dependency "bindbc-sdl" version="~>2.4.2"
+dependency "bindbc-sdl" version="==2.4.2"
 dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="a70e43e45ceec730a34c5f49f6d3cdb43094b7ab"
 dependency "ddlogger" repository="git+https://github.com/dd86k/ddlogger.git" version="653364f91d3febed0116eb792a3a899418f49927"
 dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="3ffdac461a0cba77551fcc8ee228c2dcfe4d46d1"
 
-// Link SDL3 statically: the "static" subconfiguration makes bindbc-sdl emit
-// direct extern bindings (sets version BindSDL_Static) instead of runtime
-// function pointers, so no loadSDL() call is needed.
-subConfiguration "bindbc-sdl" "static"
-
 // SDL_TTF_3_2_2 turns on bindbc-sdl's SDL3_ttf bindings (guarded behind
 // sdlTTFVersion); without it the sdl_ttf module compiles to nothing.
 versions "SDL_3_4" "SDL_TTF_3_2_2"
+
+// How SDL3 gets into the binary. The default configuration expects the SDL3 and
+// SDL3_ttf shared libraries on the system and opens them at startup
+// (source/loader.d); the "static" one links the archives in, needing nothing
+// installed to run.
+//
+//	dub build             # dynamic
+//	dub build -c static   # static
+configuration "application" {
+	targetType "executable"
+
+	// bindbc-sdl's default subconfiguration: every binding is a function
+	// pointer bound by loadSDL()/loadSDLTTF(), so the libraries are only
+	// needed at runtime and a missing one is a message rather than a
+	// failure to start.
+	subConfiguration "bindbc-sdl" "dynamic"
+}
+
+configuration "static" {
+	targetType "executable"
+
+	// The "static" subconfiguration makes bindbc-sdl emit direct extern
+	// bindings (sets version BindSDL_Static) instead of runtime function
+	// pointers, so loader_init() compiles away to nothing.
+	subConfiguration "bindbc-sdl" "static"
+
+	// Posix: build-sdl3-debian.sh installs libSDL3.a and libSDL3_ttf.a into
+	// ~/.local by default. libSDL3_ttf.a links the system freetype/harfbuzz
+	// shared libs (from libfreetype-dev/libharfbuzz-dev), so those two
+	// resolve from the default search path; list them after SDL3_ttf (which
+	// needs their symbols). If a future SDL_ttf pulls in more, the script
+	// prints `pkg-config --static --libs sdl3_ttf` to check.
+	libs "SDL3_ttf" "harfbuzz" "freetype" "SDL3" platform="posix"
+	lflags "-L$HOME/.local/lib" platform="posix"
+
+	// Windows: build-sdl3.ps1 installs into ./install by default.
+	// MSVC renames the static archive to SDL3-static.lib so it cannot collide
+	// with the DLL import library of the same name. SDL3_ttf plus its vendored
+	// static freetype/harfbuzz come first; the rest are the transitive system
+	// dependencies SDL reports in its installed sdl3.pc.
+	libs "SDL3_ttf" "harfbuzz" "freetype" \
+	     "SDL3-static" \
+	     "kernel32" "user32" "gdi32" "winmm" "imm32" "ole32" "oleaut32" \
+	     "version" "uuid" "advapi32" "setupapi" "shell32" "dinput8" \
+	     platform="windows"
+	lflags "/LIBPATH:$PACKAGE_DIR/install/lib" platform="windows"
+}
 
 // Debug-only frame capture. Adds the Ctrl+Shift+F12 live shortcut and the
 // --screenshot headless driver (source/screenshot.d). Kept out of the default
@@ -25,24 +67,3 @@ buildType "screenshot" {
 	versions "Screenshot"
 	buildOptions "debugMode" "debugInfo"
 }
-
-// Posix: build-sdl3-debian.sh installs libSDL3.a and libSDL3_ttf.a into
-// ~/.local by default. libSDL3_ttf.a links the system freetype/harfbuzz shared
-// libs (from libfreetype-dev/libharfbuzz-dev), so those two resolve from the
-// default search path; list them after SDL3_ttf (which needs their symbols).
-// If a future SDL_ttf pulls in more, the script prints
-// `pkg-config --static --libs sdl3_ttf` to check.
-libs "SDL3_ttf" "harfbuzz" "freetype" "SDL3" platform="posix"
-lflags "-L$HOME/.local/lib" platform="posix"
-
-// Windows: build-sdl3.ps1 installs into ./install by default.
-// MSVC renames the static archive to SDL3-static.lib so it cannot collide with
-// the DLL import library of the same name. SDL3_ttf plus its vendored static
-// freetype/harfbuzz come first; the rest are the transitive system
-// dependencies SDL reports in its installed sdl3.pc.
-libs "SDL3_ttf" "harfbuzz" "freetype" \
-     "SDL3-static" \
-     "kernel32" "user32" "gdi32" "winmm" "imm32" "ole32" "oleaut32" \
-     "version" "uuid" "advapi32" "setupapi" "shell32" "dinput8" \
-     platform="windows"
-lflags "/LIBPATH:$PACKAGE_DIR/install/lib" platform="windows"
