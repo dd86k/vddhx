@@ -35,7 +35,7 @@ void main(string[] args)
 
     if (SDL_Init(SDL_INIT_VIDEO) == false)
     {
-        logCritical("SDL_Init: ", SDL_GetError().fromStringz);
+        logCritical("SDL_Init: %s", SDL_GetError().fromStringz);
         return;
     }
     scope(exit) SDL_Quit();
@@ -43,21 +43,21 @@ void main(string[] args)
     SDL_Window* window = SDL_CreateWindow("vddhx", 800, 600, SDL_WINDOW_RESIZABLE);
     if (window is null)
     {
-        logCritical("SDL_CreateWindow: ", SDL_GetError().fromStringz);
+        logCritical("SDL_CreateWindow: %s", SDL_GetError().fromStringz);
         return;
     }
     scope(exit) SDL_DestroyWindow(window);
 
     if (SDL_SetWindowMinimumSize(window, 640, 480) == false)
     {
-        logCritical("SDL_SetWindowMinimumSize: ", SDL_GetError().fromStringz);
+        logCritical("SDL_SetWindowMinimumSize: %s", SDL_GetError().fromStringz);
         return;
     }
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, null);
     if (renderer is null)
     {
-        logCritical("SDL_CreateRenderer: ", SDL_GetError().fromStringz);
+        logCritical("SDL_CreateRenderer: %s", SDL_GetError().fromStringz);
         return;
     }
     scope(exit) SDL_DestroyRenderer(renderer);
@@ -72,7 +72,7 @@ void main(string[] args)
     // Bring up SDL3_ttf, the text engine, and the font faces.
     if (render_init(renderer) == false)
     {
-        logCritical("render_init: ", SDL_GetError().fromStringz);
+        logCritical("render_init: %s", SDL_GetError().fromStringz);
         return;
     }
     scope(exit) render_quit();
@@ -138,7 +138,7 @@ void main(string[] args)
         {
             // Only ever false on error, and a broken queue does not heal: going
             // back to sleep on it would spin the loop at full speed instead.
-            logCritical("SDL_WaitEvent: ", SDL_GetError().fromStringz);
+            logCritical("SDL_WaitEvent: %s", SDL_GetError().fromStringz);
             break;
         }
 
