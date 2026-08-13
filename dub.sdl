@@ -2,7 +2,7 @@ name "vddhx"
 description "Visual DDHX"
 authors "dd86k <dd@dax.moe>"
 copyright "Copyright © 2026, dd86k <dd@dax.moe>"
-license "proprietary"
+license "MIT"
 
 dependency "bindbc-sdl" version="==2.4.2"
 dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="a70e43e45ceec730a34c5f49f6d3cdb43094b7ab"

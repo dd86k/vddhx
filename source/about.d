@@ -19,6 +19,9 @@ enum AUTHOR = "dd <dd@dax.moe>";
 /// Project homepage, opened in the desktop browser from the dialog.
 enum HOMEPAGE = "https://github.com/dd86k/vddhx";
 
+/// Distribution terms, matching dub.sdl's license field and the LICENSE file.
+enum LICENSE = "MIT";
+
 /// Compiler that built this binary, e.g. "LDC (frontend 2.111)".
 ///
 /// __VENDOR__ names the compiler and __VERSION__ its D frontend version, encoded
@@ -60,7 +63,7 @@ private enum TITLE = "About vddhx";
 
 // Dialog size in pixels; it is centred on the window each time it is opened.
 private enum int WIDTH  = 460;
-private enum int HEIGHT = 214;
+private enum int HEIGHT = 238;
 
 // Link text, idle and hovered/focused.
 private enum mu_Color LINK_COLOR = mu_Color(110, 170, 255, 255);
@@ -121,6 +124,8 @@ void about_frame(mu_Context* ctx, int width, int height)
             logWarn("SDL_OpenURL: %s", SDL_GetError().fromStringz);
         }
     }
+    mu_label(ctx, "License");
+    mu_label(ctx, LICENSE);
     mu_label(ctx, "Compiler");
     mu_label(ctx, COMPILER);
     mu_label(ctx, "SDL");

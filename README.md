@@ -37,4 +37,15 @@ Windows uses `build-sdl3.ps1`, which installs into `./install` instead.
 
 ## License
 
-Proprietary. Copyright (c) 2026, dd86k <dd@dax.moe>.
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026, dd86k <dd@dax.moe>.
+
+Dependencies:
+- [ddhx](https://github.com/dd86k/ddhx) (MIT),
+- [ddui](https://github.com/dd86k/ddui) (BSD-3-Clause),
+- [ddlogger](https://github.com/dd86k/ddlogger) (BSL-1.0),
+- [bindbc-sdl](https://github.com/BindBC/bindbc-sdl) (BSL-1.0),
+- and [SDL3](https://github.com/libsdl-org/SDL) with SDL3_ttf (zlib).
+
+The `static` configuration also links FreeType and HarfBuzz into the binary:
+portions of that build are copyright (c) The FreeType Project
+(<https://freetype.org>), all rights reserved.
