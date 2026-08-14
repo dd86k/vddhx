@@ -82,6 +82,139 @@ private int split_bar(mu_Context* ctx, const(char)* name, mu_Rect r, bool alongX
     return alongX ? ctx.mouse_delta.x : ctx.mouse_delta.y;
 }
 
+/// What dropping something on a pane would do with it.
+enum SplitZone
+{
+    centre, /// Put it in the pane itself, alongside what is already there.
+    left,   /// Split the pane: the newcomer takes a new pane on that side.
+    right,  /// Ditto.
+    up,     /// Ditto, above.
+    down,   /// Ditto, below.
+}
+
+// The zone test in fixed point: distances to the four edges are taken as
+// thousandths of the pane's own width and height, so a tall narrow pane and a
+// short wide one both offer the same share of themselves as an edge.
+private enum int ZONE_SCALE = 1000;
+private enum int ZONE_EDGE  = ZONE_SCALE / 3;
+
+/// Which part of pane `r` the point `p` is in, and so what a drop there means.
+///
+/// The outer third along each axis splits the pane on that side and the middle
+/// takes the drop whole, which is the arrangement every tabbed editor uses. A
+/// corner belongs to whichever edge it is nearest in proportion, so the two
+/// zones meet on the diagonal rather than one axis quietly winning every corner.
+///
+/// `headH` pixels off the top - a tab strip - are the pane's centre wherever the
+/// pointer is in them: dropping a tab on a row of tabs is joining that row, and a
+/// strip is short enough that its own top third would be a pixel or two of
+/// hair trigger.
+/// Params:
+///     r = The pane, in window coordinates.
+///     headH = Height of the strip capping it, 0 for a pane without one.
+///     p = Where the pointer is.
+/// Returns: The zone `p` falls in, centre for anything outside `r`.
+SplitZone split_zone(mu_Rect r, int headH, mu_Vec2 p)
+{
+    mu_Rect inner = mu_Rect(r.x, r.y + headH, r.w, r.h - headH);
+    if (inner.w <= 0 || inner.h <= 0)
+        return SplitZone.centre;
+    if (p.x < inner.x || p.x >= inner.x + inner.w ||
+        p.y < inner.y || p.y >= inner.y + inner.h)
+        return SplitZone.centre;
+
+    int fx = (p.x - inner.x) * ZONE_SCALE / inner.w;
+    int fy = (p.y - inner.y) * ZONE_SCALE / inner.h;
+
+    int[4] dist = [ fx, ZONE_SCALE - fx, fy, ZONE_SCALE - fy ];
+    static immutable SplitZone[4] zones =
+        [ SplitZone.left, SplitZone.right, SplitZone.up, SplitZone.down ];
+
+    size_t near;
+    foreach (size_t i, int d; dist[1 .. $])
+        if (d < dist[near])
+            near = i + 1;
+    return dist[near] < ZONE_EDGE ? zones[near] : SplitZone.centre;
+}
+
+unittest
+{
+    // A 300x300 pane at the origin, no strip: the middle third each way is the
+    // centre, and each outer third its own edge.
+    static immutable mu_Rect r = mu_Rect(0, 0, 300, 300);
+    assert(split_zone(r, 0, mu_Vec2(150, 150)) == SplitZone.centre);
+    assert(split_zone(r, 0, mu_Vec2(150,  50)) == SplitZone.up);
+    assert(split_zone(r, 0, mu_Vec2(150, 250)) == SplitZone.down);
+    assert(split_zone(r, 0, mu_Vec2( 50, 150)) == SplitZone.left);
+    assert(split_zone(r, 0, mu_Vec2(250, 150)) == SplitZone.right);
+
+    // Just inside and just outside the top boundary.
+    assert(split_zone(r, 0, mu_Vec2(150,  99)) == SplitZone.up);
+    assert(split_zone(r, 0, mu_Vec2(150, 100)) == SplitZone.centre);
+
+    // Corners go to the nearer edge, and the diagonal itself to the first of the
+    // two - a pixel either way of it is what the user is actually aiming at.
+    assert(split_zone(r, 0, mu_Vec2(10, 40)) == SplitZone.left);
+    assert(split_zone(r, 0, mu_Vec2(40, 10)) == SplitZone.up);
+    assert(split_zone(r, 0, mu_Vec2(290, 20)) == SplitZone.right);
+    assert(split_zone(r, 0, mu_Vec2(280, 10)) == SplitZone.up);
+
+    // The strip on top is centre throughout, and the zones below it are measured
+    // from its underside rather than from the pane's top edge.
+    static immutable mu_Rect capped = mu_Rect(0, 0, 300, 320);
+    assert(split_zone(capped, 20, mu_Vec2(150,  0)) == SplitZone.centre);
+    assert(split_zone(capped, 20, mu_Vec2( 10, 10)) == SplitZone.centre);
+    assert(split_zone(capped, 20, mu_Vec2(150, 25)) == SplitZone.up);
+    assert(split_zone(capped, 20, mu_Vec2(150, 170)) == SplitZone.centre);
+
+    // Offset panes work in window coordinates, not their own.
+    static immutable mu_Rect away = mu_Rect(500, 400, 300, 300);
+    assert(split_zone(away, 0, mu_Vec2(650, 550)) == SplitZone.centre);
+    assert(split_zone(away, 0, mu_Vec2(550, 550)) == SplitZone.left);
+    assert(split_zone(away, 0, mu_Vec2(650, 450)) == SplitZone.up);
+
+    // A pointer that is not in the pane at all is nobody's edge.
+    assert(split_zone(away, 0, mu_Vec2(0, 0))     == SplitZone.centre);
+    assert(split_zone(away, 0, mu_Vec2(800, 550)) == SplitZone.centre);
+
+    // A pane with nothing under its strip cannot be split into.
+    static immutable mu_Rect flat = mu_Rect(0, 0, 300, 20);
+    assert(split_zone(flat, 20, mu_Vec2(150, 10)) == SplitZone.centre);
+}
+
+/// The half of `r` a drop in `zone` would land in, for painting where it goes.
+/// The whole of it for the centre, which is the whole pane taking the drop.
+mu_Rect split_zone_rect(mu_Rect r, SplitZone zone)
+{
+    final switch (zone)
+    {
+    case SplitZone.centre: return r;
+    case SplitZone.left:   return mu_Rect(r.x, r.y, r.w / 2, r.h);
+    case SplitZone.right:  return mu_Rect(r.x + r.w / 2, r.y, r.w - r.w / 2, r.h);
+    case SplitZone.up:     return mu_Rect(r.x, r.y, r.w, r.h / 2);
+    case SplitZone.down:   return mu_Rect(r.x, r.y + r.h / 2, r.w, r.h - r.h / 2);
+    }
+}
+
+unittest
+{
+    static immutable mu_Rect r = mu_Rect(10, 20, 100, 60);
+    assert(split_zone_rect(r, SplitZone.centre) == r);
+    assert(split_zone_rect(r, SplitZone.left)   == mu_Rect(10, 20, 50, 60));
+    assert(split_zone_rect(r, SplitZone.right)  == mu_Rect(60, 20, 50, 60));
+    assert(split_zone_rect(r, SplitZone.up)     == mu_Rect(10, 20, 100, 30));
+    assert(split_zone_rect(r, SplitZone.down)   == mu_Rect(10, 50, 100, 30));
+
+    // An odd size leaves no seam between the two halves and nothing hanging over
+    // the edge: the far one takes the spare pixel, the way a pane laid out there
+    // would (see split_layout).
+    static immutable mu_Rect odd = mu_Rect(0, 0, 101, 61);
+    assert(split_zone_rect(odd, SplitZone.left)  == mu_Rect(0, 0, 50, 61));
+    assert(split_zone_rect(odd, SplitZone.right) == mu_Rect(50, 0, 51, 61));
+    assert(split_zone_rect(odd, SplitZone.up)    == mu_Rect(0, 0, 101, 30));
+    assert(split_zone_rect(odd, SplitZone.down)  == mu_Rect(0, 30, 101, 31));
+}
+
 /// Share `avail` pixels out over `weights`, writing one size per pane.
 ///
 /// The last pane takes whatever integer division left over, so the sizes always
@@ -108,7 +241,8 @@ void split_layout(const(int)[] weights, int avail, int[] sizes)
     {
         int even = avail / cast(int) weights.length;
         sizes[0 .. weights.length] = even;
-        sizes[weights.length - 1] = avail - even * (cast(int) weights.length - 1);
+        // The empty row returned above, so there is a last pane to land on.
+        sizes[weights.length - 1] = avail - even * (cast(int) weights.length - 1); // @suppress(dscanner.suspicious.length_subtraction)
         return;
     }
 
@@ -118,7 +252,7 @@ void split_layout(const(int)[] weights, int avail, int[] sizes)
         sizes[i] = cast(int)((cast(long) avail * w) / total);
         used += sizes[i];
     }
-    sizes[weights.length - 1] = avail - used;
+    sizes[weights.length - 1] = avail - used; // @suppress(dscanner.suspicious.length_subtraction)
 }
 
 unittest

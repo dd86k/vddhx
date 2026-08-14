@@ -383,16 +383,20 @@ int screenshot_run(string[] args)
     // the rightmost pane after the drop above; press its tab, pull the pointer
     // left across the window, and it comes out of the strip - drawn over the
     // panes it crosses, with the pane it would land in picked out.
+    //
+    // Aimed at the middle of the leftmost pane, since the outer third of a pane
+    // each way is the zone that splits it rather than joins it (see split_zone):
+    // this is the joining gesture, so it has to land in the middle band.
     mu_Vec2 leaving = find("othe");
     int leavingY = leaving.y + 3;
     mu_input_mousemove(&ctx, leaving.x + 3, leavingY); frame(); frame();
     mu_input_mousedown(&ctx, leaving.x + 3, leavingY, MU_MOUSE_LEFT); frame();
-    mu_input_mousemove(&ctx, 300, leavingY + 120); frame(); frame();
+    mu_input_mousemove(&ctx, 250, 300); frame(); frame();
     shot("shot-tab-detached.bmp");
 
     // Letting go over the leftmost pane hands the tab to it: the view goes across
     // whole, caret and all, and the destination takes the keyboard.
-    mu_input_mouseup(&ctx, 300, leavingY + 120, MU_MOUSE_LEFT); frame(); frame();
+    mu_input_mouseup(&ctx, 250, 300, MU_MOUSE_LEFT); frame(); frame();
     shot("shot-tab-handed-over.bmp");
 
     // Dragging out a pane's *last* tab leaves that pane with nothing to show, so
@@ -400,9 +404,29 @@ int screenshot_run(string[] args)
     // is down to one tab after the handover above; its strip sits around x=630.
     mu_input_mousemove(&ctx, 630, leavingY); frame(); frame();
     mu_input_mousedown(&ctx, 630, leavingY, MU_MOUSE_LEFT); frame();
-    mu_input_mousemove(&ctx, 200, leavingY + 200); frame(); frame();
-    mu_input_mouseup(&ctx, 200, leavingY + 200, MU_MOUSE_LEFT); frame(); frame();
+    mu_input_mousemove(&ctx, 250, 300); frame(); frame();
+    mu_input_mouseup(&ctx, 250, 300, MU_MOUSE_LEFT); frame(); frame();
     shot("shot-pane-emptied.bmp");
+
+    // The same drag aimed at the top third of a pane instead: that is a split, so
+    // the preview covers the half the newcomer would take rather than the whole
+    // pane, and letting go there puts it in a pane of its own above the one it
+    // was dropped on. The left pane holds several tabs after the handovers above,
+    // so this pulls one of them up out of its own pane.
+    mu_Vec2 upper = find("mid.");
+    int upperY = upper.y + 3;
+    mu_input_mousemove(&ctx, upper.x + 3, upperY); frame(); frame();
+    mu_input_mousedown(&ctx, upper.x + 3, upperY, MU_MOUSE_LEFT); frame();
+    mu_input_mousemove(&ctx, 250, 120); frame(); frame();
+    shot("shot-tab-split-hover.bmp");
+
+    mu_input_mouseup(&ctx, 250, 120, MU_MOUSE_LEFT); frame(); frame();
+    shot("shot-tab-split-done.bmp");
+
+    // Put it back the way the scenarios below expect: the pane made by the split
+    // goes, and its height returns to the pane under it.
+    ui_close_pane();
+    frame(); frame();
 
     // Dragging a tab down over its own pane's grid must not drag the selection
     // with it. The panel is handed focus when its tab is picked (so typing lands
@@ -421,7 +445,11 @@ int screenshot_run(string[] args)
     mu_input_mousedown(&ctx, 330, 49, MU_MOUSE_LEFT); frame();
     mu_input_mousemove(&ctx, 330, 300); frame(); frame();
     shot("shot-tab-drag-held.bmp");
-    mu_input_mouseup(&ctx, 330, 300, MU_MOUSE_LEFT); frame(); frame();
+    // Back to the middle of the pane before letting go: dropped against an edge
+    // this would split the tab out into a pane of its own, and what is being
+    // checked here is a gesture that changes nothing.
+    mu_input_mousemove(&ctx, 250, 300); frame(); frame();
+    mu_input_mouseup(&ctx, 250, 300, MU_MOUSE_LEFT); frame(); frame();
 
     // Scenario 10e: splitting the other way. The new pane goes under the focused
     // one inside its own column, so the column keeps its width and the panes
@@ -458,6 +486,25 @@ int screenshot_run(string[] args)
     ui_close_pane();
     frame(); frame();
     shot("shot-pane-stack-closed.bmp");
+
+    // The sideways half of the drag-to-split gesture: a tab let go against a
+    // pane's left edge takes a column of its own beside it, so the preview is the
+    // left half of the pane rather than its top half, and the panes end up side
+    // by side instead of stacked. The left pane still has several tabs, so one of
+    // them can be pulled out of it into the space it is being dropped over.
+    mu_Vec2 sideways = find("other");
+    int sidewaysY = sideways.y + 3;
+    mu_input_mousemove(&ctx, sideways.x + 3, sidewaysY); frame(); frame();
+    mu_input_mousedown(&ctx, sideways.x + 3, sidewaysY, MU_MOUSE_LEFT); frame();
+    mu_input_mousemove(&ctx, 480, 300); frame(); frame();
+    shot("shot-tab-split-side-hover.bmp");
+
+    mu_input_mouseup(&ctx, 480, 300, MU_MOUSE_LEFT); frame(); frame();
+    shot("shot-tab-split-side-done.bmp");
+
+    // And away again, leaving the two panes the scenarios below expect.
+    ui_close_pane();
+    frame(); frame();
 
     // Scenario 11: the omnibar. Ctrl+E is a main-loop chord, so the scripted
     // driver calls the entry point that key does, then types into the box the

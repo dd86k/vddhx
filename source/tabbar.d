@@ -117,6 +117,15 @@ private enum int TAB_INSET    = 4; // strip colour left of the first tab
 // by a pixel of hand shake on the way back up.
 private enum int TAB_DRAG_MIN = 4;
 
+/// Height one strip takes, which is a menubar's so the two line up when stacked.
+///
+/// For a caller that has to reason about where a strip sits before or after it is
+/// drawn - what part of a pane is strip and what part is content, say.
+int tab_bar_height(mu_Context* ctx)
+{
+    return ctx.style.size.y + ctx.style.padding * 2;
+}
+
 /// Draw and drive a strip of tabs.
 ///
 /// Consumes one layout row of its own, the height of a menubar so the two line
@@ -165,7 +174,7 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     mu_Font font = ctx.style.font;
     int pad = ctx.style.padding;
     int th  = ctx.text_height(font);
-    int h   = ctx.style.size.y + pad * 2; // mu_begin_menubar's height
+    int h   = tab_bar_height(ctx);
 
     int fill = -1;
     mu_layout_row(ctx, 1, &fill, h);

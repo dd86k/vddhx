@@ -208,6 +208,11 @@ struct Column
 
     /// Share of the window's width this column takes, against its neighbours'.
     int weight = SPLIT_WEIGHT;
+
+    /// Where the column was last drawn, the same way a pane records its own rect.
+    /// A sideways split reaches around a whole column rather than into it, so this
+    /// is the shape that has to be shown to somebody about to make one.
+    mu_Rect rect;
 }
 
 /// Every open document, every view onto one, and every column of panes.
@@ -520,8 +525,8 @@ public void ui_new_tab()
     }
 
     Pane* p = focused;
-    p.views ~= v;
-    p.current = p.views.length - 1;
+    p.views ~= v; // .length updated
+    p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     v.hex.takeFocus = true; // ready to take bytes without a click first
 }
 
@@ -601,7 +606,10 @@ void ui_close_tab_in(Pane* p, size_t index)
     // the prompt, which can still be cancelled and leave everything as it was.
     diff_unlink(p.views[index]);
 
-    p.views = p.views[0 .. index] ~ p.views[index + 1 .. $];
+    // Out of the strip, front tab moved along with it (see ui_take_view). The
+    // view itself is not wanted back: this is the one route where a tab leaves a
+    // pane for nowhere rather than for another pane.
+    cast(void) ui_take_view(p, index);
     if (last)
         ui_drop_document(d);
 
@@ -627,13 +635,6 @@ void ui_close_tab_in(Pane* p, size_t index)
         return;
     }
 
-    // Closing a tab left of the front one shifts it down; closing the front one
-    // keeps the index, which now names its right-hand neighbour (or the new last
-    // tab, when the front one was the last).
-    if (index < p.current)
-        --p.current;
-    if (p.current >= p.views.length)
-        p.current = p.views.length - 1;
     p.views[p.current].hex.takeFocus = true; // ready to type in
 }
 
@@ -1291,6 +1292,39 @@ Pane* ui_pane_at(int x, int y)
     return null;
 }
 
+/// The pane a tab being dragged is over and what letting go there would do: join
+/// that pane, or split it on one of its four sides. Null when the pointer is over
+/// no pane at all, which is a drop that does nothing.
+///
+/// The strip at the top of a pane is all centre, so a tab dropped on a row of
+/// tabs joins that row however near the pane's edge the pointer happens to be.
+Pane* ui_drop_target(mu_Context* ctx, out SplitZone zone)
+{
+    Pane* onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
+    zone = onto ? split_zone(onto.rect, tab_bar_height(ctx), ctx.mouse_pos)
+                : SplitZone.centre;
+    return onto;
+}
+
+/// The shape a drop on `p` would fill, for showing where it lands before the
+/// user commits to it. The pane itself for a drop that joins it, half of it for
+/// one that splits it.
+///
+/// A sideways split of a pane with others stacked in its column takes the whole
+/// column's width instead, since that is what ui_split_into actually does with
+/// it: the preview says half the column, and half the column is what appears.
+mu_Rect ui_drop_rect(Pane* p, SplitZone zone)
+{
+    mu_Rect r = p.rect;
+    if (zone == SplitZone.left || zone == SplitZone.right)
+    {
+        size_t ci, pi;
+        if (ui_locate(p, ci, pi) && columns[ci].panes.length > 1)
+            r = columns[ci].rect;
+    }
+    return split_zone_rect(r, zone);
+}
+
 /// A file is being dragged over the window: mark the pane under the pointer so
 /// the user can see where it would land before letting go. Called for every
 /// position report SDL sends while the drag is in flight.
@@ -1443,8 +1477,8 @@ public bool ui_open(string path)
     {
         v = new View;
         v.doc = d;
-        p.views ~= v;
-        p.current = p.views.length - 1;
+        p.views ~= v; // .length updated
+        p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     }
 
     wireView(v); // picks the new editor up, on a fresh view and a reused one alike
@@ -2253,7 +2287,7 @@ void ui_find_preview(out string label, out string detail)
     size_t at;
     foreach (ushort element; needle.data[0 .. needle.length])
     {
-        if (at + 3 > buf.length - 4)
+        if (at + 3 > buf.length - 4) // @suppress(dscanner.suspicious.length_subtraction)
         {
             at += sformat(buf[at .. $], " ...").length;
             break;
@@ -2886,9 +2920,14 @@ void ui_panes(mu_Context* ctx, int statusH)
     if (ghost.pane)
     {
         Pane* src = ghost.pane;
-        Pane* onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
-        if (onto && onto !is src)
-            ui_mark_pane(ctx, onto.rect);
+        SplitZone zone;
+        Pane* onto = ui_drop_target(ctx, zone);
+        // Back over the pane it came from is the drag being called off, so
+        // nothing is marked - unless it is against an edge, which splits the tab
+        // out of that pane and is a real destination.
+        if (onto && (onto !is src ||
+                    (zone != SplitZone.centre && src.views.length > 1)))
+            ui_mark_pane(ctx, ui_drop_rect(onto, zone));
         if (ghost.index >= 0 && ghost.index < src.items.length)
             tab_ghost(ctx, src.tabs, src.items[ghost.index], ghost.rect);
     }
@@ -2906,10 +2945,14 @@ void ui_panes(mu_Context* ctx, int statusH)
     case TabAction.add:    focused = req.pane; ui_new_tab();      break;
     case TabAction.move:   ui_move_tab(req.pane, req.index, req.target); break;
     // Let go outside its own strip: it goes to whichever pane the pointer is
-    // over. Released over nothing - a splitter, the status bar - and it stays
-    // where it was, which is the way out of a drag begun by accident.
+    // over, either into it or into a new pane splitting it, according to where
+    // in that pane it landed. Released over nothing - a splitter, the status bar
+    // - and it stays where it was, which is the way out of a drag begun by
+    // accident.
     case TabAction.detach:
-        ui_move_view(req.pane, req.index, ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y));
+        SplitZone zone;
+        Pane* onto = ui_drop_target(ctx, zone);
+        ui_split_into(req.pane, req.index, onto, zone);
         break;
     default:
     }
@@ -2986,6 +3029,8 @@ void ui_column(mu_Context* ctx, Column* c, mu_Rect r, ref TabRequest req,
     foreach (size_t i, Pane* p; c.panes)
         paneWeights[i] = p.weight;
     split_layout(paneWeights[0 .. n], avail, paneSizes[0 .. n]);
+
+    c.rect = r; // for the drop preview; see Column.rect
 
     int y = r.y;
     foreach (size_t i, Pane* p; c.panes)
@@ -3134,15 +3179,10 @@ void ui_move_view(Pane* src, size_t index, Pane* dst)
     if (src is null || dst is null || src is dst || index >= src.views.length)
         return;
 
-    View* v = src.views[index];
-    src.views = src.views[0 .. index] ~ src.views[index + 1 .. $];
-    if (index < src.current)
-        --src.current;
-    if (src.views.length && src.current >= src.views.length)
-        src.current = src.views.length - 1;
+    View* v = ui_take_view(src, index);
 
-    dst.views ~= v;
-    dst.current = dst.views.length - 1;
+    dst.views ~= v; // .length updated
+    dst.current = dst.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     v.hex.takeFocus = true;
 
     // The pane it came from may have nothing left in it, in which case it goes -
@@ -3152,6 +3192,94 @@ void ui_move_view(Pane* src, size_t index, Pane* dst)
         ui_drop_pane(src);
 
     focused = dst;
+}
+
+/// Ditto, but the view lands in a pane of its own beside `dst` rather than in
+/// `dst` itself: the drag-to-split route, where a tab let go against a pane's
+/// edge divides that pane instead of joining it.
+///
+/// `zone` says which edge, and so where the new pane goes: above or below `dst`
+/// in its own column, or in a new column to one side. The sideways case reaches
+/// around the whole column, exactly as ui_split does, because the grid is two
+/// levels deep and a column cannot hold panes side by side - so dropping on the
+/// left of a pane with another stacked under it puts the new column beside both.
+/// ui_drop_rect shows that before the user lets go.
+///
+/// A tab dropped on the edge of its own pane splits off from it, which is how one
+/// is pulled out into a split without visiting another pane first; the last tab
+/// of a pane has nothing to split away from and stays put.
+void ui_split_into(Pane* src, size_t index, Pane* dst, SplitZone zone)
+{
+    if (src is null || dst is null || index >= src.views.length)
+        return;
+    if (zone == SplitZone.centre)
+    {
+        ui_move_view(src, index, dst);
+        return;
+    }
+    if (src is dst && src.views.length < 2)
+        return;
+
+    // Where the new pane goes is settled before anything moves: a destination
+    // that is somehow not in the grid must leave the view where it is rather
+    // than in a pane nothing draws.
+    size_t ci, pi;
+    if (ui_locate(dst, ci, pi) == false)
+        return;
+
+    Pane* p = newPane();
+    p.views ~= ui_take_view(src, index);
+    p.views[0].hex.takeFocus = true;
+
+    if (zone == SplitZone.up || zone == SplitZone.down)
+    {
+        // Half of the pane being dropped on, so the column's total is unchanged
+        // and nothing outside it moves.
+        Column* c = columns[ci];
+        p.weight = dst.weight / 2;
+        dst.weight -= p.weight;
+
+        size_t at = zone == SplitZone.up ? pi : pi + 1;
+        c.panes = c.panes[0 .. at] ~ p ~ c.panes[at .. $];
+    }
+    else
+    {
+        Column* c = new Column;
+        c.panes ~= p;
+        c.weight = columns[ci].weight / 2;
+        columns[ci].weight -= c.weight;
+
+        size_t at = zone == SplitZone.left ? ci : ci + 1;
+        columns = columns[0 .. at] ~ c ~ columns[at .. $];
+    }
+
+    // Emptied by the move, so it goes - after the insertion, whose indices were
+    // read from the grid as it stood. Panes are named by pointer, so the new one
+    // is unaffected by the grid closing over the old.
+    if (src.views.length == 0 && ui_pane_count() > 1)
+        ui_drop_pane(src);
+
+    focused = p;
+}
+
+/// Take the view at `index` out of `p`, leaving the pane's front tab on whatever
+/// is nearest what it was showing: a tab taken from the left of the front one
+/// shifts it down, and taking the front one itself keeps the index, which now
+/// names its right-hand neighbour (or the new last tab, when it was the last).
+///
+/// The pane may be left with nothing in it, which is for the caller to deal with:
+/// it has somewhere to put the view and this does not. Its front tab is left
+/// where it stood in that case, since there is no tab to put it on - anything
+/// that empties a pane either closes it or fills it again.
+View* ui_take_view(Pane* p, size_t index)
+{
+    View* v = p.views[index];
+    p.views = p.views[0 .. index] ~ p.views[index + 1 .. $];
+    if (index < p.current)
+        --p.current;
+    if (p.views.length && p.current >= p.views.length)
+        p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
+    return v;
 }
 
 /// Where the tab at `at` ends up once the one at `from` is moved to `to`. The
