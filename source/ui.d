@@ -2721,24 +2721,6 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 
         ui_menubar(ctx);
 
-        // Quick toolbar: the minimap toggle. Off falls back to a fat scrollbar.
-        // It sits above the tabs, with the menubar, because it is a view setting
-        // for the whole application rather than one document's: every tab draws
-        // through the same panel and reads the same flag.
-        // ddui paints nothing behind a plain layout row, so the toolbar would
-        // show the window's pale grey between the dark menubar and tab strip.
-        // Take the row, fill it in the same chrome colour, then put the widget
-        // back inside it; an absolute rect is handed straight back by the layout
-        // without advancing it.
-        int toolbarH = ctx.style.size.y + ctx.style.padding * 2; // the menubar's
-        static immutable int[1] full = [ -1 ];
-        mu_layout_row(ctx, 1, full.ptr, toolbarH);
-        mu_Rect toolbar = mu_layout_next(ctx);
-        mu_draw_rect(ctx, toolbar, ctx.style.colors[MU_COLOR_TITLEBG]);
-        mu_layout_set_next(ctx, mu_Rect(toolbar.x + ctx.style.padding, toolbar.y,
-            120, toolbar.h), 0);
-        mu_checkbox(ctx, "Minimap", &minimapOn);
-
         // The panes take the rest of the window, save a strip at the bottom
         // reserved for the status bar.
         int statusH = ctx.text_height(ctx.style.font) + 6;
@@ -3385,6 +3367,18 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Cut",   "Ctrl+X", 0, 0)) ui_cut();
         if (mu_menu_item_ex(ctx, "Copy",  "Ctrl+C", 0, 0)) ui_copy();
         if (mu_menu_item_ex(ctx, "Paste", "Ctrl+V", 0, 0)) ui_paste();
+        ctx.style.padding = basePadding;
+        mu_end_menu(ctx);
+    }
+
+    if (mu_begin_menu(ctx, "View"))
+    {
+        ctx.style.padding = itemPadding;
+        // No native checkmark on a ddui menu item, so the on/off state rides in
+        // the shortcut column instead, the one place a viewer's eye already
+        // goes looking for a chord.
+        if (mu_menu_item_ex(ctx, "Minimap", minimapOn ? "On" : "Off", 0, 0))
+            minimapOn = minimapOn ? 0 : 1;
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }
