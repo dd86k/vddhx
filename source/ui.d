@@ -1802,6 +1802,28 @@ unittest
     assert(parseHexText("0x") is null);       // a prefix with no digits behind it
 }
 
+/// Step the focused document's history, `redo` picking the direction, and chase
+/// the change with the caret.
+///
+/// The panel has its own Ctrl+Z and Ctrl+Y, but only while it holds the keyboard,
+/// which a menu click or an omnibar row has just taken from it; both go through
+/// the same hooks the panel calls, so history moves the one way whichever route
+/// asked.
+public void ui_undo(bool redo)
+{
+    if (doc.editor is null)
+        return;
+
+    void* user = cast(void*) &view();
+    long at = redo ? hexRedo(user) : hexUndo(user);
+    if (at < 0)
+    {
+        ui_status(redo ? "nothing to redo" : "nothing to undo");
+        return;
+    }
+    hex_set_caret(view.hex, cast(size_t) at);
+}
+
 /// Outcome of the unsaved-changes prompt.
 enum Confirm { proceed, cancel }
 
@@ -1911,12 +1933,12 @@ struct Entry
 enum
 {
     CMD_NEW_TAB, CMD_OPEN, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
-    CMD_CUT, CMD_COPY, CMD_PASTE, CMD_GOTO,
+    CMD_UNDO, CMD_REDO, CMD_CUT, CMD_COPY, CMD_PASTE, CMD_GOTO,
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT,
     CMD_SKIP_NEXT, CMD_SKIP_PREV,
     CMD_MARK, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
-    CMD_MINIMAP, CMD_ABOUT, CMD_QUIT,
+    CMD_MINIMAP, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
 }
 
 /// Ditto.
@@ -1928,6 +1950,8 @@ immutable Entry[] COMMANDS = [
     Entry("Save",             "Ctrl+S",       CMD_SAVE,         "write store commit"),
     Entry("Save As...",       "Ctrl+Shift+S", CMD_SAVE_AS,      "write export copy to"),
     Entry("Close Tab",        "Ctrl+W",       CMD_CLOSE_TAB,    "shut document"),
+    Entry("Undo",             "Ctrl+Z",       CMD_UNDO,         "back revert history step"),
+    Entry("Redo",             "Ctrl+Y",       CMD_REDO,         "forward again history step"),
     Entry("Cut",              "Ctrl+X",       CMD_CUT,          "clipboard remove delete"),
     Entry("Copy",             "Ctrl+C",       CMD_COPY,         "clipboard yank"),
     Entry("Paste",            "Ctrl+V",       CMD_PASTE,        "clipboard insert put"),
@@ -1949,6 +1973,7 @@ immutable Entry[] COMMANDS = [
     Entry("Next Pane",        "",             CMD_PANE_NEXT,    "window forward switch"),
     Entry("Previous Pane",    "",             CMD_PANE_PREV,    "window back backward switch"),
     Entry("Toggle Minimap",   "",             CMD_MINIMAP,      "ribbon overview scrollbar sidebar"),
+    Entry("Keyboard Shortcuts...", "",       CMD_KEYS,          "keys chords bindings help cheat sheet"),
     Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
 ];
@@ -2016,6 +2041,14 @@ public void ui_omni_toggle(char prefix = 0)
     omni_toggle(omni, prefix);
     if (omni_shown(omni) == false)
         view.hex.takeFocus = true; // typing goes back to the bytes
+}
+
+/// Raise the omnibar on the mode `prefix` opens, leaving it up when it is already
+/// on that one. What a menu item wants, where toggling would make the box flicker
+/// away under a second click on the item that just opened it.
+public void ui_omni_open(char prefix)
+{
+    omni_show(omni, prefix);
 }
 
 /// Put the omnibar away, whatever it was showing. The Esc route.
@@ -2544,6 +2577,13 @@ public void ui_mark_step(int dir)
     ui_mark_select(view, index);
 }
 
+/// Drop every bookmark on the focused document.
+public void ui_mark_clear()
+{
+    ui_status("cleared %u bookmark(s)", doc.marks.length);
+    doc.marks = null;
+}
+
 /// Put `v`'s selection over the bookmark at `index` in its document's list.
 void ui_mark_select(ref View v, ptrdiff_t index)
 {
@@ -2564,6 +2604,8 @@ void ui_omni_run(int id)
     case CMD_SAVE:      ui_save();             break;
     case CMD_SAVE_AS:   ui_save_as();          break;
     case CMD_CLOSE_TAB: ui_close_current_tab(); break;
+    case CMD_UNDO:      ui_undo(false);        break;
+    case CMD_REDO:      ui_undo(true);         break;
     case CMD_CUT:       ui_cut();              break;
     case CMD_COPY:      ui_copy();             break;
     case CMD_PASTE:     ui_paste();            break;
@@ -2580,16 +2622,14 @@ void ui_omni_run(int id)
     case CMD_CLOSE_PANE: ui_close_pane();      break;
     case CMD_PANE_NEXT:  ui_cycle_pane(1);     break;
     case CMD_PANE_PREV:  ui_cycle_pane(-1);    break;
-    case CMD_MARK_CLEAR:
-        ui_status("cleared %u bookmark(s)", doc.marks.length);
-        doc.marks = null;
-        break;
+    case CMD_MARK_CLEAR: ui_mark_clear();      break;
     // Back into the box on another prefix, which reopens next frame and grabs the
     // keyboard, so the panel must not be handed focus on the way out.
-    case CMD_GOTO:      omni_show(omni, OMNI_ADDRESS);  return;
-    case CMD_FIND:      omni_show(omni, OMNI_FIND);     return;
-    case CMD_INSPECT:   omni_show(omni, OMNI_INSPECT);  return;
-    case CMD_MARK_LIST: omni_show(omni, OMNI_BOOKMARK); return;
+    case CMD_GOTO:      ui_omni_open(OMNI_ADDRESS);  return;
+    case CMD_FIND:      ui_omni_open(OMNI_FIND);     return;
+    case CMD_INSPECT:   ui_omni_open(OMNI_INSPECT);  return;
+    case CMD_MARK_LIST: ui_omni_open(OMNI_BOOKMARK); return;
+    case CMD_KEYS:      ui_omni_open(OMNI_HELP);     return;
     case CMD_ABOUT:     about_open();          break;
     case CMD_QUIT:
         // Through SDL's own queue, so it meets the same unsaved-changes check as
@@ -3234,8 +3274,10 @@ void ui_menubar(mu_Context* ctx)
 
     // A dropdown takes its width from style.menu_width alone, so a label and a
     // right-aligned shortcut overlap once they outgrow the stock 160px (as
-    // "Save As..." and Ctrl+Shift+S do). Measuring the widest pair beats pinning a
-    // pixel count that a change of font would quietly break again.
+    // "Save As..." and Ctrl+Shift+S do). Measured rather than pinned to a pixel
+    // count that a change of font would quietly break again, and measured over the
+    // command table rather than the items below: every item here is one of those,
+    // and one width covers every dropdown anyway.
     int itemWidth(const(char)* label, const(char)* shortcut)
     {
         // One padding inset each side, plus two more as the gap between the label
@@ -3244,7 +3286,10 @@ void ui_menubar(mu_Context* ctx)
                ctx.text_width(ctx.style.font, shortcut, -1) + itemPadding * 4;
     }
     int baseMenuWidth = ctx.style.menu_width;
-    ctx.style.menu_width = mu_max(baseMenuWidth, itemWidth("Save As...", "Ctrl+Shift+S"));
+    int menuWidth = baseMenuWidth;
+    foreach (ref immutable Entry e; COMMANDS)
+        menuWidth = mu_max(menuWidth, itemWidth(e.label.ptr, e.keys.ptr));
+    ctx.style.menu_width = menuWidth;
     scope(exit) ctx.style.menu_width = baseMenuWidth;
 
     if (mu_begin_menu(ctx, "File"))
@@ -3278,6 +3323,9 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "Edit"))
     {
         ctx.style.padding = itemPadding;
+        if (mu_menu_item_ex(ctx, "Undo",  "Ctrl+Z", 0, 0)) ui_undo(false);
+        if (mu_menu_item_ex(ctx, "Redo",  "Ctrl+Y", 0, 0)) ui_undo(true);
+        mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Cut",   "Ctrl+X", 0, 0)) ui_cut();
         if (mu_menu_item_ex(ctx, "Copy",  "Ctrl+C", 0, 0)) ui_copy();
         if (mu_menu_item_ex(ctx, "Paste", "Ctrl+V", 0, 0)) ui_paste();
@@ -3285,9 +3333,43 @@ void ui_menubar(mu_Context* ctx)
         mu_end_menu(ctx);
     }
 
+    // The items that only raise the omnibar on one of its modes keep the ellipsis:
+    // what they put up is a box that then wants typing, as much a dialog as the
+    // native ones in File.
+    if (mu_begin_menu(ctx, "Search"))
+    {
+        ctx.style.padding = itemPadding;
+        if (mu_menu_item_ex(ctx, "Find...",       "Ctrl+F",       0, 0)) ui_omni_open(OMNI_FIND);
+        if (mu_menu_item_ex(ctx, "Find Next",     "Ctrl+N",       0, 0)) ui_find_repeat(false);
+        if (mu_menu_item_ex(ctx, "Find Previous", "Ctrl+Shift+N", 0, 0)) ui_find_repeat(true);
+        mu_menu_separator(ctx);
+        if (mu_menu_item_ex(ctx, "Go to Offset...", "Ctrl+G",     0, 0)) ui_omni_open(OMNI_ADDRESS);
+        mu_menu_separator(ctx);
+        // Not a search of the document, but the same walk over it by another name.
+        if (mu_menu_item_ex(ctx, "Skip Forward",  "Ctrl+Right",   0, 0)) ui_skip_element(false);
+        if (mu_menu_item_ex(ctx, "Skip Back",     "Ctrl+Left",    0, 0)) ui_skip_element(true);
+        ctx.style.padding = basePadding;
+        mu_end_menu(ctx);
+    }
+
+    if (mu_begin_menu(ctx, "Bookmarks"))
+    {
+        ctx.style.padding = itemPadding;
+        if (mu_menu_item_ex(ctx, "Toggle Bookmark",   "Ctrl+B", 0, 0)) ui_mark_toggle();
+        if (mu_menu_item_ex(ctx, "Next Bookmark",     "]",      0, 0)) ui_mark_step(1);
+        if (mu_menu_item_ex(ctx, "Previous Bookmark", "[",      0, 0)) ui_mark_step(-1);
+        mu_menu_separator(ctx);
+        if (mu_menu_item_ex(ctx, "List Bookmarks...", "",       0, 0)) ui_omni_open(OMNI_BOOKMARK);
+        if (mu_menu_item_ex(ctx, "Clear Bookmarks",   "",       0, 0)) ui_mark_clear();
+        ctx.style.padding = basePadding;
+        mu_end_menu(ctx);
+    }
+
     if (mu_begin_menu(ctx, "View"))
     {
         ctx.style.padding = itemPadding;
+        if (mu_menu_item_ex(ctx, "Inspect Bytes...", "Alt+I", 0, 0)) ui_omni_open(OMNI_INSPECT);
+        mu_menu_separator(ctx);
         // No native checkmark on a ddui menu item, so the on/off state rides in the
         // shortcut column instead.
         if (mu_menu_item_ex(ctx, "Minimap", minimapOn ? "On" : "Off", 0, 0))
@@ -3299,6 +3381,8 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "Help"))
     {
         ctx.style.padding = itemPadding;
+        if (mu_menu_item(ctx, "Keyboard Shortcuts...")) ui_omni_open(OMNI_HELP);
+        mu_menu_separator(ctx);
         if (mu_menu_item(ctx, "About")) about_open();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);

@@ -235,12 +235,20 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     mu_layout_row(ctx, 1, full.ptr, boxH);
     mu_Rect box = mu_layout_next(ctx);
     mu_Id qid = mu_get_id(ctx, QUERY.ptr, cast(int) QUERY.length);
-    if (o.focusWanted)
+    bool raised = o.focusWanted;
+    if (raised)
     {
         o.focusWanted = false;
         mu_set_focus(ctx, qid);
     }
     int res = mu_textbox_raw(ctx, o.text.ptr, cast(int) o.text.length, qid, box, 0);
+    // A box raised by a mouse click - a menu item - runs first on the frame of that
+    // very click, and ddui hands focus away from a control pressed outside of. The
+    // dismissal below would then read the opening click as the user clicking away,
+    // so the box would blink and be gone. The click that opened it is not a click
+    // outside it.
+    if (raised && ctx.focus != qid)
+        mu_set_focus(ctx, qid);
     if (res & MU_RES_CHANGE)
     {
         // Next frame's list is a different list, so put the highlight back on its

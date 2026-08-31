@@ -871,6 +871,33 @@ int screenshot_run(string[] args)
     frame(); frame();
     shot("diff-closed.bmp");
 
+    // Scenario 18: the menu items that raise the omnibar rather than act. Walked
+    // with the mouse, which is the whole point: the box has to survive the click
+    // that opened it, and every one of these used to blink and be gone the next
+    // frame. One shot for the sheet, the rest checked by finding a row of the mode
+    // they should have put up.
+    static immutable string[3][5] raises = [
+        [ "Help",      "Keyboard Shortcuts...", "Omnibar: this sheet" ],
+        [ "Search",    "Find...",               "waiting for a pattern" ],
+        [ "Search",    "Go to Offset...",       "waiting for an offset" ],
+        [ "View",      "Inspect Bytes...",      "u8" ],
+        [ "Bookmarks", "List Bookmarks...",     "no bookmarks in this document" ],
+    ];
+    foreach (ref immutable string[3] step; raises)
+    {
+        mu_Vec2 title = find(step[0].ptr);
+        click(title.x + 3, title.y + 3);
+        frame(); frame();
+        mu_Vec2 item = find(step[1].ptr);
+        click(item.x + 3, item.y + 3);
+        frame(); frame();
+        find(step[2].ptr); // throws when the box closed on itself again
+        if (step[1] == "Keyboard Shortcuts...")
+            shot("menu-keys.bmp");
+        ui_omni_close();
+        frame();
+    }
+
     // Scenario 19: the easter egg. Last of the set, since it leaves two dialogs
     // stacked and both own a control the label search would find first. The version
     // line in the About dialog looks like a label and is not one.
