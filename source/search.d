@@ -28,7 +28,7 @@ module search;
 
 import std.system : Endian;
 
-import patterns : matchPattern, pattern, Pattern, patternpfx, PatternType,
+import patterns : pattern, Pattern, patternpfx, PatternType,
     PATTERN_GLOB_MANY, PATTERN_GLOB_ONE, PATTERN_HAS_GLOB;
 import utils : Argument, arguments;
 
@@ -151,19 +151,19 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
         // to - there is nothing on this side of the wrap, so the whole document
         // is searched and its last match answered.
         if (from < 0)
-            return search_range(needle, 0, last, true, length, read, user);
+            return search_range(needle, 0, last, size, true, length, read, user);
 
-        long hit = search_range(needle, 0, from, true, length, read, user);
+        long hit = search_range(needle, 0, from, size, true, length, read, user);
         if (hit < 0 && from < last) // wrap: carry on from the far end
-            hit = search_range(needle, from + 1, last, true, length, read, user);
+            hit = search_range(needle, from + 1, last, size, true, length, read, user);
         return hit;
     }
 
     if (from < 0)
         from = 0;
-    long hit = search_range(needle, from, last, false, length, read, user);
+    long hit = search_range(needle, from, last, size, false, length, read, user);
     if (hit < 0 && from > 0)
-        hit = search_range(needle, 0, from - 1, false, length, read, user);
+        hit = search_range(needle, 0, from - 1, size, false, length, read, user);
     return hit;
 }
 
@@ -254,6 +254,11 @@ private:
 enum size_t SEARCH_WINDOW = 64 * 1024;
 __gshared ubyte[SEARCH_WINDOW] window;
 
+/// Ditto, for what a run reaches over. A second buffer rather than the one above
+/// because the two are read at once: the window holds the candidates being tried
+/// while this one walks ahead looking for the rest of the pattern.
+__gshared ubyte[SEARCH_WINDOW] runWindow;
+
 /// The element a skip walks over, copied out of the document once so the windows
 /// can be compared against it. Off the stack for the same reason as `window`.
 __gshared ubyte[SEARCH_ELEMENT_MAX] element;
@@ -289,14 +294,126 @@ bool search_matchable(ref const(Needle) needle)
     return false;
 }
 
-/// ddhx's view of the needle, for handing to `matchPattern`. That only ever reads
-/// its pattern, so the elements are lent out of the needle's own storage.
-Pattern search_pattern(ref const(Needle) needle)
+/// One stretch of the needle with no run in it: `length` elements from `at`, each
+/// a byte value or SEARCH_ANY, so it stands for exactly that many bytes.
+struct Segment
 {
-    Pattern pat;
-    pat.data  = cast(ushort[]) needle.data[0 .. needle.length];
-    pat.flags = needle.flags;
-    return pat;
+    size_t at;
+    size_t length;
+}
+
+/// A needle split at its runs: the stretches left over, each of a known length, to
+/// be found in order with any distance between them.
+struct Segments
+{
+    Segment[SEARCH_MAX / 2 + 1] seg; /// A run between every two, so at most this many.
+    size_t count;
+    /// The pattern opens with a run, so its first stretch is not pinned to where
+    /// the match starts either.
+    bool lead;
+}
+
+Segments search_split(ref const(Needle) needle)
+{
+    Segments segs;
+    size_t i;
+    while (i < needle.length)
+    {
+        if (needle.data[i] == SEARCH_RUN)
+        {
+            if (i == 0)
+                segs.lead = true;
+            ++i;
+            continue;
+        }
+        size_t start = i;
+        while (i < needle.length && needle.data[i] != SEARCH_RUN)
+            ++i;
+        segs.seg[segs.count++] = Segment(start, i - start);
+    }
+    return segs;
+}
+
+/// Whether `seg` stands for the bytes at `have[at .. at + seg.length]`, which the
+/// caller has already made room for.
+bool search_fits(ref const(Needle) needle, Segment seg, const(ubyte)[] have, size_t at)
+{
+    foreach (size_t i; 0 .. seg.length)
+    {
+        ushort element = needle.data[seg.at + i];
+        if (element != SEARCH_ANY && have[at + i] != cast(ubyte) element)
+            return false;
+    }
+    return true;
+}
+
+/// Lowest offset in [from, hi] the stretch fits at, reading through `buf` a window
+/// at a time, each reaching a stretch past its last candidate so no match falls in
+/// a seam.
+/// Returns: That offset, or -1 when the stretch is nowhere in the range.
+long search_seek(ref const(Needle) needle, Segment seg, long from, long hi,
+    ubyte[] buf, SearchReadFn read, void* user)
+{
+    long pos = from < 0 ? 0 : from;
+    while (pos <= hi)
+    {
+        long want = (hi - pos) + cast(long) seg.length;
+        if (want > cast(long) buf.length)
+            want = cast(long) buf.length;
+
+        ubyte[] have = read(pos, buf[0 .. cast(size_t) want], user);
+        if (have.length < seg.length)
+            return -1;
+
+        size_t limit = have.length - seg.length;
+        foreach (size_t i; 0 .. limit + 1)
+        {
+            if (pos + cast(long) i > hi)
+                return -1;
+            if (search_fits(needle, seg, have, i))
+                return pos + cast(long) i;
+        }
+        pos += cast(long)(limit + 1);
+    }
+    return -1;
+}
+
+/// Where a chain of stretches landed.
+struct Chain
+{
+    /// Offset the first of them matched at. Nothing else about the chain depends
+    /// on where it was asked from, so this is what says when an answer still
+    /// stands for another start: see search_range.
+    long at;
+    /// One past the last byte of the match, or -1 when a stretch was nowhere left
+    /// in the document.
+    long end;
+}
+
+/// Match the stretches from `first` on, each at the lowest offset it fits from
+/// where the one before it ended: a run stands for as few bytes as it can, which is
+/// the reading ddhx's own '*' has.
+///
+/// A failure is final for the whole scan and not just for this start: a stretch
+/// with nothing left to match would only be looked for further along from any
+/// later one.
+Chain search_chain(ref const(Needle) needle, ref const(Segments) segs, size_t first,
+    long pos, long size, SearchReadFn read, void* user)
+{
+    Chain chain = { pos, -1 };
+    foreach (size_t s; first .. segs.count)
+    {
+        Segment seg = segs.seg[s];
+        long hit = search_seek(needle, seg, pos, size - cast(long) seg.length,
+            runWindow, read, user);
+        if (hit < 0)
+            return chain;
+        if (s == first)
+            chain.at = hit;
+        pos = hit + cast(long) seg.length;
+    }
+    chain.end = pos;
+    return chain;
 }
 
 const(char)[] search_strip(const(char)[] text)
@@ -314,51 +431,97 @@ const(char)[] search_strip(const(char)[] text)
 /// when `wantLast` is set (which is how a backward search is served: the range
 /// is still walked forwards, since a document reads one way).
 ///
-/// A pattern holding a SEARCH_RUN is matched inside a single window, so a run
-/// reaching further than SEARCH_WINDOW bytes past where its match began is not
-/// found. Nothing without a run is bounded that way, the window always reaching
-/// past its last candidate by the whole of a fixed-size match.
-long search_range(ref const(Needle) needle, long lo, long hi, bool wantLast,
-    out size_t length, SearchReadFn read, void* user)
+/// The matching is not ddhx's own `matchPattern`: that one is handed a haystack, so
+/// a run in the pattern can reach no further than the buffer it was called on. The
+/// needle is split at its runs instead and its stretches are looked for one after
+/// another, each streaming through the document on its own, so what a run spans is
+/// bounded by the document and nothing else.
+long search_range(ref const(Needle) needle, long lo, long hi, long size,
+    bool wantLast, out size_t length, SearchReadFn read, void* user)
 {
     if (lo > hi)
         return -1;
 
-    Pattern pat = search_pattern(needle);
-    size_t least = search_least(needle);
-    // How far past a candidate the window has to reach: exactly the match for a
-    // pattern of a fixed size, as far as a window will go for one with a run.
-    size_t span = least == needle.length ? least : SEARCH_WINDOW;
+    Segments segs = search_split(needle);
+    if (segs.count == 0)
+        return -1; // nothing but runs: see search_matchable
 
+    // A pattern opening with a run begins wherever it is tried, the run reaching
+    // ahead to whatever follows it, so there is no first stretch to scan for: the
+    // only question is whether the rest of the pattern is anywhere ahead. The
+    // answer is the same for every start in the range, up to where the rest of it
+    // begins, so one attempt settles it.
+    if (segs.lead)
+    {
+        long at = wantLast ? hi : lo;
+        Chain chain = search_chain(needle, segs, 0, at, size, read, user);
+        if (chain.end >= 0)
+        {
+            length = cast(size_t)(chain.end - at);
+            return at;
+        }
+        if (wantLast == false)
+            return -1;
+        // Nothing at hi means nothing past it either, so the last match in the
+        // range is where the first stretch itself last begins: the scan below.
+    }
+
+    Segment head = segs.seg[0];
     long best = -1;
     size_t bestlen;
+
+    // What the last chain came to, kept for the candidates after it. A candidate
+    // that has not passed the stretch that chain opened with meets that same
+    // stretch - it is the first one from where the earlier candidate looked, and
+    // this one looks from no further back than it - so the rest of the chain is
+    // the rest of that one too, and the answer stands as it is. Where it does not,
+    // the walk resumes past it, so the stretches are swept once between them all
+    // rather than once per candidate.
+    Chain chain = { -1, -1 };
+
     long pos = lo;
-    while (pos <= hi)
+    scan: while (pos <= hi)
     {
-        // Enough bytes for every candidate left in the range, up to a window.
-        long want = (hi - pos) + cast(long) span;
+        // Enough bytes for every candidate left in the range, up to a window. Only
+        // the first stretch is looked for here, whatever follows a run being
+        // streamed through a window of its own.
+        long want = (hi - pos) + cast(long) head.length;
         if (want > cast(long) SEARCH_WINDOW)
             want = SEARCH_WINDOW;
 
         ubyte[] have = read(pos, window[0 .. cast(size_t) want], user);
-        if (have.length < least)
+        if (have.length < head.length)
             break; // what is left cannot hold a match
 
-        size_t limit = have.length - least; // last index in the window one can start at
+        size_t limit = have.length - head.length; // last index one can start at
         foreach (size_t i; 0 .. limit + 1)
         {
             if (pos + cast(long) i > hi)
                 break;
-            ptrdiff_t got = matchPattern(have, pat, i, 0);
-            if (got < 0)
+            if (search_fits(needle, head, have, i) == false)
                 continue;
+
+            long at   = pos + cast(long) i;
+            long from = at + cast(long) head.length;
+            long end  = from;
+            if (segs.count > 1)
+            {
+                if (chain.end < 0 || from > chain.at)
+                {
+                    chain = search_chain(needle, segs, 1, from, size, read, user);
+                    if (chain.end < 0)
+                        break scan; // and every later candidate fails the same way
+                }
+                end = chain.end;
+            }
+
             if (wantLast == false)
             {
-                length = cast(size_t) got;
-                return pos + cast(long) i;
+                length = cast(size_t)(end - at);
+                return at;
             }
-            best = pos + cast(long) i;
-            bestlen = cast(size_t) got;
+            best = at;
+            bestlen = cast(size_t)(end - at);
         }
 
         // Step past the candidates just tried, leaving the tail that the next
@@ -585,4 +748,110 @@ unittest
     assert(search_find(n, 0, SIZE, false, len, &reader, null) == AT);
     assert(len == 4);
     assert(search_find(n, SIZE - 1, SIZE, true, len, &reader, null) == AT);
+}
+
+unittest
+{
+    // A run reaching over more than one window, which is what the stretches are
+    // matched one at a time for.
+    enum size_t SIZE = 3 * SEARCH_WINDOW;
+    enum long HEAD = 100;                        // first window
+    enum long MID  = SEARCH_WINDOW + 5000;       // second
+    enum long TAIL = 2 * SEARCH_WINDOW + 9000;   // third
+    static __gshared ubyte[SIZE] big;
+    big[HEAD .. HEAD + 2] = [ 0xca, 0xfe ];
+    big[MID  .. MID  + 2] = [ 0xba, 0xbe ];
+    big[TAIL .. TAIL + 2] = [ 0xde, 0xad ];
+
+    static ubyte[] reader(long pos, ubyte[] buf, void* user)
+    {
+        if (pos >= SIZE)
+            return null;
+        size_t n = SIZE - cast(size_t) pos;
+        if (n > buf.length) n = buf.length;
+        buf[0 .. n] = big[cast(size_t) pos .. cast(size_t) pos + n];
+        return buf[0 .. n];
+    }
+
+    Needle n;
+    size_t len;
+
+    assert(search_parse("0xcafe * 0xbabe", n));
+    assert(search_find(n, 0, SIZE, false, len, &reader, null) == HEAD);
+    assert(len == MID + 2 - HEAD);
+    assert(search_find(n, SIZE - 1, SIZE, true, len, &reader, null) == HEAD);
+    assert(len == MID + 2 - HEAD);
+
+    // Two runs, so three stretches, each found in a window of its own.
+    assert(search_parse("0xcafe * 0xbabe * 0xdead", n));
+    assert(search_find(n, 0, SIZE, false, len, &reader, null) == HEAD);
+    assert(len == TAIL + 2 - HEAD);
+
+    // The stretch after the run is behind the one before it, not ahead of it.
+    assert(search_parse("0xbabe * 0xcafe", n));
+    assert(search_find(n, 0, SIZE, false, len, &reader, null) == -1);
+    assert(len == 0);
+
+    // A leading run starts the match where the search does and reaches ahead.
+    assert(search_parse("* 0xbabe", n));
+    assert(search_find(n, 0, SIZE, false, len, &reader, null) == 0);
+    assert(len == MID + 2);
+    // ...and backward it is the last offset the rest is still ahead of.
+    assert(search_find(n, SIZE - 1, SIZE, true, len, &reader, null) == MID);
+    assert(len == 2);
+}
+
+unittest
+{
+    // Thousands of candidates for the first stretch and one far-off tail, which is
+    // the shape the chain is remembered across: without that, a backward search
+    // here walks to the tail once per candidate.
+    enum size_t SIZE = 2 * SEARCH_WINDOW;
+    enum size_t RUN  = 4096; // 0x22 at every offset below this
+    static __gshared ubyte[SIZE] many;
+    many[0 .. RUN] = 0x22;
+    many[SIZE - 1] = 0x33;
+
+    // ...and a nearer tail, with a candidate past it, so the remembered chain is
+    // dropped where it no longer stands rather than answered from.
+    enum long NEAR = SEARCH_WINDOW + 1000;
+    enum long FAR  = NEAR + 2000;
+    many[SEARCH_WINDOW] = 0x22;
+    many[NEAR] = 0x33;
+    many[FAR]  = 0x22;
+
+    static __gshared size_t reads;
+    static ubyte[] reader(long pos, ubyte[] buf, void* user)
+    {
+        ++reads;
+        if (pos >= SIZE)
+            return null;
+        size_t n = SIZE - cast(size_t) pos;
+        if (n > buf.length) n = buf.length;
+        buf[0 .. n] = many[cast(size_t) pos .. cast(size_t) pos + n];
+        return buf[0 .. n];
+    }
+
+    Needle n;
+    size_t len;
+    assert(search_parse("x:22 * x:33", n));
+
+    // Forward: the first 0x22 there is, reaching to the first 0x33 after it.
+    assert(search_find(n, 0, SIZE, false, len, &reader, null) == 0);
+    assert(len == NEAR + 1);
+
+    // Backward: the last one, which is past the near tail and so has one of its
+    // own - the remembered chain does not answer for it.
+    reads = 0;
+    assert(search_find(n, SIZE - 1, SIZE, true, len, &reader, null) == FAR);
+    assert(len == SIZE - FAR);
+    // A handful of windows: this document is four of them, and answering the
+    // thousands of candidates from the remembered chain is what keeps it to that
+    // rather than to a walk each.
+    assert(reads < 16);
+
+    // The last candidate inside the run, which shares the near tail with every
+    // candidate before it.
+    assert(search_find(n, SEARCH_WINDOW - 1, SIZE, true, len, &reader, null) == RUN - 1);
+    assert(len == NEAR + 1 - (RUN - 1));
 }
