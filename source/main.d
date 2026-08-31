@@ -69,7 +69,6 @@ void main(string[] args)
         SDL_SetRenderVSync(renderer, 1); // fall back to plain vsync
     }
 
-    // Bring up SDL3_ttf, the text engine, and the font faces.
     if (render_init(renderer) == false)
     {
         logCritical("render_init: %s", SDL_GetError().fromStringz);
@@ -77,7 +76,6 @@ void main(string[] args)
     }
     scope(exit) render_quit();
 
-    // Enable keyboard text input (for future textboxes; harmless for buttons).
     SDL_StartTextInput(window);
 
     // Allocated because otherwise mu_Context does not fit in the default
@@ -92,7 +90,7 @@ void main(string[] args)
         return;
     }
     
-    // Set up the ddui context and its text-measuring callbacks.
+    // Set up the ddui context
     mu_init(ctx);
     ctx.text_width  = &render_text_width;
     ctx.text_height = &render_text_height;
@@ -104,40 +102,29 @@ void main(string[] args)
     // Give the UI the window so File > Open can parent its native dialog to it.
     ui_init(window);
 
-    // Open the files named on the command line, one tab each. With no argument
-    // we start on a blank panel rather than viewing our own executable; the
-    // first file takes over that blank tab. A failure here just leaves the tab
-    // out (ui_open logs the reason).
+    // One tab each, the first taking over the blank one we start on. A failure
+    // just leaves the tab out (ui_open logs the reason).
     foreach (string path; args[1 .. $])
         ui_open(path);
 
     logDebugging("Starting loop");
 
-    // Frames still owed to the last input. One is not always enough: the UI is
-    // immediate mode, so state only reaches the screen by drawing, and a click
-    // that opens a popup or moves focus lands on the frame after the one that
-    // read it. Draw a few, then let the loop go back to sleep.
+    // Frames still owed to the last input. One is not enough: a click that opens a
+    // popup or moves focus lands on the frame after the one that read it.
     enum FRAMES_PER_INPUT = 3;
 
     bool running = true;
     int frames = FRAMES_PER_INPUT; // the first frame is owed to nothing: draw it
-    version (Screenshot) bool wantShot;
+    version (Screenshots) bool wantShot;
     while (running)
     {
-        // Idle: sleep in SDL until the next event instead of redrawing on the
-        // display refresh. This is an editor, not a game - a window nobody is
-        // touching has nothing to animate, and adaptive vsync alone still woke
-        // the process sixty times a second to rebuild an identical frame.
-        // Everything that changes what is on screen arrives as an event; the
-        // async file dialogs answer on their own thread, so their callbacks
-        // push one (ui_wakeup) to get themselves drawn.
+        // Idle: sleep in SDL rather than rebuild an identical frame on every
+        // display refresh. Everything that changes the screen arrives as an event,
+        // the async file dialogs pushing their own (ui_wakeup) from their thread.
+        // The null leaves the event in the queue for the drain below.
         //
-        // The event is left in the queue (that is what the null does) so the
-        // drain below can treat it like any other.
-        //
-        // ui_animating is the one thing that can owe a frame to nothing: while
-        // it holds, the loop free-runs and vsync paces it, and the moment it
-        // drops the process goes back to sleeping on the queue.
+        // ui_animating is the one thing that can owe a frame to nothing: while it
+        // holds, the loop free-runs on vsync.
         if (frames <= 0 && ui_animating() == false && SDL_WaitEvent(null) == false)
         {
             // Only ever false on error, and a broken queue does not heal: going
@@ -153,9 +140,8 @@ void main(string[] args)
             switch (event.type)
             {
             case SDL_EVENT_QUIT:
-                // Single choke point for every quit route (window close, the
-                // File > Quit menu and Ctrl+Q both push this). Let the UI clear
-                // any unsaved changes before the loop ends.
+                // Single choke point for every quit route: the File > Quit menu
+                // and Ctrl+Q push this too, so all three meet the same check.
                 if (ui_may_quit())
                     running = false;
                 break;
@@ -166,18 +152,12 @@ void main(string[] args)
                 mu_input_scroll(ctx, 0, cast(int)(event.wheel.y * -30));
                 break;
             case SDL_EVENT_TEXT_INPUT:
-                // Bookmarks step on the bare brackets, as they do in ddhx. They
-                // are bound to the character typed rather than to a keycode
-                // because on most layouts outside the US ANSI one they are not a
-                // key of their own: fr-ca puts them behind AltGr, which SDL
-                // reports as a right Alt held down (and as Ctrl+Alt on Windows),
-                // and gives the key its unshifted keycode, which is not a
-                // bracket at all. The character SDL hands back here is what the
-                // layout actually produced, whatever it took to type it.
-                //
-                // The grid takes typed text as hex digits and ignores the rest,
-                // so a bracket means nothing else here; the omnibar is a text
-                // box, though, so it keeps what is typed into it.
+                // Bookmarks step on the bare brackets, as they do in ddhx, bound
+                // to the character typed rather than a keycode: outside US ANSI
+                // they are rarely a key of their own (fr-ca puts them behind
+                // AltGr, whose unshifted keycode is not a bracket at all), and
+                // this is what the layout actually produced. The omnibar is a text
+                // box, so it keeps its own brackets.
                 if (ui_omni_active() == false && event.text.text && event.text.text[0] && event.text.text[1] == 0)
                 {
                     if (event.text.text[0] == ']')
@@ -194,20 +174,15 @@ void main(string[] args)
                 mu_input_text(ctx, event.text.text);
                 break;
             case SDL_EVENT_DROP_POSITION:
-                // The drag is over the window and still moving: light up the pane
-                // it is pointing at, so where the file would land is visible
-                // before the button comes up.
+                // Light up the pane being pointed at, so where the file would land
+                // is visible before the button comes up.
                 ui_drop_hover(cast(int) event.drop.x, cast(int) event.drop.y);
                 break;
             case SDL_EVENT_DROP_BEGIN, SDL_EVENT_DROP_COMPLETE:
-                // Either end of a drag: nothing is being pointed at yet, or the
-                // drag has finished (dropped or carried back out of the window).
                 ui_drop_clear();
                 break;
             case SDL_EVENT_DROP_FILE:
-                // A file was dropped onto the window: open it in the pane it
-                // landed on, which the event carries the coordinates of. SDL3
-                // owns the path string (no free), so copy it before it goes away.
+                // SDL3 owns the path string (no free), so copy it before it goes.
                 if (event.drop.data)
                     ui_drop_file(event.drop.data.fromStringz.idup,
                         cast(int) event.drop.x, cast(int) event.drop.y);
@@ -223,12 +198,12 @@ void main(string[] args)
                     mu_input_mouseup(ctx, x, y, btn);
                 break;
             case SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP:
-                version (Screenshot)
+                version (Screenshots)
                 {
-                    // Ctrl+Shift+F12 grabs the current frame. Chosen to dodge
-                    // both desktop-environment PrintScreen capture and the Linux
-                    // Ctrl+Alt+F* virtual-terminal switch. First of everything, so
-                    // a frame can be captured whatever else has the keyboard.
+                    // Ctrl+Shift+F12 grabs the current frame, dodging both
+                    // desktop PrintScreen capture and the Linux Ctrl+Alt+F*
+                    // terminal switch. First of everything, so a frame can be
+                    // captured whatever else has the keyboard.
                     if (event.type == SDL_EVENT_KEY_DOWN &&
                         event.key.key == SDLK_F12 &&
                         event.key.mod & SDL_KMOD_CTRL &&
@@ -238,10 +213,10 @@ void main(string[] args)
                         break;
                     }
                 }
-                // The omnibar next: Ctrl+E raises it on the tab switcher, and a
-                // key per prefixed mode raises it straight on that one. Each key
-                // puts away the mode it opens. Ctrl+G and Ctrl+F are what ddhx
-                // binds its own goto and find to; Alt+I its inspector.
+                // The omnibar next: Ctrl+E raises it on the tab switcher, one key
+                // per prefixed mode raises it straight on that one, and each key
+                // puts away the mode it opens. Ctrl+G, Ctrl+F and Alt+I are what
+                // ddhx binds goto, find and the inspector to.
                 if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)
                 {
                     if (event.key.key == SDLK_E)
@@ -271,10 +246,9 @@ void main(string[] args)
                     ui_omni_toggle(OMNI_INSPECT);
                     break;
                 }
-                // While it is up it owns the keyboard: it is a text box, so the
-                // panel's chords and hex digits would fight what is being typed
-                // into it. Its keys go through ddui's text-editing map rather
-                // than the panel's, which reads the same bits as other keys.
+                // While it is up it owns the keyboard, its keys going through
+                // ddui's text-editing map rather than the panel's, whose chords
+                // and hex digits would fight what is being typed.
                 if (ui_omni_active())
                 {
                     if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)
@@ -292,14 +266,11 @@ void main(string[] args)
                     break;
                 }
                 // Menu chords: the File and Edit entries, keyed the way every GUI
-                // toolkit keys them. SDL sends no text-input event for a Ctrl
-                // chord, so the panel never sees these as typed hex digits;
-                // swallow them here either way.
+                // toolkit keys them.
                 if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)
                 {
-                    // Quit goes through SDL's own event queue rather than ending
-                    // the loop here, so it meets the same unsaved-changes check as
-                    // the window close button and the File > Quit entry.
+                    // Through SDL's queue rather than ending the loop here, so it
+                    // meets the same unsaved-changes check as the other routes.
                     if (event.key.key == SDLK_Q)
                     {
                         SDL_Event quit; // .init zeroes the union
@@ -312,8 +283,8 @@ void main(string[] args)
                         ui_open_dialog();
                         break;
                     }
-                    // Tabs: new, close, and cycling either way. Ctrl+Tab is
-                    // caught here so it never reaches ddui as a focus step.
+                    // Ctrl+Tab is caught here so it never reaches ddui as a focus
+                    // step.
                     if (event.key.key == SDLK_T)
                     {
                         ui_new_tab();
@@ -329,18 +300,12 @@ void main(string[] args)
                         ui_cycle_tab(event.key.mod & SDL_KMOD_SHIFT ? -1 : 1);
                         break;
                     }
-                    // Panes: split the one in front, and jump straight to one by
-                    // number. Ctrl+1..9 is the editor-group binding rather than
-                    // the browser tab one - with panes on screen, a numbered jump
-                    // is far more use aimed at those than at tabs.
-                    //
-                    // Ctrl+\ is what VS Code splits with, and it is a keycode
-                    // rather than a typed character because SDL sends no text
-                    // input for a Ctrl chord. Shift stacks the new pane under the
-                    // old one instead of putting it alongside. On a layout that
-                    // puts backslash behind AltGr neither will fire; the
-                    // omnibar's "Split Pane Right" and "Split Pane Down" are the
-                    // route that always works.
+                    // Ctrl+\ is what VS Code splits with, Shift stacking the new
+                    // pane under the old one instead of alongside; Ctrl+1..9 is
+                    // the editor-group binding rather than the browser tab one.
+                    // On a layout that puts backslash behind AltGr neither fires,
+                    // and the omnibar's "Split Pane Right" / "Down" are the route
+                    // that always works.
                     if (event.key.key == SDLK_BACKSLASH)
                     {
                         if (event.key.mod & SDL_KMOD_SHIFT)
@@ -379,7 +344,6 @@ void main(string[] args)
                         ui_paste();
                         break;
                     }
-                    // Repeat the last search, forward or back.
                     if (event.key.key == SDLK_N)
                     {
                         ui_find_repeat((event.key.mod & SDL_KMOD_SHIFT) != 0);
@@ -390,9 +354,8 @@ void main(string[] args)
                         ui_mark_toggle();
                         break;
                     }
-                    // ddhx's skip-back / skip-forward: cross the run of identical
-                    // bytes under the caret. Caught here so the arrow never
-                    // reaches the panel, which would step it one nibble instead.
+                    // ddhx's skip-back / skip-forward, caught here so the arrow
+                    // never reaches the panel, which would step one nibble.
                     if (event.key.key == SDLK_LEFT || event.key.key == SDLK_RIGHT)
                     {
                         ui_skip_element(event.key.key == SDLK_LEFT);
@@ -411,26 +374,27 @@ void main(string[] args)
             }
         }
 
-        // Build this frame's UI.
         int width, height;
         SDL_GetWindowSize(window, &width, &height);
         mu_begin(ctx);
         ui_frame(ctx, width, height);
         mu_end(ctx);
 
-        // Draw it.
         SDL_SetRenderDrawColor(renderer, 30, 30, 46, 255);
         SDL_RenderClear(renderer);
         render_commands(renderer, ctx);
 
         // Capture from the finished backbuffer, before present.
-        version (Screenshot)
+        version (Screenshots)
         {
             if (wantShot)
             {
                 wantShot = false;
-                if (screenshot_save(renderer, "vddhx.bmp"))
-                    logInfo("screenshot: wrote vddhx.bmp");
+                enum SHOT = SCREENSHOT_DIR ~ "/vddhx.bmp";
+                if (screenshot_mkdir(SCREENSHOT_DIR) == false)
+                    logWarn("screenshot: cannot create " ~ SCREENSHOT_DIR);
+                else if (screenshot_save(renderer, SHOT))
+                    logInfo("screenshot: wrote " ~ SHOT);
                 else
                     logWarn("screenshot: %s", SDL_GetError().fromStringz);
             }
@@ -443,14 +407,12 @@ void main(string[] args)
 
 /// Map an SDL3 keycode for the omnibar's text box (0 if unmapped).
 ///
-/// The panel's map below sends the arrows and paging keys as HEX_KEY_* bits,
-/// several of which land on ddui's own editing keys (HEX_KEY_HOME shares a bit
-/// with MU_KEY_DELETE, and so on): right for the grid, wrong for a text box. So
-/// while the omnibar is up, keys come through here instead, as the ddui bits a
-/// textbox reads, plus the two the omnibar adds for walking its list.
+/// The panel's map below sends arrows and paging keys as HEX_KEY_* bits, several
+/// of which collide with ddui's editing keys (HEX_KEY_HOME shares a bit with
+/// MU_KEY_DELETE): right for the grid, wrong for a text box.
 ///
-/// Copy / cut / paste / select-all are mapped from the bare letters: ddui only
-/// honours those bits while Ctrl is held, so they cannot be confused with typing.
+/// Copy / cut / paste / select-all are mapped from the bare letters, ddui only
+/// honouring those bits while Ctrl is held.
 private int omniKey(SDL_KeyCode key)
 {
     switch (key)
@@ -476,11 +438,9 @@ private int omniKey(SDL_KeyCode key)
 }
 
 /// ddui clipboard hooks, for the omnibar's text box (the hex panel does its own
-/// clipboard work in ui.d, since bytes are not text). SDL hands out a copy the
-/// caller has to free, and ddui's callback returns a borrowed pointer it reads
-/// straight away, so the text is parked in a static buffer and SDL's copy is
-/// released before returning. Text too long for the buffer is cut back on a
-/// UTF-8 boundary, so a paste never carries half a character.
+/// in ui.d, bytes not being text). SDL hands out a copy the caller frees while
+/// ddui expects a borrowed pointer, hence the static buffer; text too long for it
+/// is cut back on a UTF-8 boundary so a paste never carries half a character.
 extern (C) private const(char)* clipboardGet(mu_Context* ctx) nothrow
 {
     __gshared char[4096] buffer;
@@ -521,13 +481,11 @@ private int mouseButton(SDL_MouseButton button)
     }
 }
 
-/// Map an SDL3 keycode to ddui key flags (0 if unmapped). Modifiers are mapped
-/// from their own keycodes rather than the event's mod mask, so each physical
-/// key toggles its bit symmetrically on down/up. Deriving MU_KEY_SHIFT from the
-/// mod mask instead left the bit stuck: on a modifier's own key-up, SDL3 reports
-/// the mask with that bit already cleared, so no key-up ever reached ddui and
-/// key_down kept the modifier held. ddui reads the held state from key_down, so
-/// a chord like Shift+Right needs only the arrow keycode here.
+/// Map an SDL3 keycode to ddui key flags (0 if unmapped). Modifiers come from
+/// their own keycodes rather than the event's mod mask, so each physical key
+/// toggles its bit symmetrically: on a modifier's key-up SDL3 reports the mask
+/// with that bit already cleared, which left the bit stuck held in ddui. ddui
+/// reads that held state itself, so Shift+Right needs only the arrow here.
 private int muiKey(SDL_KeyCode key)
 {
     switch (key)

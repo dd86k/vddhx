@@ -1,5 +1,5 @@
 /// Help > About dialog: who wrote this, where it lives, and what built it.
-/// Authors: dd
+/// Authors: dd86k <dd@dax.moe>
 module about;
 
 import std.format : format;
@@ -10,28 +10,21 @@ import ddlogger;
 import ddui;
 import elite : elite_open;
 
-/// Application version. Single source of truth: dub.sdl deliberately carries no
-/// version field, since dub derives package versions from git tags.
+/// Application version. Single source of truth: dub.sdl carries no version
+/// field, since dub derives package versions from git tags.
 enum VERSION = "0.1.0";
 
-/// Author line, matching dub.sdl's authors/copyright fields.
-enum AUTHOR = "dd <dd@dax.moe>";
-
-/// Project homepage, opened in the desktop browser from the dialog.
-enum HOMEPAGE = "https://github.com/dd86k/vddhx";
-
-/// Distribution terms, matching dub.sdl's license field and the LICENSE file.
-enum LICENSE = "MIT";
+enum AUTHOR = "dd <dd@dax.moe>";                    /// Matching dub.sdl's authors/copyright fields.
+enum HOMEPAGE = "https://github.com/dd86k/vddhx";   /// Opened from the dialog.
+enum LICENSE = "MIT";                               /// Matching dub.sdl and the LICENSE file.
 
 /// Compiler that built this binary, e.g. "LDC (frontend 2.111)".
 ///
-/// __VENDOR__ names the compiler and __VERSION__ its D frontend version, encoded
-/// as major*1000 + minor (2111 is 2.111). Neither reports the compiler's own
-/// patch level, nor LDC's 1.x versioning, so the frontend number is what we can
-/// honestly show.
+/// Neither __VENDOR__ nor __VERSION__ reports the compiler's own patch level, nor
+/// LDC's 1.x versioning, so the frontend number is what we can honestly show.
 enum COMPILER = __VENDOR__ ~ " (frontend " ~ frontendVersion(__VERSION__) ~ ")";
 
-/// Render __VERSION__'s packed form as a dotted version. CTFE-evaluated.
+/// Render __VERSION__'s packed major*1000 + minor form as a dotted version.
 private string frontendVersion(uint v)
 {
     return format("%u.%03u", v / 1000, v % 1000);
@@ -39,19 +32,14 @@ private string frontendVersion(uint v)
 
 /// The SDL actually in use, e.g. "3.4.12".
 ///
-/// Reported at runtime rather than from bindbc-sdl's compile-time version: the
-/// default build opens whichever SDL3 the system has (source/loader.d), and the
-/// bindings are deliberately held at their 3.2.0 baseline (see dub.sdl), so the
-/// two rarely agree and only the runtime one says what is running.
-///
-/// Only valid once SDL is loaded, which it is by the time any dialog is drawn.
-/// Cached because the number cannot change while the process runs.
+/// Runtime rather than bindbc-sdl's compile-time version: the default build opens
+/// whichever SDL3 the system has and the bindings sit at their 3.2.0 baseline, so
+/// the two rarely agree. Only valid once SDL is loaded.
 private string sdlVersion()
 {
     static string cached;
     if (cached is null)
     {
-        // SDL packs its version as major*1000000 + minor*1000 + patch.
         int v = SDL_GetVersion();
         cached = format("%d.%d.%d", SDL_VERSIONNUM_MAJOR(v), SDL_VERSIONNUM_MINOR(v),
             SDL_VERSIONNUM_MICRO(v));
@@ -62,17 +50,14 @@ private string sdlVersion()
 /// Window title, and the key ddui pools the dialog's container under.
 private enum TITLE = "About vddhx";
 
-// Dialog size in pixels; it is centred on the window each time it is opened.
 private enum int WIDTH  = 460;
 private enum int HEIGHT = 238;
 
-// Link text, idle and hovered/focused.
 private enum mu_Color LINK_COLOR = mu_Color(110, 170, 255, 255);
 private enum mu_Color LINK_HOVER = mu_Color(160, 205, 255, 255);
 
-/// Set when the menu asks for the dialog, consumed by the next about_frame.
-/// Deferred because opening it means placing its container against the current
-/// window size, which only the frame call knows.
+// Deferred to the next about_frame, since opening the dialog means placing its
+// container against the current window size, which only the frame call knows.
 private __gshared bool wantOpen;
 
 /// Request the dialog. Safe to call from anywhere in a frame (the menu handler).
@@ -110,10 +95,9 @@ void about_frame(mu_Context* ctx, int width, int height)
     if (about_secret(ctx, "vddhx " ~ VERSION))
     {
         elite_open();
-        // Stand aside, the same way the Close button does. ddui promotes
-        // whichever root container the mouse was pressed on at the end of the
-        // frame (mu_end), and that press is this one, so a dialog left open
-        // here would sit on top of what it just launched.
+        // Stand aside: mu_end promotes whichever root container the mouse was
+        // pressed on, so a dialog left open here would sit on top of what it
+        // just launched.
         mu_get_current_container(ctx).open = 0;
     }
     mu_label(ctx, "Visual DDHX, a hex editor.");
@@ -140,8 +124,7 @@ void about_frame(mu_Context* ctx, int width, int height)
     mu_label(ctx, "SDL");
     mu_label(ctx, sdlVersion());
 
-    // Close button pushed to the right edge: the first cell eats all the width
-    // but the button's own, leaving it flush with the dialog's right side.
+    // First cell eats all the width but the button's, pushing it flush right.
     static immutable int[2] closerow = [ -90, -1 ];
     mu_layout_row(ctx, 2, closerow.ptr, 0);
     mu_label(ctx, "");
@@ -152,8 +135,7 @@ void about_frame(mu_Context* ctx, int width, int height)
 }
 
 /// A label that quietly answers to a click. Drawn exactly as mu_label draws it,
-/// with no colour of its own, no underline and no tab stop: the whole point is
-/// that there is nothing to notice. Whoever finds it went looking.
+/// with no colour, underline or tab stop: whoever finds it went looking.
 /// Returns: true on the frame it is left-clicked.
 private bool about_secret(mu_Context* ctx, string text)
 {

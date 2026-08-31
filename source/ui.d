@@ -26,33 +26,28 @@ import std.path : baseName;
 
 private:
 
-/// One open document: the ddhx editor that owns the bytes, and where they live
-/// on disk. Nothing here says how the bytes are being looked at - that is a
-/// View's business - so one document can be open in several panels at once.
+/// One open document: the ddhx editor that owns the bytes, and where they live on
+/// disk. Nothing here says how they are being looked at - that is a View's
+/// business - so one document can be open in several panels at once.
 struct Document
 {
-    /// The editor backing the document. It owns the bytes and all the
-    /// piece-table/undo machinery; a panel only ever reads through it.
+    /// Owns the bytes and all the piece-table/undo machinery; a panel only ever
+    /// reads through it.
     IDocumentEditor editor;
 
-    /// Disk path backing the document, empty for an in-memory scratch buffer.
-    /// Set on Open (and once a scratch buffer is first saved through Save As),
-    /// it is the target an in-place Save writes to.
+    /// Disk path, empty for an in-memory scratch buffer. Set on Open and on a
+    /// first Save As, it is the target an in-place Save writes to.
     string path;
 
     /// What the tab shows: the file's base name, or "untitled" for a scratch.
     string title;
 
-    /// Bookmarked runs of bytes, sorted. Per document rather than per view,
-    /// since an offset only means something against the bytes it points into: a
-    /// mark set in one panel is a mark in every panel showing the same file.
-    /// The panel tints them and the omnibar's '@' lists them.
+    /// Bookmarked runs of bytes, sorted. Per document rather than per view, since
+    /// an offset only means something against the bytes it points into.
     ///
-    /// Edits made through a panel carry them along (see bookmark_shift), but
-    /// undo and redo do not: the editor reports only where a change landed, not
-    /// how many bytes it moved, so a mark can end up a few bytes off its bytes
-    /// after a rolled-back insert. It is never wrong about which document it
-    /// belongs to, only about where in it.
+    /// Edits made through a panel carry them along (see bookmark_shift), but undo
+    /// and redo do not: the editor reports only where a change landed, not how far
+    /// it moved, so a mark can end up a few bytes off after a rolled-back insert.
     Bookmark[] marks;
 }
 
@@ -61,32 +56,28 @@ struct Document
 ///
 /// Split from Document so the same file can be open in two panels at different
 /// offsets, each with its own caret, the way an editor's windows sit over its
-/// buffers. Splitting a pane is what makes a second one, whether the two end up
-/// side by side or one above the other.
+/// buffers. Splitting a pane is what makes a second one.
 struct View
 {
     /// The document this is a view of. Never null while the view is in a pane.
     Document* doc;
 
-    /// Persisted hex panel state (the selection lives here across frames). The
-    /// caret is active from the outset so it sits ready on a blank panel,
-    /// letting a file be built from scratch before anything is opened.
+    /// Persisted hex panel state. The caret is active from the outset so it sits
+    /// ready on a blank panel, letting a file be built before anything is opened.
     HexView hex = { active: true };
 
     /// The comparison this view is one side of, null for an ordinary view. Which
-    /// side it is - and so whether it is the one carrying the colouring - is read
-    /// off the Diff; see diff_peer.
+    /// side it is - and so whether it carries the colouring - is read off the Diff;
+    /// see diff_peer.
     Diff* diff;
 
-    /// The counterpart's bytes, one block at a time. The colour hook is asked
-    /// about one byte at a time but is called in offset order, so a block read
-    /// ahead answers a screenful of them: a whole frame costs a read or two of
-    /// the other document rather than one per byte drawn.
+    /// The counterpart's bytes, one block at a time. The colour hook is asked about
+    /// one byte at a time but in offset order, so reading a block ahead answers a
+    /// screenful of them.
     ///
     /// Dropped at the top of every frame the view draws (see ui_pane) rather than
     /// invalidated on edits: the counterpart can be typed into in its own pane,
-    /// undone, or reloaded, and none of that passes through here. A stale block
-    /// would then have this side colouring against bytes that are no longer there.
+    /// undone, or reloaded, and none of that passes through here.
     ubyte[] peerBuf;
     /// Ditto, the document offset `peerBuf[0]` holds.
     size_t peerStart;
@@ -94,8 +85,7 @@ struct View
     size_t peerLen;
 
     /// The counterpart's size, read once a frame alongside the block above. What
-    /// separates a byte that differs from one the other document simply does not
-    /// have, which is the whole story past the end of the shorter of the two.
+    /// separates a byte that differs from one the other document does not have.
     long peerSize;
 
     /// Where this view was scrolled to when it was last drawn, so the next frame
@@ -103,36 +93,32 @@ struct View
     /// other; see ui_sync_diffs.
     long topSeen;
 
-    /// Whether that position was put there by the counterpart rather than by the
-    /// user. What lets a scroll the panel could not honour in full - the shorter
-    /// of two files, stopped at its last screenful - be told from the user
-    /// scrolling this side, which otherwise look identical from the outside and
-    /// would have the two panes dragging each other back and forth.
+    /// Whether that position was put there by the counterpart rather than the user.
+    /// What tells a scroll the panel could not honour in full - the shorter of two
+    /// files, stopped at its last screenful - from the user scrolling this side,
+    /// which look identical from outside and would have the two panes dragging each
+    /// other back and forth.
     bool topForced;
 }
 
 /// Two views held against each other and compared byte for byte.
 ///
-/// The pairing is between views rather than documents: it is the two tabs the
-/// user put side by side, so one file can be compared against two others in two
-/// panes at once, and each pairing scrolls as its own unit. A view is in at most
-/// one comparison, and both sides always point at the same Diff.
+/// The pairing is between views rather than documents: it is the two tabs the user
+/// put side by side, so one file can be compared against two others at once and
+/// each pairing scrolls as its own unit. A view is in at most one comparison, and
+/// both sides point at the same Diff.
 ///
-/// The two sides are not alike, which is why they are named rather than indexed.
-/// The comparison is something done *to* a document the user already had open:
-/// that one goes on looking exactly as it did, and the file opened against it is
-/// the one that reports. So only `against` is tinted, and only `against` reads
-/// the other's bytes at all - `base` is an ordinary view that happens to be
-/// scrolled in step with its neighbour.
+/// The two sides are not alike, hence the names. The comparison is something done
+/// *to* a document the user already had open: that one goes on looking exactly as
+/// it did, and the file opened against it is the one that reports. So only
+/// `against` is tinted and only `against` reads the other's bytes at all.
 ///
 /// Strictly offset-aligned - byte n against byte n - which is the honest reading
-/// for firmware images, patched binaries and same-size structures, and visibly
-/// wrong the moment one side has an insertion: everything past it reads as
-/// changed. Aligning on content instead would need rows standing for no offset at
-/// all, and a hex panel row *is* its offset (`row * columns`), so the display
-/// offsets would part company with the document offsets that the caret, the
-/// status bar, the bookmarks and every edit are addressed in. That is a feature
-/// of its own, not a tweak to this one.
+/// for firmware images and same-size structures, and visibly wrong the moment one
+/// side has an insertion. Aligning on content instead would need rows standing for
+/// no offset at all, but a hex panel row *is* its offset (`row * columns`), so the
+/// display would part company with the offsets the caret, the bookmarks and every
+/// edit are addressed in. That is a feature of its own, not a tweak to this one.
 struct Diff
 {
     /// The view the comparison was started from: the document the user was
@@ -160,10 +146,7 @@ bool diff_reports(View* v)
 }
 
 /// One pane: a strip of tabs over a hex panel, filling its share of the window.
-///
-/// Each holds its own tabs and its own front tab, so the same file can be open on
-/// the left at one offset and on the right at another. Where a pane sits is the
-/// grid's business, not its own; see Column.
+/// Where it sits is the grid's business, not its own; see Column.
 struct Pane
 {
     /// The views this pane has tabs for, in strip order. Never empty while the
@@ -185,21 +168,18 @@ struct Pane
     /// weights simply divide a different number of pixels.
     int weight = SPLIT_WEIGHT;
 
-    /// Where this pane was last drawn. Recorded by ui_panes so that a hit test
-    /// can be made from outside a frame: a file dragged over the window arrives
-    /// as an SDL event carrying a window coordinate and nothing else, and the
-    /// pane it is pointing at has to be worked out from that alone.
+    /// Where this pane was last drawn, recorded by ui_panes so a hit test can be
+    /// made from outside a frame: a file dragged over the window arrives as an SDL
+    /// event carrying a window coordinate and nothing else.
     mu_Rect rect;
 }
 
 /// One column of the grid: panes stacked top to bottom over a shared width.
 ///
-/// The grid is two levels deep and no more - a row of columns across the window,
-/// a stack of panes down each column - rather than a tree. That is enough for the
-/// splits an editor actually offers, side by side and one above the other, and it
-/// keeps the layout to two passes of the same flat arithmetic (see split.d)
-/// instead of a recursion, with no interior node that can be left holding one
-/// child.
+/// The grid is two levels deep and no more - a row of columns across the window, a
+/// stack of panes down each - rather than a tree. That covers the splits an editor
+/// actually offers and keeps the layout to two passes of the same flat arithmetic
+/// (see split.d), with no interior node that can be left holding one child.
 struct Column
 {
     /// The panes in it, top to bottom. Never empty while the column is in
@@ -217,18 +197,15 @@ struct Column
 
 /// Every open document, every view onto one, and every column of panes.
 ///
-/// All held by pointer: the panel's callbacks park a Document* and a View* for
-/// ddui to hand back on every read, colour and edit, and those have to survive a
-/// document being closed out of the middle of the array. Panes and columns
-/// likewise - a pane's ddui ids and tab state have to outlive its neighbours
-/// closing, and a pane is named by its pointer everywhere below rather than by
-/// where it sits, so that splitting and closing elsewhere in the grid cannot turn
-/// a reference to one pane into a reference to another.
+/// All held by pointer: the panel's callbacks park a Document* and a View* for ddui
+/// to hand back on every read, colour and edit, and those have to survive a
+/// document being closed out of the middle of the array. A pane is named by its
+/// pointer everywhere below for the same reason, so that splitting or closing
+/// elsewhere cannot turn a reference to one pane into a reference to another.
 ///
-/// None is ever empty: startup opens a scratch buffer, closing the last tab of
-/// the last pane leaves a fresh one behind, and a pane that empties is closed
-/// unless it is the only one. So every action below always has a pane, a view
-/// and a document to work on.
+/// None is ever empty: startup opens a scratch buffer, closing the last tab of the
+/// last pane leaves a fresh one behind, and a pane that empties is closed unless it
+/// is the only one.
 __gshared Document*[] docs;
 /// Ditto.
 __gshared Column*[] columns;
@@ -238,9 +215,8 @@ __gshared Column*[] columns;
 __gshared Pane* focused;
 
 /// Scratch for laying a line of panes out: the weights copied out of the grid and
-/// the pixel sizes they come to. One pair for the row of columns, one for the
-/// panes down whichever column is being drawn - reused column by column, since
-/// each is laid out and finished with before the next begins. All only ever grow.
+/// the pixel sizes they come to. One pair for the row of columns, one reused
+/// column by column for the panes down each. All only ever grow.
 __gshared int[] colWeights;
 /// Ditto.
 __gshared int[] colSizes;
@@ -249,13 +225,12 @@ __gshared int[] paneWeights;
 /// Ditto.
 __gshared int[] paneSizes;
 
-/// Narrowest a pane may be dragged, in pixels. Enough that the offset column and
-/// a few bytes stay legible: a pane squeezed below this is not a view of anything.
+/// Narrowest a pane may be dragged, in pixels: enough that the offset column and a
+/// few bytes stay legible.
 enum int PANE_MIN = 180;
 
-/// Shortest a pane may be dragged, in pixels. Enough for its tab strip and a row
-/// or two of bytes under it, so a pane shrunk to the floor is still recognisably
-/// a pane rather than a stray strip of tabs.
+/// Shortest a pane may be dragged, in pixels: enough for its tab strip and a row
+/// or two of bytes, so it stays recognisably a pane rather than a stray strip.
 enum int PANE_MIN_H = 120;
 
 /// Scratch buffers are numbered in creation order: "untitled", "untitled 2"...
@@ -278,9 +253,8 @@ struct OmniTab
 __gshared OmniTab[] omniTabs;
 
 /// The pane taking the keyboard, the view it has in front, and the document that
-/// view is showing. Every action below acts on one of the three: `pane` for the
-/// tabs, `view` for anything about the caret and what is on screen, `doc` for
-/// anything about the bytes themselves.
+/// view is showing: `pane` for the tabs, `view` for the caret and what is on
+/// screen, `doc` for the bytes themselves.
 ref Pane pane()
 {
     return *focused;
@@ -298,8 +272,8 @@ ref Document doc()
 
 /// Find `p` in the grid: which column it is in, and how far down that column.
 ///
-/// The one place the grid is searched by pointer, so everything that has a pane
-/// and needs its neighbours goes through here rather than carrying indices about.
+/// The one place the grid is searched by pointer, so nothing else has to carry
+/// indices about.
 /// Returns: True when the pane is in the grid, with `ci` and `pi` filled in.
 bool ui_locate(const(Pane)* p, out size_t ci, out size_t pi)
 {
@@ -328,11 +302,8 @@ size_t ui_pane_count()
 }
 
 /// The `n`th pane in reading order - columns left to right, panes top to bottom
-/// within each - or null when there are not that many.
-///
-/// This order is what Ctrl+1..9 and the next/previous pane commands count in, so
-/// a numbered jump means the same thing whichever way the window is carved up:
-/// the numbers run down a column before moving on to the next.
+/// within each - or null when there are not that many. This is the order Ctrl+1..9
+/// and the next/previous pane commands count in.
 Pane* ui_pane_nth(size_t n)
 {
     foreach (Column* c; columns)
@@ -369,32 +340,23 @@ __gshared SDL_Window* uiWindow;
 /// and lose most of their contrast on a mid grey.
 enum mu_Color CANVAS = mu_Color(0, 0, 0, 255);
 
-/// Wash behind a bookmarked byte in the grid. Amber: nothing hex_classify hands
-/// out is near it, so a mark reads as a mark rather than as one more class of
-/// byte.
+/// Wash behind a bookmarked byte in the grid. Amber, nothing hex_classify hands
+/// out being near it, so a mark reads as a mark rather than as one more class of
+/// byte, and a wash rather than a foreground so a marked run comes out as a band
+/// the eye catches.
 ///
-/// A background rather than a foreground because the two channels answer
-/// different questions - the foreground says what a byte is, the background what
-/// was done to it - and because a wash fills the cell, so a marked run comes out
-/// as a band the eye catches rather than as recoloured glyphs.
+/// Kept this dark for BOOKMARK_TEXT's sake: the obvious bright amber leaves white
+/// sitting on it at under 2:1, where at this depth white lands around 6.6:1.
 ///
-/// Kept this dark for BOOKMARK_TEXT's sake. Amber is a light hue, and the obvious
-/// bright one leaves white sitting on it at under 2:1; at this depth white lands
-/// around 6.6:1, which is what makes the pair read as hard as it does.
+/// This is the one bookmark colour the panel is told; where the amber has to come
+/// back at full strength - a run's outline, a minimap cell - the panel lifts it
+/// there itself. See hex_wash_lift.
 enum mu_Color BOOKMARK_WASH = mu_Color(125, 85, 22, 255);
 
-/// Colour a bookmarked byte's glyphs are drawn in, over BOOKMARK_WASH.
-///
-/// The one place a mark does overrule hex_classify. What class a byte falls in is
-/// worth knowing everywhere else in the document; inside a run the user marked by
-/// hand, standing out is worth more, and white on amber is as far from anything
-/// else on screen as the two channels together can get.
+/// Colour a bookmarked byte's glyphs are drawn in, over BOOKMARK_WASH: the one
+/// place a mark overrules hex_classify. Inside a run the user marked by hand,
+/// standing out is worth more than what class the byte falls in.
 enum mu_Color BOOKMARK_TEXT = mu_Color(255, 255, 255, 255);
-
-/// This is the one bookmark colour the panel is told. Where the amber has to
-/// come back at full strength - the outline of a run, a cell of the minimap
-/// ribbon - the panel lifts it there itself, so the two can never drift apart.
-/// See hex_wash_lift.
 
 /// A byte that differs from the one at the same offset in the document it is
 /// being compared against.
@@ -408,12 +370,10 @@ enum mu_Color DIFF_ADDED = mu_Color(120, 230, 140, 255);
 /// How much of its brightness a matching byte keeps while a comparison is up, in
 /// percent.
 ///
-/// Rather than flattening the matches to one grey, which is what a diff over
+/// Dimming rather than flattening the matches to one grey, the way a diff over
 /// *text* does: hex_classify's colouring is how the structure of a binary is read
 /// at all, and dropping it would leave the untouched 99% of a patched file
-/// unreadable. Dimming keeps the strings, the padding and the tables legible
-/// while the differences carry the eye - which is a choice a terminal hex editor
-/// does not get to make, but this one has the whole channel to spend.
+/// unreadable.
 enum int DIFF_MATCH_KEEP = 42;
 
 /// Ditto: `c` at DIFF_MATCH_KEEP percent, alpha untouched.
@@ -429,20 +389,17 @@ mu_Color diff_dim(mu_Color c)
 /// Apply the application's own style over ddui's defaults. Call once after
 /// mu_init, before the first frame.
 ///
-/// ddui leaves MU_COLOR_PANELBG fully transparent, so the hex panel would take
-/// whatever it sits on - the window's grey. It used to come out black anyway,
-/// because the renderer ignored the alpha channel; now that it honours it, the
-/// canvas has to be asked for. The tab strip is told the same colour so the
-/// active tab reads as joined to the grid below it.
+/// ddui leaves MU_COLOR_PANELBG fully transparent, so the hex panel would take the
+/// window's grey; now that the renderer honours alpha, the canvas has to be asked
+/// for outright.
 public void ui_style(mu_Context* ctx)
 {
     ctx.style.colors[MU_COLOR_PANELBG] = CANVAS;
 }
 
 /// Last thing the application had to say, shown at the right of the status bar
-/// until something replaces it. Where a find that came up empty, a bookmark set,
-/// or a copied inspector reading reports itself: all of those are keystrokes
-/// whose whole result would otherwise be invisible.
+/// until something replaces it: a find that came up empty, a bookmark set, a
+/// copied inspector reading - keystrokes whose result would otherwise be invisible.
 __gshared char[96] statusText;
 /// Ditto.
 __gshared size_t statusLen;
@@ -469,11 +426,9 @@ shared bool pendingReady;
 /// Whether that path was asked for by "Compare With..." rather than by Open, and
 /// the view it is to be compared against.
 ///
-/// Only the main thread touches these: the dialog callback knows nothing about
-/// what raised it, and the flag is set before the dialog goes up and read on the
-/// frame the path comes back. The view is held by pointer and checked against the
-/// grid before use - the dialog is not modal, so tabs can be closed while it is
-/// up, including the one the comparison was started from.
+/// Only the main thread touches these, the dialog callback knowing nothing about
+/// what raised it. The view is checked against the grid before use: the dialog is
+/// not modal, so its tab can be closed while it is up.
 __gshared bool pendingCompare;
 /// Ditto.
 __gshared View* compareFrom;
@@ -483,10 +438,10 @@ __gshared View* compareFrom;
 __gshared char[4096] pendingSavePath;
 shared bool pendingSaveReady;
 
-/// The editor the open Save As dialog was raised for. Tabs can be switched or
-/// closed while a non-modal dialog is up, so the destination is matched back to
-/// the document that asked for it rather than to whatever is in front when it
-/// returns - saving one file's bytes under another's name would lose both.
+/// The editor the open Save As dialog was raised for. Tabs can be switched while a
+/// non-modal dialog is up, so the destination is matched back to the document that
+/// asked rather than to whatever is in front when it returns - saving one file's
+/// bytes under another's name would lose both.
 __gshared IDocumentEditor pendingSaveTarget;
 
 /// Hand the UI the window handle before the first frame. Also opens the first
@@ -499,8 +454,8 @@ public void ui_init(SDL_Window* window)
 }
 
 /// Open a fresh scratch document in a new tab and bring it to the front: a
-/// zero-length in-memory buffer with no path, editable from the outset, which
-/// gets a name the first time it is saved.
+/// zero-length in-memory buffer, editable from the outset, which gets a name the
+/// first time it is saved.
 public void ui_new_tab()
 {
     ++untitled;
@@ -514,7 +469,7 @@ public void ui_new_tab()
     v.doc = d;
     wireView(v);
 
-    // The first tab of all has no pane to go in yet: ui_init opens it before
+    // The very first tab has no pane to go in yet, ui_init opening it before
     // anything has laid the window out.
     if (columns.length == 0)
     {
@@ -535,9 +490,9 @@ Pane* newPane()
 {
     Pane* p = new Pane;
 
-    // The strip caps this pane's own canvas, not the window, so the active tab
-    // takes the grid's colour rather than the window's and the two read as one
-    // surface. ui_style cannot do it: panes come and go long after it has run.
+    // The strip caps this pane's own canvas, so the active tab takes the grid's
+    // colour rather than the window's. ui_style cannot do it: panes come and go
+    // long after it has run.
     p.tabs.content = CANVAS;
     return p;
 }
@@ -576,22 +531,19 @@ public void ui_cycle_tab(int delta)
 }
 
 /// Close the tab at `index`, resolving unsaved edits first (the document is
-/// brought to the front for the prompt, and a cancel leaves it open). Closing
-/// the last one closes the editor too, the way a tabbed application does.
+/// brought to the front for the prompt, and a cancel leaves it open).
 ///
-/// It is the view that closes. The document behind it only goes when nothing
-/// else is looking at it, so closing one half of a split leaves the file open in
-/// the other half - and, since the bytes are not going anywhere, that close has
-/// nothing to prompt about either.
+/// It is the view that closes. The document behind it only goes when nothing else
+/// is looking at it, so closing one half of a split leaves the file open in the
+/// other half - and has nothing to prompt about.
 public void ui_close_tab(size_t index)
 {
     ui_close_tab_in(focused, index);
 }
 
-/// Ditto, in a given pane. The prompt below can bring another pane forward on its
-/// way past and a Save As raised from it can run a frame's worth of work, so the
-/// pane is held by pointer: it stays the pane that was asked about however the
-/// grid is rearranged meanwhile.
+/// Ditto, in a given pane, held by pointer: the prompt below can bring another
+/// pane forward and a Save As raised from it can run a frame's worth of work, so
+/// this has to stay the pane that was asked about.
 void ui_close_tab_in(Pane* p, size_t index)
 {
     if (p is null || index >= p.views.length)
@@ -602,32 +554,30 @@ void ui_close_tab_in(Pane* p, size_t index)
     if (last && ui_confirm_discard(d, "Close document") != Confirm.proceed)
         return;
 
-    // The tab is going, so any comparison it was one side of is over. Done after
-    // the prompt, which can still be cancelled and leave everything as it was.
+    // Any comparison the tab was one side of is over. After the prompt, which can
+    // still be cancelled and leave everything as it was.
     diff_unlink(p.views[index]);
 
-    // Out of the strip, front tab moved along with it (see ui_take_view). The
-    // view itself is not wanted back: this is the one route where a tab leaves a
-    // pane for nowhere rather than for another pane.
+    // The view is not wanted back: this is the one route where a tab leaves a pane
+    // for nowhere rather than for another pane.
     cast(void) ui_take_view(p, index);
     if (last)
         ui_drop_document(d);
 
     if (p.views.length == 0)
     {
-        // An empty pane goes, and the grid closes over it - unless it is the only
-        // one left, in which case there is nothing to close over it and the
-        // window itself is what is being shut.
+        // An empty pane goes and the grid closes over it - unless it is the last
+        // one, in which case the window itself is what is being shut.
         if (ui_pane_count() > 1)
         {
             ui_drop_pane(p);
             return;
         }
 
-        // Out of tabs in the last pane: quit, through SDL's own event queue so it
-        // meets the same route as the window close button. That lands next frame,
-        // and the rest of this one still has a panel to draw, so put a scratch
-        // buffer up meanwhile - it has no edits, so it cannot hold the quit up.
+        // Out of tabs in the last pane: quit through SDL's own queue, so it meets
+        // the same route as the window close button. That lands next frame and the
+        // rest of this one still has a panel to draw, hence the scratch buffer -
+        // which has no edits, so it cannot hold the quit up.
         ui_new_tab();
         SDL_Event quit; // .init zeroes the union
         quit.type = SDL_EVENT_QUIT;
@@ -690,11 +640,10 @@ void ui_focus_document(const(Document)* d)
 /// panes still fill the window between them. Its views go with it, so the caller
 /// closes those first (ui_close_tab_in does).
 ///
-/// The neighbour is the one before it in the same column, or the one after when
-/// the pane closing is at the top: either way the column's total weight is
-/// unchanged and nothing outside it moves. A pane on its own in a column takes
-/// the column with it, and then it is the column before or after that inherits
-/// the width - the same rule one level up.
+/// The neighbour is the one before it in the same column, or the one after when the
+/// pane closing is at the top, so the column's total weight is unchanged and
+/// nothing outside it moves. A pane on its own takes the column with it, and the
+/// same rule then applies one level up.
 void ui_drop_pane(Pane* p)
 {
     size_t ci, pi;
@@ -732,11 +681,10 @@ void ui_drop_pane(Pane* p)
 /// A second view of whatever the focused pane has in front: the same document at
 /// the same offset, ready to go in a pane of its own.
 ///
-/// The same document rather than a copy of it - one editor, one undo history, one
-/// set of bookmarks - so two panes are two windows onto one file, and an edit made
-/// in either shows up in both. What they do not share is the looking: the new view
-/// carries the old one's caret and scroll position as a starting point and then
-/// moves on its own, which is the whole use of a split here.
+/// The same document rather than a copy - one editor, one undo history, one set of
+/// bookmarks - so an edit made in either pane shows up in both. What they do not
+/// share is the looking: the new view carries the old one's caret and scroll
+/// position as a starting point and then moves on its own.
 View* ui_split_view()
 {
     View* src = pane.views[pane.current];
@@ -770,9 +718,9 @@ void diff_link(View* a, View* b)
     a.diff = d;
     b.diff = d;
 
-    // Neither has a cached block or a peer size yet, and the two are not looking
-    // at the same place. The next frame each draws sorts both out; the scroll
-    // comes across now so the pairing opens lined up rather than a frame later.
+    // The next frame each draws fills in the cached block and the peer size; the
+    // scroll comes across now so the pairing opens lined up rather than a frame
+    // later.
     hex_set_top_offset(b.hex, hex_top_offset(a.hex));
     a.topSeen  = hex_top_offset(a.hex);
     b.topSeen  = a.topSeen;
@@ -819,9 +767,9 @@ void ui_split_pane(View* v)
     p.views ~= v;
 
     // A column of one, taking half the width of the column it came out of, so the
-    // rest of the window is left exactly as it was. Splitting a column that has
-    // panes stacked in it splits the whole column: the new one sits alongside the
-    // stack rather than reaching into it, which is what keeps the grid two deep.
+    // rest of the window is left as it was. Splitting a column with panes stacked
+    // in it puts the new column alongside the whole stack rather than reaching into
+    // it, which is what keeps the grid two deep.
     Column* c = new Column;
     c.panes ~= p;
     c.weight = columns[ci].weight / 2;
@@ -867,9 +815,8 @@ public void ui_close_pane()
     Pane* p = focused;
     for (;;)
     {
-        // Looked up again each round: a prompt can bring another pane forward on
-        // its way past, and the last tab closing takes this pane out of the grid
-        // altogether, which is the loop's way out.
+        // Looked up again each round: the last tab closing takes this pane out of
+        // the grid altogether, which is the loop's way out.
         size_t ci, pi;
         if (ui_locate(p, ci, pi) == false)
             return; // gone, which is what was asked for
@@ -881,9 +828,8 @@ public void ui_close_pane()
     }
 }
 
-/// Move the keyboard to the pane at `index`, counted in the order ui_pane_nth
-/// lays out. Out of range does nothing, so Ctrl+9 on a two-pane window is simply
-/// ignored.
+/// Move the keyboard to the pane at `index`, counted in the order ui_pane_nth lays
+/// out. Out of range does nothing, so Ctrl+9 on a two-pane window is ignored.
 public void ui_focus_pane(size_t index)
 {
     Pane* p = ui_pane_nth(index);
@@ -917,10 +863,10 @@ public void ui_close_current_tab()
 __gshared char[512] titleShown;
 __gshared size_t titleShownLen;
 
-/// Keep the window title naming the document in front, with a marker while it
-/// has unsaved edits. Called every frame: the text is composed into a stack
-/// buffer and compared, so a steady document costs a memcmp rather than a
-/// window-manager round trip.
+/// Keep the window title naming the document in front, with a marker while it has
+/// unsaved edits. Called every frame, so the text is composed into a stack buffer
+/// and compared: a steady document costs a memcmp rather than a round trip to the
+/// window manager.
 void ui_window_title()
 {
     if (uiWindow is null)
@@ -937,12 +883,9 @@ void ui_window_title()
     SDL_SetWindowTitle(uiWindow, titleShown.ptr);
 }
 
-/// `s` cut back to at most `max` bytes, on a UTF-8 boundary so a name clipped to
-/// fit somewhere never ends in half a character (which the renderer would draw as
-/// a replacement glyph, or refuse outright).
-///
-/// Bytes rather than characters because what runs out is always a fixed buffer,
-/// and every caller here is fitting a file name into one.
+/// `s` cut back to at most `max` bytes, on a UTF-8 boundary so it never ends in
+/// half a character (which the renderer draws as a replacement glyph, or refuses
+/// outright). Bytes rather than characters, since what runs out is a fixed buffer.
 string ui_clip(string s, size_t max)
 {
     if (s.length <= max)
@@ -960,16 +903,14 @@ unittest
     assert(ui_clip("exactly8", 8) == "exactly8");
     assert(ui_clip("truncate me", 8) == "truncate");
 
-    // "é" is two bytes: a cut landing inside it takes the whole character out
-    // rather than leaving its lead byte behind.
+    // A cut landing inside the two-byte "é" takes the whole character out.
     assert(ui_clip("abécd", 3) == "ab");
     assert(ui_clip("abécd", 4) == "abé");
     assert(ui_clip("é", 1) == "");
 }
 
-/// Compose "name * - vddhx" into `buf` and return the slice written. A name too
-/// long for the buffer is cut back, on a UTF-8 boundary so the title never
-/// carries half a character. `buf` must have room for the fixed parts.
+/// Compose "name * - vddhx" into `buf`, which must have room for the fixed parts,
+/// and return the slice written. A name too long for it is cut back.
 char[] ui_title_text(char[] buf, string name, bool dirty)
 {
     enum string DIRTY  = " *";
@@ -1027,11 +968,10 @@ extern (C) void ui_on_file_picked(void* user, const(char*)* fileList, int filter
     ui_wakeup();
 }
 
-/// Nudge the event loop into drawing a frame. It sleeps between events, so a
-/// change made from anywhere but an event - the dialog callbacks above and
-/// below, which SDL answers on its own thread - would sit unseen until the next
-/// keystroke or mouse move. SDL's queue is the wakeup: pushing to it is safe
-/// from any thread, and the loop ignores the event itself.
+/// Nudge the event loop into drawing a frame. It sleeps between events, so a change
+/// made from anywhere but an event - the dialog callbacks, which SDL answers on its
+/// own thread - would sit unseen until the next keystroke. Pushing to SDL's queue
+/// is safe from any thread, and the loop ignores the event itself.
 void ui_wakeup() nothrow
 {
     SDL_Event wake; // .init zeroes the union
@@ -1052,21 +992,15 @@ ubyte[] hexRead(long pos, ubyte[] buf, void* user)
 }
 
 /// ddui-side colour scheme: every byte classified the way the panel would have
-/// classified it anyway, dimmed or called out where a comparison is up. `user` is
-/// the View stashed in hex.colorUser - the comparison belongs to the bytes being
-/// drawn, not to whichever document happens to be in front, and so do the marks
-/// hexBack reads.
+/// anyway, dimmed or called out where a comparison is up. `user` is the View in
+/// hex.colorUser, the comparison belonging to the bytes being drawn rather than to
+/// whichever document happens to be in front.
 ///
-/// A mark takes the byte white, over the wash hexBack puts behind it. That much
-/// still outranks the comparison: a marked run is the one thing on screen the
-/// user put there by hand, and it stays worth finding in a file being compared.
-/// The comparison is not lost either way - a differing byte inside a run keeps
-/// its wash, and DIFF_CHANGED is what the bytes around it are drawn in.
+/// A mark takes the byte white, outranking the comparison: a marked run is the one
+/// thing on screen the user put there by hand. Nothing is lost either way, a
+/// differing byte inside a run keeping the wash hexBack puts behind it.
 ///
-/// Only the reporting side of a comparison is coloured by it. The document that
-/// was already open goes on looking exactly as it did: a comparison is something
-/// the user is doing to it, not something that happened to it, and marking up
-/// both halves would leave neither reading as the file itself.
+/// Only the reporting side of a comparison is coloured by it; see Diff.
 mu_Color hexColor(size_t offset, ubyte value, void* user)
 {
     View* v = cast(View*) user;
@@ -1081,9 +1015,8 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
         if (cast(long) offset >= v.peerSize)
             return DIFF_ADDED;
 
-        // A byte the counterpart cannot produce - a read that came up short on a
-        // file being written from under us - is not a difference anyone can act
-        // on, so it is left to read as itself.
+        // A byte the counterpart cannot produce - a read come up short on a file
+        // being written from under us - is not a difference anyone can act on.
         ubyte other;
         if (diff_peer_byte(v, offset, other) && other != value)
             return DIFF_CHANGED;
@@ -1093,13 +1026,10 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
     return hex_classify(offset, value, null);
 }
 
-/// Background hook for the grid: a wash behind the bookmarked bytes, nothing
-/// behind the rest. `user` is the View in hex.backUser, for the same reason
-/// hexColor takes one - the marks belong to the document being drawn.
-///
-/// The panel puts the selection over whatever comes back from here, so a mark
-/// under the selection is hidden until the caret moves off it. That is the
-/// intended order: the selection is where the user is now.
+/// Background hook for the grid: a wash behind the bookmarked bytes, nothing behind
+/// the rest. `user` is the View in hex.backUser, for the same reason hexColor takes
+/// one. The panel puts the selection over whatever comes back, so a mark under it
+/// is hidden until the caret moves off - the selection being where the user is now.
 mu_Color hexBack(size_t offset, ubyte value, void* user)
 {
     View* v = cast(View*) user;
@@ -1111,14 +1041,13 @@ mu_Color hexBack(size_t offset, ubyte value, void* user)
 }
 
 /// Ditto asked of a whole segment at a time: whether any byte in it is marked.
-/// bookmark_hits answers that off the run list, so a mark of a few bytes shows on
-/// the ribbon of a document far too large to have been sampled closely enough to
-/// find it.
+/// bookmark_hits answers off the run list, so a mark of a few bytes shows on the
+/// ribbon of a document far too large to have been sampled closely enough to find
+/// it.
 ///
-/// Answers in the same colour hexBack does, deliberately: the panel probes this
-/// one byte at a time as well, to find where a run's outline should have edges,
-/// and two bytes of one mark have to come back matching or every cell is drawn
-/// boxed in on its own.
+/// Answers in the same colour hexBack does, deliberately: the panel probes this one
+/// byte at a time as well, to place a run's outline, and two bytes of one mark have
+/// to come back matching or every cell is drawn boxed in on its own.
 mu_Color hexBackSpan(long at, long length, void* user)
 {
     View* v = cast(View*) user;
@@ -1129,12 +1058,9 @@ mu_Color hexBackSpan(long at, long length, void* user)
         ? BOOKMARK_WASH : mu_Color(0, 0, 0, 0);
 }
 
-/// The counterpart's byte at `offset`, through the view's one-block cache.
-///
-/// Refilled from the block the offset falls in, so walking a screenful in order
-/// costs one read of the other document (two where the screen straddles a block
-/// boundary) rather than one per byte. See View.peerBuf for why it is dropped
-/// every frame rather than kept.
+/// The counterpart's byte at `offset`, through the view's one-block cache, so
+/// walking a screenful in order costs a read or two of the other document rather
+/// than one per byte. See View.peerBuf for why it is dropped every frame.
 /// Returns: False when the counterpart has no byte there to compare against.
 bool diff_peer_byte(View* v, size_t offset, out ubyte value)
 {
@@ -1147,9 +1073,8 @@ bool diff_peer_byte(View* v, size_t offset, out ubyte value)
         if (v.peerBuf.length < DIFF_BLOCK)
             v.peerBuf.length = DIFF_BLOCK;
 
-        // Aligned down, so a screen crossing a boundary settles into the next
-        // block rather than re-reading from wherever the last byte happened to
-        // land and thrashing a read per byte.
+        // Aligned down, so a screen crossing a boundary settles into the next block
+        // rather than re-reading from wherever the last byte landed.
         size_t start = offset - (offset % DIFF_BLOCK);
         ubyte[] got = ed.view(cast(long) start, v.peerBuf);
         v.peerStart = start;
@@ -1167,14 +1092,14 @@ bool diff_peer_byte(View* v, size_t offset, out ubyte value)
 /// couple of thousand at most, so one block covers a frame with room to spare.
 enum size_t DIFF_BLOCK = 8 * 1024;
 
-/// ddui-side write hooks: forward the panel's single-byte edits to the editor.
-/// The editor holds them in its piece table (nothing touches disk until a Save),
-/// so these work even on a file opened read-only. A rejected edit (a fixed-size
-/// document, say) throws; swallow it with a log rather than unwinding the frame.
+/// ddui-side write hooks: forward the panel's single-byte edits to the editor,
+/// which holds them in its piece table, so these work even on a file opened
+/// read-only. A rejected edit throws; swallow it with a log rather than unwinding
+/// the frame.
 ///
-/// `user` is the View that owns the panel, from hex.writeUser, which is what
-/// says whose bytes are being edited: the panel taking keys is not necessarily
-/// a view of the document in front once panels can sit side by side.
+/// `user` is the View that owns the panel, from hex.writeUser, which is what says
+/// whose bytes are being edited - not necessarily the document in front, once
+/// panels can sit side by side.
 void hexReplace(long pos, ubyte value, void* user)
 {
     View* v = cast(View*) user;
@@ -1210,9 +1135,9 @@ void hexRemove(long pos, long len, void* user)
 
 /// ddui-side history hooks: step the editor's undo/redo and hand back where the
 /// change landed so the panel can chase it with the caret. The editor's size can
-/// jump either way here, so refresh the panel's copy before returning - the copy
+/// jump either way, so the panel's copy is refreshed before returning - the copy
 /// belonging to the view that took the keystroke, which `user` names. Any other
-/// view of the same document picks the new size up from ui_frame next frame.
+/// view of the document picks the new size up from ui_frame next frame.
 long hexUndo(void* user)
 {
     View* v = cast(View*) user;
@@ -1238,12 +1163,11 @@ long hexRedo(void* user)
 }
 
 /// Point a view's panel at its document: read, colour, write and history hooks,
-/// plus the size the panel starts from. Called on every new view and whenever a
-/// view is pointed at a different document, so editing always targets the bytes
-/// that panel is showing.
+/// plus the size the panel starts from. Called on every new view and whenever one
+/// is pointed at a different document.
 ///
-/// The view is taken by pointer because that pointer is what the hooks above are
-/// handed back on every call, long after this returns.
+/// By pointer, because that pointer is what the hooks above are handed back on
+/// every call, long after this returns.
 void wireView(View* v)
 {
     IDocumentEditor ed = v.doc.editor;
@@ -1295,9 +1219,6 @@ Pane* ui_pane_at(int x, int y)
 /// The pane a tab being dragged is over and what letting go there would do: join
 /// that pane, or split it on one of its four sides. Null when the pointer is over
 /// no pane at all, which is a drop that does nothing.
-///
-/// The strip at the top of a pane is all centre, so a tab dropped on a row of
-/// tabs joins that row however near the pane's edge the pointer happens to be.
 Pane* ui_drop_target(mu_Context* ctx, out SplitZone zone)
 {
     Pane* onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
@@ -1306,13 +1227,10 @@ Pane* ui_drop_target(mu_Context* ctx, out SplitZone zone)
     return onto;
 }
 
-/// The shape a drop on `p` would fill, for showing where it lands before the
-/// user commits to it. The pane itself for a drop that joins it, half of it for
-/// one that splits it.
-///
-/// A sideways split of a pane with others stacked in its column takes the whole
-/// column's width instead, since that is what ui_split_into actually does with
-/// it: the preview says half the column, and half the column is what appears.
+/// The shape a drop on `p` would fill, for showing where it lands before the user
+/// commits: the pane itself for a drop that joins it, half of it for one that
+/// splits it, and half the column when a sideways split reaches around a whole
+/// stack - which is what ui_split_into does with it.
 mu_Rect ui_drop_rect(Pane* p, SplitZone zone)
 {
     mu_Rect r = p.rect;
@@ -1339,9 +1257,8 @@ public void ui_drop_clear()
     dropPane = null;
 }
 
-/// Open a dropped file in the pane it was dropped on, rather than in whichever
-/// pane happened to have the keyboard. Dropping is a pointing gesture: the pane
-/// under the cursor is the one being asked for, and it takes the focus with the
+/// Open a dropped file in the pane it was dropped on rather than the one with the
+/// keyboard, dropping being a pointing gesture; that pane takes the focus with the
 /// file. A drop that misses every pane falls back to the focused one.
 public void ui_drop_file(string path, int x, int y)
 {
@@ -1373,20 +1290,18 @@ public void ui_compare_dialog()
 /// Open `path` beside the tab the comparison was started from and pair the two
 /// up, byte for byte.
 ///
-/// The file gets a pane of its own to the right rather than a tab in the pane it
-/// is being compared with: the whole point is to see both at once. Failing to open
-/// it leaves the window exactly as it was - the pane is only made once the bytes
-/// are known to be there.
+/// The file gets a pane of its own to the right rather than a tab in the pane it is
+/// being compared with, the whole point being to see both at once. The pane is only
+/// made once the bytes are known to be there.
 ///
-/// Public because it is the whole action with the dialog taken off the front: it
-/// is what the scripted driver calls, and what a command line naming two files
-/// would reach for.
+/// Public because it is the whole action with the dialog taken off the front: what
+/// the scripted driver calls, and what a command line naming two files would reach
+/// for.
 public void ui_compare_with(string path)
 {
     // The dialog is not modal, so the tab this was started from may have been
-    // closed, or dragged into another pane, while it was up. Whatever it is now,
-    // it has to be a view still in the grid to be compared against; the front tab
-    // of the focused pane is the honest fallback.
+    // closed or dragged elsewhere meanwhile; the front tab of the focused pane is
+    // the honest fallback.
     View* left = compareFrom;
     compareFrom = null;
     if (left is null || ui_view_pane(left) is null)
@@ -1442,32 +1357,28 @@ Pane* ui_view_pane(const(View)* v)
 /// Open `path` through a fresh ddhx editor and give it a tab.
 ///
 /// The file lands in a new tab, unless the one in front is an untouched scratch
-/// buffer - the state the app starts in - which it takes over rather than
-/// leaving an empty tab behind. On failure nothing changes and the error is
-/// logged, so a bad path never disturbs what is already open.
+/// buffer - the state the app starts in - which it takes over instead. On failure
+/// nothing changes and the error is logged.
 public bool ui_open(string path)
 {
     Document* d = ui_load(path);
     if (d is null)
         return false;
 
-    // Loaded without throwing, so the tab it goes in is settled now. The tab lands
-    // in the focused pane, which is where the user was working - or, on a drop,
-    // the pane the file was let go over.
+    // The focused pane is where the user was working - or, on a drop, the pane the
+    // file was let go over.
     Pane* p = focused;
     View* v = p.views[p.current];
     Document* scratch = v.doc;
 
     if (scratchEmpty(*scratch))
     {
-        // The tab in front has nothing in it, so the file takes it over rather
-        // than leaving an empty tab behind. It is the *view* that is reused: the
-        // scratch document itself only goes if this was the last view of it, since
-        // another pane showing the same one (the state a fresh split leaves) still
-        // has bytes to draw and an editor to draw them through.
+        // It is the *view* that is reused: the scratch document only goes if this
+        // was the last view of it, another pane showing the same one (the state a
+        // fresh split leaves) still having bytes to draw.
         //
-        // It is a different file in the same view, so any comparison the view was
-        // part of was about the bytes that just left, not these.
+        // A different file in the same view, so any comparison it was part of was
+        // about the bytes that just left.
         diff_unlink(v);
         v.doc = d;
         if (ui_view_count(scratch) == 0)
@@ -1496,9 +1407,8 @@ public bool ui_open(string path)
 /// logged, and nothing already open is disturbed).
 ///
 /// Split out of ui_open because a comparison needs the file loaded without a tab
-/// being found for it: it puts the second document in a pane of its own, beside
-/// the one it is being compared with, rather than wherever an Open would have
-/// landed. See ui_compare_with.
+/// being found for it: the second document goes in a pane of its own rather than
+/// wherever an Open would have landed. See ui_compare_with.
 Document* ui_load(string path)
 {
     IDocumentEditor ed;
@@ -1533,11 +1443,10 @@ bool scratchEmpty(ref Document d)
 
 /// Write the open document's current contents to `path` and mark it saved.
 ///
-/// Uses the document's "replace" strategy: stream the edited view into a temp
-/// file alongside the target, then atomically rename it over the target. The
-/// read-only source handle stays valid across the rename (it keeps referencing
-/// the original inode), so the editor and its undo history survive without a
-/// reopen. Returns false, and leaves the file untouched, if the write fails.
+/// Streams the edited view into a temp file alongside the target, then renames it
+/// over atomically. The read-only source handle keeps referencing the original
+/// inode across that, so the editor and its undo history survive without a reopen.
+/// Returns false, and leaves the file untouched, if the write fails.
 bool saveTo(ref Document d, string path)
 {
     import std.stdio : File;
@@ -1599,10 +1508,9 @@ extern (C) void ui_on_save_picked(void* user, const(char*)* fileList, int filter
     ui_wakeup();
 }
 
-/// Save the open document. With a known path it writes in place and reports
-/// whether that succeeded. With none (a scratch buffer built from nothing) there
-/// is nowhere to write yet, so it opens a native Save As dialog and returns
-/// false: the write lands later, on the main thread, once a path is chosen.
+/// Save the open document. With a known path it writes in place and reports whether
+/// that succeeded; with none it opens a native Save As dialog and returns false,
+/// the write landing later on the main thread once a path is chosen.
 public bool ui_save()
 {
     if (doc.path.length)
@@ -1647,16 +1555,14 @@ void ui_save_pending(string dest)
 /// rather than quietly spending the memory (and the time) on it.
 enum COPY_MAX = 16 * 1024 * 1024;
 
-/// Resolve the byte range Copy and Cut act on in `v`, clamped to its document.
-/// Returns false when there is nothing to act on: no document, no caret placed
-/// yet, or the caret parked on the append slot past the last byte. A bare caret
-/// gives a single byte, matching what the status bar reports and what Delete
-/// removes.
+/// Resolve the byte range Copy and Cut act on in `v`, clamped to its document. A
+/// bare caret gives a single byte, matching what the status bar reports and what
+/// Delete removes.
 ///
-/// The view is a parameter rather than read off `current` because a selection is
-/// a property of a panel: with panes on screen at once, the one being copied out
-/// of is whichever has focus, not whichever the tab strip has in front. Taking
-/// the View also reaches its document, so the pair never has to be passed apart.
+/// The view is a parameter because a selection is a property of a panel: with
+/// several panes on screen, the one being copied out of is whichever has focus.
+/// Returns: False when there is nothing to act on - no document, no caret placed
+///          yet, or the caret parked past the last byte.
 bool ui_selection(ref View v, out size_t low, out size_t high)
 {
     if (v.doc.editor is null || v.hex.active == false)
@@ -1678,8 +1584,9 @@ bool ui_selection(ref View v, out size_t low, out size_t high)
 /// de ad be ef ...
 /// ---
 /// Text, so it drops into any editor or chat window as a readable dump, and
-/// ui_paste reads the same shape back in. Returns whether the bytes reached the
-/// clipboard, so ui_cut only removes what it managed to copy.
+/// ui_paste reads the same shape back in.
+/// Returns: Whether the bytes reached the clipboard, so ui_cut only removes what
+///          it managed to copy.
 public bool ui_copy()
 {
     size_t low, high;
@@ -1698,8 +1605,8 @@ public bool ui_copy()
     Appender!(char[]) text = appender!(char[]);
     text.reserve(len * 3 + 1); // two digits and a separator each, plus the terminator
 
-    // Pull the run out of the editor a chunk at a time; the selection can be
-    // large and only the bytes being formatted need to be held.
+    // A chunk at a time: the selection can be large, and only the bytes being
+    // formatted need holding.
     ubyte[64 * 1024] buffer = void;
     size_t done;
     while (done < len)
@@ -1730,10 +1637,9 @@ public bool ui_copy()
     return true;
 }
 
-/// Copy the selected bytes, then remove them from the document. The clipboard is
-/// written first and the removal only follows a copy that took, so a refused or
-/// failed copy leaves the bytes where they are. A bare caret cuts the byte under
-/// it, the same one Delete would drop.
+/// Copy the selected bytes, then remove them. The clipboard is written first and
+/// the removal only follows a copy that took, so a failed copy leaves the bytes
+/// where they are. A bare caret cuts the byte Delete would drop.
 public void ui_cut()
 {
     size_t low, high;
@@ -1758,15 +1664,13 @@ public void ui_cut()
 /// Paste hex text from the clipboard at the caret.
 ///
 /// Reads back what ui_copy writes, plus the usual variations: whitespace, commas,
-/// semicolons and colons all separate bytes, and a 0x prefix on a token is
-/// skipped, so "de ad", "DEAD" and "0xde, 0xad" all land the same two bytes. Each
-/// token must hold whole bytes (an even run of digits); anything else refuses the
-/// paste whole, leaving the document untouched, rather than guessing at a nibble.
+/// semicolons and colons all separate bytes and a 0x prefix is skipped, so "de ad",
+/// "DEAD" and "0xde, 0xad" land the same two. Each token must hold whole bytes;
+/// anything else refuses the paste rather than guessing at a nibble.
 ///
-/// Where the bytes land follows the panel's entry mode, the way typing digits
-/// does: overwrite replaces the bytes at the caret (growing the document when the
-/// paste runs past EOF), insert splices them in. A selection wider than a single
-/// byte is what the paste replaces, in either mode.
+/// Where the bytes land follows the panel's entry mode, the way typing does:
+/// overwrite replaces at the caret (growing the document past EOF), insert splices.
+/// A selection wider than one byte is what the paste replaces, in either mode.
 public void ui_paste()
 {
     if (doc.editor is null)
@@ -1798,10 +1702,9 @@ public void ui_paste()
     bool ok;
     try
     {
-        // A selection is what the paste replaces, so drop it first and splice the
-        // bytes into the gap; the entry mode only decides how a bare caret takes
-        // them. The remove and the insert are separate history entries, so undoing
-        // a paste over a selection takes two steps.
+        // A selection is dropped first and the bytes spliced into the gap, the
+        // entry mode only deciding how a bare caret takes them. The remove and the
+        // insert are separate history entries, so undoing that takes two steps.
         bool replacing = high > low;
         if (replacing)
         {
@@ -1827,8 +1730,8 @@ public void ui_paste()
     catch (Exception e)
         logWarn("paste failed: %s", e.msg);
 
-    // The document may have moved even on a failed insert-after-remove, so refresh
-    // the panel and put the caret past the pasted run either way.
+    // The document may have moved even on a failed insert-after-remove, so the
+    // panel is refreshed either way.
     view.hex.dataSize = editor.size();
     hex_set_caret(view.hex, ok ? low + bytes.length : low);
     if (ok)
@@ -1879,13 +1782,13 @@ ubyte[] parseHexText(const(char)* text)
 unittest
 {
     assert(parseHexText("de ad be ef") == [ 0xde, 0xad, 0xbe, 0xef ]);
-    assert(parseHexText("DEADBEEF")    == [ 0xde, 0xad, 0xbe, 0xef ]); // one run
-    assert(parseHexText("0xde, 0xAD")  == [ 0xde, 0xad ]);             // C-ish source
-    assert(parseHexText("de ad\nbe ef") == [ 0xde, 0xad, 0xbe, 0xef ]); // wrapped copy
+    assert(parseHexText("DEADBEEF")    == [ 0xde, 0xad, 0xbe, 0xef ]);
+    assert(parseHexText("0xde, 0xAD")  == [ 0xde, 0xad ]); // C-ish source
+    assert(parseHexText("de ad\nbe ef") == [ 0xde, 0xad, 0xbe, 0xef ]);
     assert(parseHexText("de:ad;be")    == [ 0xde, 0xad, 0xbe ]);
-    assert(parseHexText("  ").length == 0);   // separators alone spell no bytes
+    assert(parseHexText("  ").length == 0);
     assert(parseHexText("").length == 0);
-    assert(parseHexText("de a") is null);     // half a byte
+    assert(parseHexText("de a") is null);       // half a byte
     assert(parseHexText("dead beefs") is null); // stray letter past 'f'
     assert(parseHexText("hello") is null);
     assert(parseHexText("0x") is null);       // a prefix with no digits behind it
@@ -1897,14 +1800,14 @@ enum Confirm { proceed, cancel }
 /// Button ids for the prompt, kept distinct from the unset -1 sentinel.
 enum { btnSave = 1, btnDontSave = 2, btnCancel = 3 }
 
-/// Resolve unsaved edits in `d` before an action that would discard them
-/// (closing the last view of it, or quitting). With no edits pending it proceeds
-/// silently; otherwise it brings a view of that document to the front - so the
-/// prompt is about what is on screen, and a Save As raised from here lands on
-/// it - and puts up a native Save / Don't Save / Cancel prompt titled `title`.
-/// Returns Confirm.proceed when the caller may go ahead (saved or discarded) and
-/// Confirm.cancel when the user backed out, a chosen save has yet to finish, or
-/// the prompt itself failed (fail safe: never lose data on an error).
+/// Resolve unsaved edits in `d` before an action that would discard them (closing
+/// the last view of it, or quitting). With no edits pending it proceeds silently;
+/// otherwise it brings a view of that document to the front - so the prompt is
+/// about what is on screen - and puts up a native Save / Don't Save / Cancel box
+/// titled `title`.
+/// Returns: Confirm.proceed when the caller may go ahead, Confirm.cancel when the
+///          user backed out, a chosen save has yet to finish, or the prompt itself
+///          failed (fail safe: never lose data on an error).
 Confirm ui_confirm_discard(Document* d, const(char)* title)
 {
     if (d is null)
@@ -1919,8 +1822,8 @@ Confirm ui_confirm_discard(Document* d, const(char)* title)
         { cast(SDL_MessageBoxButtonFlags) 0,       btnDontSave, "Don't Save" },
         { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, btnCancel,   "Cancel" },
     ];
-    // Name the document: with several tabs open, "the document" is not enough
-    // to tell the user which one they are about to lose.
+    // With several tabs open, "the document" is not enough to tell the user which
+    // one they are about to lose.
     string message = format("%s has unsaved changes.", d.title);
     SDL_MessageBoxData data = {
         flags:      SDL_MESSAGEBOX_WARNING,
@@ -1946,11 +1849,10 @@ Confirm ui_confirm_discard(Document* d, const(char)* title)
     }
 }
 
-/// Ask the user to resolve unsaved edits before quitting. True to go ahead.
-/// main calls this on every quit route so the window keeps running on Cancel.
-/// Every open document is asked about in turn, each prompt naming its own, and
-/// the first cancel stops the quit with the rest left untouched. Documents
-/// rather than tabs, so a file open in two panels is only asked about once.
+/// Ask the user to resolve unsaved edits before quitting. True to go ahead; main
+/// calls this on every quit route, so the window keeps running on Cancel. Every
+/// open document is asked about in turn and the first cancel stops the quit.
+/// Documents rather than tabs, so a file open in two panels is asked about once.
 public bool ui_may_quit()
 {
     foreach (Document* d; docs)
@@ -1967,16 +1869,13 @@ struct Entry
     string keys;
     int id = -1;
 
-    /// Words the command answers to but is not called: what someone types when
-    /// they know what they want and not what this application named it. Never
-    /// shown - the row still reads as its label - so they cost nothing on screen
-    /// and can be as generous as they need to be.
+    /// Words the command answers to but is not called: what someone types when they
+    /// know what they want and not what this application named it. Never shown, so
+    /// they can be as generous as they need to be.
     ///
-    /// Two things they are for. Vocabulary: "diff" finds Compare With, "goto" and
-    /// "jump" find Go to Offset, "vsplit" finds Split Pane Right, whichever
-    /// editor the user came here from. And, later, translation: a localised label
-    /// would leave these English, so the command list goes on answering to the
-    /// terms the documentation and every other tool use.
+    /// Vocabulary first - "diff" finds Compare With, "vsplit" finds Split Pane
+    /// Right, whichever editor the user came from - and translation later: a
+    /// localised label would leave these English.
     string keywords;
 }
 
@@ -2028,11 +1927,10 @@ immutable Entry[] COMMANDS = [
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
 ];
 
-/// The head of the '?' sheet: the omnibar's own prefixes, the characters that
-/// pick what the box is searching. They are as much a shortcut as any chord, and
-/// the only ones with nowhere else to be advertised, so the sheet opens on them.
-/// The characters come from the omnibar's own enums, so the sheet cannot drift
-/// from what the box actually answers to.
+/// The head of the '?' sheet: the omnibar's own prefixes, which are as much a
+/// shortcut as any chord and the only ones with nowhere else to be advertised. The
+/// characters come from the omnibar's own enums, so the sheet cannot drift from
+/// what the box answers to.
 immutable Entry[] PREFIXES = [
     Entry("Omnibar: switch tab",             "(no prefix)"),
     Entry("Omnibar: run a command",          "" ~ OMNI_COMMAND),
@@ -2044,9 +1942,8 @@ immutable Entry[] PREFIXES = [
 ];
 
 /// The rest of the '?' sheet: every key the application answers to, in the order
-/// they come up - the omnibar itself, then the window, then the caret and the
-/// bytes under it. Nothing here runs; it is the sheet you open to remember a
-/// chord.
+/// they come up - the omnibar, then the window, then the caret and the bytes under
+/// it. Nothing here runs.
 immutable Entry[] SHORTCUTS = [
     Entry("Omnibar",                      "Ctrl+E"),
     Entry("Omnibar, on commands",         "Ctrl+Shift+P"),
@@ -2121,14 +2018,14 @@ const(OmniItem)[] ui_omni_items()
     final switch (omni_mode(omni))
     {
     case OmniMode.switcher:
-        // One row per tab across every pane, not per document: the switcher picks
-        // a panel to go to, and two views of one file are two places to be. The
-        // path is what tells two same-named files apart, so it is both the detail
-        // column and, through the omnibar's matching, searchable itself.
+        // One row per tab rather than per document: the switcher picks a panel to
+        // go to, and two views of one file are two places to be. The path tells two
+        // same-named files apart, so it is both the detail column and, through the
+        // omnibar's matching, searchable.
         //
-        // A row's id is its place in this list rather than a tab index, since a
-        // tab index means nothing without the pane it counts within; omniTabs
-        // carries the pair back for ui_omni_accept to act on.
+        // A row's id is its place in this list rather than a tab index, which means
+        // nothing without the pane it counts within; omniTabs carries the pair back
+        // for ui_omni_accept.
         size_t at;
         foreach (Column* c; columns)
         {
@@ -2158,9 +2055,8 @@ const(OmniItem)[] ui_omni_items()
         put(label, detail, 0, false, true);
         break;
     case OmniMode.find:
-        // Likewise a readout, of the bytes the pattern comes to. What it would
-        // find is deliberately not looked up here: this runs every frame, and
-        // scanning the document per keystroke is not something to do quietly.
+        // Likewise a readout, of the bytes the pattern comes to. What it would find
+        // is deliberately not looked up: this runs every frame.
         string flabel, fdetail;
         ui_find_preview(flabel, fdetail);
         put(flabel, fdetail, 0, false, true);
@@ -2180,8 +2076,8 @@ const(OmniItem)[] ui_omni_items()
                 -1, false, true);
             break;
         }
-        // The row's id is the mark's place in the list, not the offset itself:
-        // an offset does not fit an int on a document worth bookmarking.
+        // The row's id is the mark's place in the list: an offset does not fit an
+        // int on a document worth bookmarking.
         foreach (size_t i, ref Bookmark mark; doc.marks)
         {
             char[48] head = void;
@@ -2213,11 +2109,10 @@ Address ui_goto_target()
         cast(long) hex_total(view.hex));
 }
 
-/// Storage the omnibar's row text is composed into, and how much of it this
-/// frame has taken. Rows that are computed rather than named - an offset
-/// readout, a bookmark's bytes, an inspector reading - would otherwise allocate
-/// a string per row per frame, which is a few thousand pieces of garbage a
-/// second for text nothing outlives the frame. It only ever grows.
+/// Storage the omnibar's row text is composed into, and how much of it this frame
+/// has taken. Rows that are computed rather than named - an offset readout, an
+/// inspector reading - would otherwise allocate a string per row per frame, for
+/// text nothing outlives the frame. It only ever grows.
 __gshared char[] rowArena;
 /// Ditto.
 __gshared size_t rowUsed;
@@ -2234,9 +2129,8 @@ string ui_row_text(const(char)[] text)
     return cast(string) rowArena[at .. rowUsed];
 }
 
-/// Text for the ':' mode's one row: where the caret would land, or - while the
-/// text is not an offset yet, which is most of the time it is being typed - the
-/// syntax it is waiting for.
+/// Text for the ':' mode's one row: where the caret would land, or - while the text
+/// is not an offset yet - the syntax it is waiting for.
 void ui_goto_preview(out string label, out string detail)
 {
     Address a = ui_goto_target();
@@ -2251,8 +2145,8 @@ void ui_goto_preview(out string label, out string detail)
     size_t total = hex_total(view.hex);
     label = ui_row_text(sformat(buf, "Go to 0x%08x", a.pos));
 
-    // What that offset means in the document: the decimal count and how far in
-    // it lands, since the whole point of "%50" is not knowing the number.
+    // The decimal count and how far in it lands, the whole point of "%50" being
+    // not knowing the number.
     int percent = total ? cast(int)((a.pos * 100) / cast(long) total) : 0;
     if (a.clamped)
         detail = ui_row_text(sformat(buf,
@@ -2264,9 +2158,9 @@ void ui_goto_preview(out string label, out string detail)
 
 /// The pattern the find box is currently spelling out, read out of its text.
 ///
-/// Kept from one frame to the next: the preview row below is built every frame
-/// the box is up, and reading a pattern allocates now that ddhx's parser does
-/// the reading, so the text only goes through it when it has actually changed.
+/// Kept from one frame to the next: the preview row is built every frame the box is
+/// up and ddhx's parser allocates, so the text only goes through it once it has
+/// actually changed.
 bool ui_find_needle(out Needle needle)
 {
     const(char)[] query = omni_query(omni);
@@ -2299,9 +2193,9 @@ void ui_find_preview(out string label, out string detail)
         return;
     }
 
-    // The elements as bytes, with '??' for a one-byte wildcard and '**' for a
-    // run. Long patterns are cut off here rather than in the row: the box would
-    // elide the tail anyway, and this keeps the arena's slice short.
+    // The elements as bytes, with '??' for a one-byte wildcard and '**' for a run.
+    // Long patterns are cut off here rather than in the row, which would elide the
+    // tail anyway, so the arena's slice stays short.
     char[128] buf = void;
     size_t at;
     foreach (ushort element; needle.data[0 .. needle.length])
@@ -2322,9 +2216,8 @@ void ui_find_preview(out string label, out string detail)
             at += sformat(buf[at .. $], "%02x", cast(ubyte) element).length;
     }
 
-    // A run stands for as many bytes as it takes, so the count it comes to is a
-    // floor rather than the length; saying so beats naming a number that is not
-    // what the search will select.
+    // A run stands for as many bytes as it takes, so the count is a floor rather
+    // than the length, and saying so beats naming a number the search will not use.
     size_t least = search_least(needle);
     char[64] count = void;
     label  = ui_row_text(buf[0 .. at]);
@@ -2365,11 +2258,10 @@ immutable Inspect[] INSPECT = [
     Inspect("f64 BE", InspectorType.f64, Endian.bigEndian),
 ];
 
-/// Read the bytes the inspector works from: as many as its widest type needs,
-/// from where the selection starts - which is the caret itself when there is no
-/// selection, and the first of the bytes when there is, since that is the one a
-/// reading of them would begin at. A short read near EOF is fine:
-/// formatInspector says "N/A" for the types that no longer fit.
+/// Read the bytes the inspector works from: as many as its widest type needs, from
+/// where the selection starts - the caret itself when there is no selection. A
+/// short read near EOF is fine, formatInspector saying "N/A" for what no longer
+/// fits.
 ubyte[] ui_inspect_bytes(ubyte[] buf)
 {
     if (doc.editor is null)
@@ -2397,8 +2289,8 @@ void ui_omni_accept(OmniMode mode, int id)
     final switch (mode)
     {
     case OmniMode.switcher:
-        // The id indexes the flat list the rows were built from, which carries
-        // the pane the tab lives in as well as the tab itself.
+        // The id indexes the flat list the rows were built from, which carries the
+        // pane as well as the tab.
         if (id >= 0 && id < omniTabs.length)
             ui_select_tab_in(omniTabs[id].pane, omniTabs[id].tab); // takes focus itself
         break;
@@ -2406,9 +2298,8 @@ void ui_omni_accept(OmniMode mode, int id)
         ui_omni_run(id);
         break;
     case OmniMode.address:
-        // Parsed again here rather than carried in the row's id: the id is an int
-        // and an offset is not, and the text is still where the box left it. A
-        // half-typed offset takes nothing and just puts the box away.
+        // Parsed again rather than carried in the row's id, which is an int where
+        // an offset is not. A half-typed offset just puts the box away.
         Address a = ui_goto_target();
         if (a.ok)
         {
@@ -2430,8 +2321,8 @@ void ui_omni_accept(OmniMode mode, int id)
         view.hex.takeFocus = true;
         break;
     case OmniMode.inspect:
-        // Nothing to jump to: the reading itself is the answer, so it goes to
-        // the clipboard where it can be pasted into whatever asked the question.
+        // Nothing to jump to: the reading itself is the answer, so it goes to the
+        // clipboard.
         ubyte[8] raw = void;
         char[64] buf = void;
         const(char)[] value = ui_inspect_value(id, ui_inspect_bytes(raw), buf);
@@ -2457,9 +2348,9 @@ void ui_omni_accept(OmniMode mode, int id)
     }
 }
 
-/// The bytes a bookmark covers, as the detail column of its row: the first few
-/// of them, enough to recognise what was marked, with the ASCII beside it for
-/// text and the run's length after it when there is more than fits.
+/// The bytes a bookmark covers, as the detail column of its row: enough of them to
+/// recognise what was marked, with the ASCII beside it and the run's length after
+/// it when there is more than fits.
 string ui_bookmark_bytes(ref const(Bookmark) mark)
 {
     if (doc.editor is null)
@@ -2489,9 +2380,9 @@ __gshared Needle lastNeedle;
 /// Ditto.
 __gshared bool haveNeedle;
 
-/// The pattern the find box last had read out of it, and the text it was read
-/// from, so the box's own frames do not put the same query through the parser
-/// over and over. See ui_find_needle.
+/// The pattern the find box last had read out of it, and the text it came from, so
+/// the box's own frames do not put one query through the parser over and over. See
+/// ui_find_needle.
 __gshared Needle findNeedle;
 /// Ditto.
 __gshared bool findHave;
@@ -2514,9 +2405,8 @@ void ui_find_step(ref View v, bool backward, long from)
     if (v.doc.editor is null)
         return;
 
-    // The length comes back from the search rather than off the needle: a '*'
-    // stands for a run of whatever length the document turned out to hold, so
-    // only the match itself knows how much of it to select.
+    // The length comes back from the search rather than off the needle: a '*' runs
+    // for whatever the document held, so only the match knows how much to select.
     size_t length;
     long at = search_find(lastNeedle, from, cast(long) hex_total(v.hex),
         backward, length, &hexRead, cast(void*) v.doc.editor);
@@ -2539,17 +2429,14 @@ public void ui_find_repeat(bool backward)
 }
 
 /// Move past the run of identical elements at the caret, the way ddhx's skip-back
-/// and skip-forward do: it lands on the first element either side that holds
-/// something else, so a field of zeroes or a stretch of padding is crossed in one
-/// keystroke. A run reaching the end of the document goes there rather than
+/// and skip-forward do, landing on the first element either side that holds
+/// something else. A run reaching the end of the document goes there rather than
 /// leaving the key looking dropped.
 ///
-/// The element is the byte under a bare caret, and the whole of the selection
-/// when there is one, which is how a table of records is walked a record at a
-/// time: select one, and each keystroke steps to the next one that reads
-/// differently. What is landed on stays selected, so the walk can be repeated -
-/// ddhx drops the selection there and vddhx keeps it, since a chord that cannot
-/// be pressed twice is half a movement.
+/// The element is the byte under a bare caret and the whole of the selection when
+/// there is one, which is how a table of records is walked a record at a time. What
+/// is landed on stays selected so the walk can be repeated - ddhx drops the
+/// selection there, but a chord that cannot be pressed twice is half a movement.
 public void ui_skip_element(bool backward)
 {
     if (doc.editor is null)
@@ -2559,9 +2446,9 @@ public void ui_skip_element(bool backward)
     if (total <= 0)
         return;
 
-    // The selection is the element, taken from its low end the way ddhx takes it,
-    // so both directions step in the same lane. A selection can outlive the bytes
-    // it covered (a delete under it), so it is clamped to the document first.
+    // Taken from the selection's low end, the way ddhx takes it, so both directions
+    // step in the same lane. A selection can outlive the bytes it covered (a delete
+    // under it), hence the clamp.
     long from = cast(long) hex_sel_low(view.hex);
     long high = cast(long) hex_sel_high(view.hex);
     if (high >= total)
@@ -2572,8 +2459,8 @@ public void ui_skip_element(bool backward)
         ui_status("selection too long to skip over (max %u bytes)", SEARCH_ELEMENT_MAX);
         return;
     }
-    // Nothing ahead of the append slot past the last byte, so a forward skip from
-    // there has nowhere to go; backward still walks the run behind it.
+    // Nothing ahead of the append slot, so a forward skip from there has nowhere to
+    // go; backward still walks the run behind it.
     if (from >= total && backward == false)
         return;
 
@@ -2603,8 +2490,8 @@ void ui_select_range(ref View v, size_t start, size_t len)
 }
 
 /// Set or clear a bookmark over the selection, or over the byte under the caret
-/// when nothing is selected. Marking what is selected is the point: a field or a
-/// header is worth coming back to, a lone byte of it rarely is.
+/// when nothing is selected: a field or a header is worth coming back to, a lone
+/// byte of it rarely is.
 public void ui_mark_toggle()
 {
     long at  = cast(long) hex_sel_low(view.hex);
@@ -2671,10 +2558,8 @@ void ui_omni_run(int id)
         ui_status("cleared %u bookmark(s)", doc.marks.length);
         doc.marks = null;
         break;
-    // Back into the box on another prefix: an offset, a pattern, a reading and
-    // the bookmark list are all typed there rather than in dialogs of their own.
-    // It reopens next frame and grabs the keyboard when it does, so the panel
-    // must not be handed focus on the way out.
+    // Back into the box on another prefix, which reopens next frame and grabs the
+    // keyboard, so the panel must not be handed focus on the way out.
     case CMD_GOTO:      omni_show(omni, OMNI_ADDRESS);  return;
     case CMD_FIND:      omni_show(omni, OMNI_FIND);     return;
     case CMD_INSPECT:   omni_show(omni, OMNI_INSPECT);  return;
@@ -2682,7 +2567,7 @@ void ui_omni_run(int id)
     case CMD_ABOUT:     about_open();          break;
     case CMD_QUIT:
         // Through SDL's own queue, so it meets the same unsaved-changes check as
-        // the window close button and File > Quit.
+        // every other quit route.
         SDL_Event quit; // .init zeroes the union
         quit.type = SDL_EVENT_QUIT;
         SDL_PushEvent(&quit);
@@ -2702,16 +2587,11 @@ public bool ui_animating()
 }
 
 /// Build one frame of UI. Call between mu_begin and mu_end.
-/// Params:
-///     ctx = ddui context.
-///     width = Current window width in pixels.
-///     height = Current window height in pixels.
 public void ui_frame(mu_Context* ctx, int width, int height)
 {
-    // The menubar sits flush against the window's top and side edges, so drop
-    // the window body's outer padding while the layout body is pushed. The inset
-    // is fixed when mu_begin_window_ex pushes the body, so zero padding across
-    // that call, then restore it for the normally-padded content below.
+    // The menubar sits flush against the window's top and side edges. The body's
+    // inset is fixed when mu_begin_window_ex pushes it, so the padding is zeroed
+    // across that call and restored for the content below.
     int padding = ctx.style.padding;
     ctx.style.padding = 0;
 
@@ -2727,11 +2607,9 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         mu_Container* win = mu_get_current_container(ctx);
         win.rect = mu_Rect(0, 0, width, height);
 
-        // Rows in this window abut. ddui leaves a gap between rows, painted in
-        // the window's own colour, which stripes the chrome (menubar, toolbar,
-        // tabs) and the grid (column header, bytes) with pale seams instead of
-        // letting each read as one surface. Restored on the way out, so the
-        // About dialog keeps the stock spacing.
+        // Rows in this window abut: ddui's gap between rows is painted in the
+        // window's own colour, which stripes the chrome and the grid with pale
+        // seams. Restored on the way out, so the About dialog keeps stock spacing.
         int spacing = ctx.style.spacing;
         ctx.style.spacing = 0;
         scope(exit) ctx.style.spacing = spacing;
@@ -2750,8 +2628,8 @@ public void ui_frame(mu_Context* ctx, int width, int height)
                 cast(void) ui_open(picked);
         }
 
-        // Likewise a Save As destination: write there, and adopt it as the
-        // document's home so later saves land in place without asking again.
+        // Likewise a Save As destination, adopted as the document's home so later
+        // saves land in place without asking again.
         if (atomicLoad(pendingSaveReady))
         {
             atomicStore(pendingSaveReady, false);
@@ -2760,14 +2638,13 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 
         ui_menubar(ctx);
 
-        // The panes take the rest of the window, save a strip at the bottom
-        // reserved for the status bar.
+        // The panes take the rest of the window, save a strip at the bottom for the
+        // status bar.
         int statusH = ctx.text_height(ctx.style.font) + 6;
         ui_panes(ctx, statusH);
 
-        // Status bar: edit mode, a dirty marker, caret offset and selection length,
-        // echoing what the panel reports back through its state. Pinned to the
-        // window's bottom edge in the strip hex_view kept free above.
+        // Edit mode, a dirty marker, caret offset and selection length, in the
+        // strip ui_panes kept free above.
         static immutable int[1] srow = [ -1 ];
         mu_layout_row(ctx, 1, srow.ptr, statusH);
         mu_Rect sr = mu_layout_next(ctx);
@@ -2777,10 +2654,8 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             hex_sel_high(view.hex) - hex_sel_low(view.hex) + 1 : 0;
         string mode  = view.hex.insertMode ? "INS" : "OVR";
         string dirty = (doc.editor && doc.editor.edited()) ? " *" : "";
-        // Name the counterpart while a comparison is up. Without it the dimmed
-        // bytes and the red ones are a state the window gives no other account
-        // of - and the pane the eye is on is not necessarily the one the
-        // comparison was started from.
+        // Name the counterpart while a comparison is up: without it the dimmed
+        // bytes and the red ones are a state the window gives no other account of.
         View* other = diff_peer(&view());
         char[64] cmpbuf = void;
         const(char)[] cmp = other ?
@@ -2802,9 +2677,8 @@ public void ui_frame(mu_Context* ctx, int width, int height)
                 mu_Vec2(sr.x + sr.w - 4 - mw, ty), mu_Color(200, 200, 150, 255));
         }
 
-        // Name the document in the title bar last, so it agrees with the status
-        // bar above: both then report the state this frame's input left behind,
-        // rather than the title trailing an edit by a frame.
+        // Last, so the title agrees with the status bar above rather than trailing
+        // an edit by a frame.
         ui_window_title();
 
         mu_end_window(ctx);
@@ -2816,10 +2690,9 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     // What the About dialog is hiding, over the top of it.
     elite_frame(ctx, width, height);
 
-    // The omnibar goes last, over everything: it is the one thing that can be up
-    // while the rest of the window carries on drawing behind it. The mode is read
-    // before the box runs, so accepting acts on the list that was actually shown
-    // rather than on one a prefix typed this same frame would have swapped in.
+    // The omnibar goes last, over everything. The mode is read before the box runs,
+    // so accepting acts on the list that was actually shown rather than on one a
+    // prefix typed this same frame would have swapped in.
     OmniMode mode = omni_mode(omni);
     int chosen;
     const(OmniItem)[] rows = ui_omni_active() ? ui_omni_items() : null;
@@ -2833,10 +2706,9 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 
 /// What a tab strip asked for this frame, held until every pane has been drawn.
 ///
-/// A close can take a whole pane out of the grid, which would leave the loops
-/// below walking arrays that have moved under them. So the strips only report,
-/// and the one action a frame can carry is applied once the loops are done -
-/// still this frame, so nothing the user did is left waiting for the next one.
+/// A close can take a whole pane out of the grid, leaving the loops below walking
+/// arrays that moved under them. So the strips only report, and the one action a
+/// frame can carry is applied once the loops are done - still this frame.
 struct TabRequest
 {
     Pane* pane;
@@ -2845,10 +2717,10 @@ struct TabRequest
     int target;
 }
 
-/// A tab dragged clean out of its strip, which belongs to no pane while it is in
-/// the air: the pane it came from, which item of that pane's strip it is, and
-/// where the pointer has it. Drawn once every pane is down, so it passes over
-/// them all rather than being clipped to the lane it left.
+/// A tab dragged clean out of its strip, belonging to no pane while it is in the
+/// air: where it came from, which item of that strip it is, and where the pointer
+/// has it. Drawn once every pane is down, so it passes over them all rather than
+/// being clipped to the lane it left.
 struct TabGhost
 {
     Pane* pane; // null while nothing is in the air
@@ -2866,10 +2738,9 @@ void ui_panes(mu_Context* ctx, int statusH)
 {
     size_t n = columns.length;
 
-    // One full-width row for the lot, then every column and splitter placed
-    // inside it by hand: ddui hands an absolute rect straight back without
-    // advancing its own layout, which is what lets a column be pinned to a
-    // computed rect.
+    // One full-width row for the lot, then every column and splitter placed inside
+    // it by hand: ddui hands an absolute rect back without advancing its own
+    // layout, which is what lets a column be pinned to a computed rect.
     static immutable int[1] full = [ -1 ];
     mu_layout_row(ctx, 1, full.ptr, -(statusH + ctx.style.spacing + 1));
     mu_Rect grid = mu_layout_next(ctx);
@@ -2892,26 +2763,22 @@ void ui_panes(mu_Context* ctx, int statusH)
         mu_Rect r = mu_Rect(x, grid.y, colSizes[i], grid.h);
         x += r.w;
 
-        // Everything this column draws is scoped under the column's own identity,
-        // and every pane in it under the pane's, so the widgets inside can go on
-        // using plain constant names and still come out unique: ddui seeds every
-        // id it hashes with the top of the id stack, containers included. That is
-        // what keeps two panes from sharing one panel's scroll offset and body
-        // rect, and the two splitter axes from sharing a grab.
+        // Everything a column draws is scoped under its own identity, and every
+        // pane under the pane's, so the widgets inside can use plain constant names
+        // and still come out unique - ddui seeds every id it hashes with the top of
+        // the id stack, containers included. That is what keeps two panes from
+        // sharing a scroll offset, and the two splitter axes from sharing a grab.
         //
-        // It is the pointer's value that is hashed - the bytes at `&c` - and not
-        // the array slot it was read from, which moves whenever the grid grows. A
-        // column is heap allocated and never moves, so the value is stable for as
-        // long as the column is.
+        // What is hashed is the pointer's value, the bytes at `&c`, not the array
+        // slot it was read from, which moves whenever the grid grows.
         mu_push_id(ctx, &c, (Column*).sizeof);
         scope(exit) mu_pop_id(ctx);
 
         ui_column(ctx, c, r, req, ghost);
 
-        // A splitter between each pair of columns, dragged to trade width across
-        // it. The weights are written back through the scratch the layout was
-        // built from, so the columns redraw at the new sizes on the very next
-        // frame.
+        // A splitter between each pair, dragged to trade width across it. The
+        // weights are written back through the scratch the layout was built from,
+        // so the columns redraw at the new sizes on the next frame.
         if (i + 1 < n)
         {
             mu_Rect sr = mu_Rect(x, grid.y, SPLIT_WIDTH, grid.h);
@@ -2923,29 +2790,26 @@ void ui_panes(mu_Context* ctx, int statusH)
         }
     }
 
-    // A file held over the window picks out the pane it would land in. Drawn
-    // after the loop so it washes over the panel rather than under it: a hex
-    // panel is a ddui panel, not a root container, so its commands sit inline in
-    // this window's list and anything added later paints on top.
+    // A file held over the window picks out the pane it would land in. After the
+    // loop so it washes over the panel rather than under it: a hex panel is a ddui
+    // panel, not a root container, so anything added later paints on top.
     //
-    // The pane is looked up rather than trusted: a drag can be in flight while
-    // the window carries on working, and the pane it was last over may have been
-    // closed since.
+    // The pane is looked up rather than trusted: a drag can be in flight while the
+    // window carries on working, and its pane may have closed since.
     if (dropPane && ui_pane_index(dropPane) >= 0)
         ui_mark_pane(ctx, dropPane.rect);
 
-    // A tab in the air between panes. The pane it would land in is picked out
-    // first, then the tab itself over the top of everything - here rather than in
-    // the strip it came from, which clips to its own lane and so could never have
-    // shown it crossing into a neighbour.
+    // A tab in the air between panes: the pane it would land in first, then the tab
+    // over the top of everything - here rather than in the strip it came from,
+    // which clips to its own lane.
     if (ghost.pane)
     {
         Pane* src = ghost.pane;
         SplitZone zone;
         Pane* onto = ui_drop_target(ctx, zone);
-        // Back over the pane it came from is the drag being called off, so
-        // nothing is marked - unless it is against an edge, which splits the tab
-        // out of that pane and is a real destination.
+        // Back over its own pane is the drag being called off, so nothing is marked
+        // - unless it is against an edge, which splits the tab out and is a real
+        // destination.
         if (onto && (onto !is src ||
                     (zone != SplitZone.centre && src.views.length > 1)))
             ui_mark_pane(ctx, ui_drop_rect(onto, zone));
@@ -2953,23 +2817,21 @@ void ui_panes(mu_Context* ctx, int statusH)
             tab_ghost(ctx, src.tabs, src.items[ghost.index], ghost.rect);
     }
 
-    // Every pane has drawn, so where each one is scrolled to is settled: carry
-    // that across the comparisons before anything can rearrange the grid.
+    // Every pane has drawn, so where each is scrolled to is settled: carry that
+    // across the comparisons before anything can rearrange the grid.
     ui_sync_diffs();
 
-    // Now that the loops are done with the grid, whatever a strip asked for is
-    // safe to carry out, even where it drops the pane that asked.
+    // The loops are done with the grid, so a strip's request is safe to carry out
+    // even where it drops the pane that asked.
     switch (req.action)
     {
     case TabAction.select: ui_select_tab_in(req.pane, req.index); break;
     case TabAction.close:  ui_close_tab_in(req.pane, req.index);  break;
     case TabAction.add:    focused = req.pane; ui_new_tab();      break;
     case TabAction.move:   ui_move_tab(req.pane, req.index, req.target); break;
-    // Let go outside its own strip: it goes to whichever pane the pointer is
-    // over, either into it or into a new pane splitting it, according to where
-    // in that pane it landed. Released over nothing - a splitter, the status bar
-    // - and it stays where it was, which is the way out of a drag begun by
-    // accident.
+    // Let go outside its own strip, it goes to whichever pane the pointer is over,
+    // into it or into a new pane splitting it. Released over nothing - a splitter,
+    // the status bar - it stays put, which is the way out of an accidental drag.
     case TabAction.detach:
         SplitZone zone;
         Pane* onto = ui_drop_target(ctx, zone);
@@ -2982,19 +2844,17 @@ void ui_panes(mu_Context* ctx, int statusH)
 /// Put both halves of every comparison back on the same offset.
 ///
 /// Two files are compared by reading across the window, so the panes have to hold
-/// the same offset on the same line: scrolling one scrolls the other. Which one
-/// leads is whichever the user just moved, told from the offset each was left at
-/// when it last drew - anything that scrolls a panel goes through its own topRow,
-/// mouse wheel, caret reveal, a jump to an address, so there is nothing to hook
-/// into but the result.
+/// the same offset on the same line. Which one leads is whichever the user just
+/// moved, told from the offset each was left at when it last drew: everything that
+/// scrolls a panel goes through its own topRow, so there is nothing to hook into
+/// but the result.
 ///
-/// Only front tabs are read: a view sitting in a background tab did not draw and
-/// so cannot have moved. It is still written to, so a comparison whose other half
-/// is behind a tab is lined up already when that tab comes forward.
+/// Only front tabs are read, a background view not having drawn and so not having
+/// moved. It is still written to, so a comparison whose other half is behind a tab
+/// is lined up already when that tab comes forward.
 ///
-/// Called once every pane has drawn. Both sides moving in the same frame is not a
-/// thing a user can do - one panel has the keyboard and the pointer is in one
-/// place - so the first found leading is enough.
+/// Called once every pane has drawn. Both sides moving in one frame is not
+/// something a user can do, so the first found leading is enough.
 void ui_sync_diffs()
 {
     foreach (Column* c; columns)
@@ -3013,10 +2873,9 @@ void ui_sync_diffs()
                 continue; // this side stayed put; it is not the one leading
 
             // It went where it was put, but not as far: a panel stops at its own
-            // last screenful, so the shorter of two files runs out first and sits
-            // there while the longer one goes on. That is the honest end of the
-            // file, not this side taking the lead, and reading it as a lead would
-            // have it hauling the longer pane back up every frame.
+            // last screenful, so the shorter file sits there while the longer one
+            // goes on. That is the end of the file rather than this side taking the
+            // lead, which would have it hauling the longer pane back up every frame.
             if (forced && top < v.topSeen)
             {
                 v.topSeen = top;
@@ -3060,10 +2919,10 @@ void ui_column(mu_Context* ctx, Column* c, mu_Rect r, ref TabRequest req,
         y += pr.h;
         p.rect = pr; // for the out-of-frame hit test; see Pane.rect
 
-        // Clicking anywhere in a pane is what moves the keyboard to it, so the
-        // menus, the omnibar and every chord act on the pane last worked in. The
-        // panel inside also takes ddui's own focus from the same press; this is
-        // the application's notion of where the user is, alongside it.
+        // Clicking anywhere in a pane moves the keyboard to it, so the menus, the
+        // omnibar and every chord act on the pane last worked in. The panel inside
+        // takes ddui's own focus from the same press; this is the application's
+        // notion of where the user is, alongside it.
         if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, pr))
             focused = p;
 
@@ -3107,14 +2966,11 @@ void ui_mark_pane(mu_Context* ctx, mu_Rect r)
 /// Draw one pane: its tab strip, then the hex panel filling what is left of the
 /// column it was given.
 ///
-/// One tab per view, named after the document it shows and carrying that
-/// document's unsaved-changes dot. Two views of one file are two tabs, both named
-/// the same, whether they sit in one pane or in two.
-///
-/// The item slice is rebuilt every frame (titles and dirty flags both move under
-/// us) into storage that only ever grows, so a steady tab count costs no
-/// allocation. What the strip reports goes into `req` rather than happening here;
-/// see TabRequest.
+/// One tab per view, named after the document it shows and carrying that document's
+/// unsaved-changes dot, so two views of one file are two tabs named the same. The
+/// item slice is rebuilt every frame, titles and dirty flags both moving under us.
+/// What the strip reports goes into `req` rather than happening here; see
+/// TabRequest.
 void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
 {
     if (p.items.length < p.views.length)
@@ -3135,10 +2991,9 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     View* v = p.views[p.current];
     v.hex.minimap = minimapOn != 0;
 
-    // The editor's size shifts as inserts and deletes land, so refresh the
-    // panel's copy each frame before it draws; the panel keeps it live within a
-    // frame, this keeps it authoritative across them - and across panes, where an
-    // edit made in one is a size change the other has yet to hear about.
+    // The panel keeps its copy of the size live within a frame; this keeps it
+    // authoritative across them, and across panes, where an edit made in one is a
+    // size change the other has yet to hear about.
     if (v.doc.editor)
         v.hex.dataSize = v.doc.editor.size();
 
@@ -3186,15 +3041,12 @@ void ui_move_tab(Pane* p, size_t from, size_t to)
 }
 
 /// Hand the view at `index` in pane `src` over to pane `dst`, where it joins the
-/// end of the strip and comes to the front. The drag-between-panes route: the tab
-/// leaves one pane and lands in another.
+/// end of the strip and comes to the front: the drag-between-panes route.
 ///
-/// The view goes across whole - its caret, its scroll position, its document - so
-/// what was on screen in the old pane is what appears in the new one. A pane
-/// emptied by the move is closed, since an empty pane is not a view of anything,
-/// and the destination takes the keyboard either way. A null `dst` - let go over
-/// a splitter or the status bar - is no move at all, which is the way out of a
-/// drag begun by accident.
+/// The view goes across whole - caret, scroll position, document - so what was on
+/// screen in the old pane appears in the new one. A pane emptied by the move is
+/// closed, and the destination takes the keyboard either way. A null `dst`, let go
+/// over a splitter or the status bar, is no move at all.
 void ui_move_view(Pane* src, size_t index, Pane* dst)
 {
     if (src is null || dst is null || src is dst || index >= src.views.length)
@@ -3206,9 +3058,8 @@ void ui_move_view(Pane* src, size_t index, Pane* dst)
     dst.current = dst.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     v.hex.takeFocus = true;
 
-    // The pane it came from may have nothing left in it, in which case it goes -
-    // and since panes are named by pointer, the destination is unaffected by the
-    // grid closing over it.
+    // The pane it came from may have nothing left in it. Panes are named by
+    // pointer, so the destination is unaffected by the grid closing over it.
     if (src.views.length == 0 && ui_pane_count() > 1)
         ui_drop_pane(src);
 
@@ -3219,16 +3070,14 @@ void ui_move_view(Pane* src, size_t index, Pane* dst)
 /// `dst` itself: the drag-to-split route, where a tab let go against a pane's
 /// edge divides that pane instead of joining it.
 ///
-/// `zone` says which edge, and so where the new pane goes: above or below `dst`
-/// in its own column, or in a new column to one side. The sideways case reaches
-/// around the whole column, exactly as ui_split does, because the grid is two
-/// levels deep and a column cannot hold panes side by side - so dropping on the
-/// left of a pane with another stacked under it puts the new column beside both.
+/// `zone` says which edge, and so where the new pane goes: above or below `dst` in
+/// its own column, or in a new column to one side. The sideways case reaches around
+/// the whole column, exactly as ui_split does, the grid being two levels deep -
 /// ui_drop_rect shows that before the user lets go.
 ///
-/// A tab dropped on the edge of its own pane splits off from it, which is how one
-/// is pulled out into a split without visiting another pane first; the last tab
-/// of a pane has nothing to split away from and stays put.
+/// A tab dropped on the edge of its own pane splits off from it, which is how one is
+/// pulled into a split without visiting another pane first; a pane's last tab has
+/// nothing to split away from and stays put.
 void ui_split_into(Pane* src, size_t index, Pane* dst, SplitZone zone)
 {
     if (src is null || dst is null || index >= src.views.length)
@@ -3241,9 +3090,8 @@ void ui_split_into(Pane* src, size_t index, Pane* dst, SplitZone zone)
     if (src is dst && src.views.length < 2)
         return;
 
-    // Where the new pane goes is settled before anything moves: a destination
-    // that is somehow not in the grid must leave the view where it is rather
-    // than in a pane nothing draws.
+    // Settled before anything moves: a destination somehow not in the grid must
+    // leave the view where it is rather than in a pane nothing draws.
     size_t ci, pi;
     if (ui_locate(dst, ci, pi) == false)
         return;
@@ -3274,24 +3122,19 @@ void ui_split_into(Pane* src, size_t index, Pane* dst, SplitZone zone)
         columns = columns[0 .. at] ~ c ~ columns[at .. $];
     }
 
-    // Emptied by the move, so it goes - after the insertion, whose indices were
-    // read from the grid as it stood. Panes are named by pointer, so the new one
-    // is unaffected by the grid closing over the old.
+    // After the insertion, whose indices were read from the grid as it stood.
     if (src.views.length == 0 && ui_pane_count() > 1)
         ui_drop_pane(src);
 
     focused = p;
 }
 
-/// Take the view at `index` out of `p`, leaving the pane's front tab on whatever
-/// is nearest what it was showing: a tab taken from the left of the front one
-/// shifts it down, and taking the front one itself keeps the index, which now
-/// names its right-hand neighbour (or the new last tab, when it was the last).
+/// Take the view at `index` out of `p`, leaving the front tab on whatever is
+/// nearest what it was showing: a tab taken from the left of it shifts it down, and
+/// taking the front one keeps the index, which now names its right-hand neighbour.
 ///
-/// The pane may be left with nothing in it, which is for the caller to deal with:
-/// it has somewhere to put the view and this does not. Its front tab is left
-/// where it stood in that case, since there is no tab to put it on - anything
-/// that empties a pane either closes it or fills it again.
+/// The pane may be left with nothing in it, which is for the caller to deal with -
+/// it has somewhere to put the view and this does not.
 View* ui_take_view(Pane* p, size_t index)
 {
     View* v = p.views[index];
@@ -3334,36 +3177,31 @@ unittest
     assert(tab_reindex(1, 0, 1) == 0);
     assert(tab_reindex(2, 0, 1) == 2);
 
-    // A move that goes nowhere leaves every index alone.
     foreach (size_t i; 0 .. 4)
         assert(tab_reindex(i, 2, 2) == i);
 }
 
-/// Draw the top menubar. Each menu opens a dropdown of actions that print to
-/// stdout, mirroring the demo button. Built on ddui's native menubar, which
-/// packs the titles left-to-right and manages the dropdowns and outside-click
-/// dismissal itself.
+/// Draw the top menubar, on ddui's native one: it packs the titles left to right
+/// and handles the dropdowns and outside-click dismissal itself.
 void ui_menubar(mu_Context* ctx)
 {
     mu_begin_menubar(ctx);
 
-    // ddui derives a dropdown item's height (size.y + padding*2) and text inset
-    // (padding) from style.padding, recomputed per item. The bar title width and
-    // the dropdown's own body margin, by contrast, are baked in during
-    // mu_begin_menu. So bumping padding only around the mu_menu_item calls
-    // loosens the rows alone, leaving the titles and the popup frame untouched.
+    // ddui recomputes a dropdown item's height and text inset from style.padding per
+    // item, where the bar title width and the popup's body margin are baked in
+    // during mu_begin_menu. So bumping padding around the mu_menu_item calls alone
+    // loosens the rows and leaves the frame untouched.
     int basePadding = ctx.style.padding;
     int itemPadding = basePadding + 4;
 
     // A dropdown takes its width from style.menu_width alone, so a label and a
     // right-aligned shortcut overlap once they outgrow the stock 160px (as
-    // "Save As..." and Ctrl+Shift+S do). Measure the widest pair drawn below and
-    // give the dropdowns room for it, rather than pinning a pixel count that a
-    // change of font - or a longer shortcut - would quietly break again.
+    // "Save As..." and Ctrl+Shift+S do). Measuring the widest pair beats pinning a
+    // pixel count that a change of font would quietly break again.
     int itemWidth(const(char)* label, const(char)* shortcut)
     {
-        // One padding inset on each side, plus two more as the gap between the
-        // label and the shortcut, so they never touch.
+        // One padding inset each side, plus two more as the gap between the label
+        // and the shortcut, so they never touch.
         return ctx.text_width(ctx.style.font, label, -1) +
                ctx.text_width(ctx.style.font, shortcut, -1) + itemPadding * 4;
     }
@@ -3388,8 +3226,7 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Save As...", "Ctrl+Shift+S", 0, 0)) ui_save_as();
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Close Tab",  "Ctrl+W",       0, 0)) ui_close_current_tab();
-        // Route Quit through SDL's own event queue so main stays the single
-        // owner of the loop flag; the existing SDL_EVENT_QUIT case ends the loop.
+        // Through SDL's own queue, so main stays the single owner of the loop flag.
         if (mu_menu_item_ex(ctx, "Quit", "Ctrl+Q", 0, 0))
         {
             SDL_Event quit; // .init zeroes the union
@@ -3413,9 +3250,8 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "View"))
     {
         ctx.style.padding = itemPadding;
-        // No native checkmark on a ddui menu item, so the on/off state rides in
-        // the shortcut column instead, the one place a viewer's eye already
-        // goes looking for a chord.
+        // No native checkmark on a ddui menu item, so the on/off state rides in the
+        // shortcut column instead.
         if (mu_menu_item_ex(ctx, "Minimap", minimapOn ? "On" : "Off", 0, 0))
             minimapOn = minimapOn ? 0 : 1;
         ctx.style.padding = basePadding;

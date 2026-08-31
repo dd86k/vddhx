@@ -1,16 +1,13 @@
 /// Byte-pattern search over a document.
 ///
-/// Two halves: reading a pattern out of what the user typed, and walking a
-/// document looking for it. Both are kept clear of the editor and the UI - the
-/// document is reached through the same kind of read hook the hex panel uses -
+/// The document is reached through the same kind of read hook the hex panel uses,
 /// so the matching can be tested against a plain array.
 ///
-/// The pattern syntax is ddhx's own, read by ddhx's own parser - `utils.arguments`
-/// splits the line and resolves its quoting, `patterns.pattern` compiles the
-/// tokens - so the two spell a needle the same way and neither drifts from the
-/// other. One concession to a graphical find box: text with no prefix at all is
-/// taken literally, spaces and all, so typing `hello world` finds those eleven
-/// bytes rather than being read as two tokens with nothing to say what they are.
+/// The pattern syntax is ddhx's own, read by ddhx's own parser (`utils.arguments`
+/// splits the line, `patterns.pattern` compiles the tokens), so the two cannot
+/// drift apart. One concession to a graphical find box: text with no prefix at all
+/// is taken literally, spaces and all, so typing `hello world` finds those eleven
+/// bytes rather than two tokens with nothing to say what they are.
 ///
 ///   hello world     the bytes of the text, exactly as typed
 ///   "hello world"   the same, the quoting saying where it ends
@@ -26,7 +23,7 @@
 /// Scalars are encoded little-endian. ddhx follows a setting there; vddhx has
 /// none to follow, its inspector listing both orders as readings of their own
 /// instead, so write the bytes out with `x:` when the other order is wanted.
-/// Authors: dd
+/// Authors: dd86k <dd@dax.moe>
 module search;
 
 import std.system : Endian;
@@ -47,17 +44,16 @@ enum ushort SEARCH_RUN = PATTERN_GLOB_MANY;
 /// much as it is on the pattern itself.
 enum size_t SEARCH_MAX = 256;
 
-/// A parsed pattern. Fixed storage: the elements are copied out of what ddhx's
-/// parser hands back, so a needle held between searches is a needle that owns
-/// nothing, and the caret can walk the document without a read of the pattern
-/// behind it. Reading one does allocate, which is why the find box keeps its
-/// result rather than parsing its text every frame (see ui.ui_find_needle).
+/// A parsed pattern. Fixed storage, the elements being copied out of what ddhx's
+/// parser hands back, so a needle held between searches owns nothing. Reading one
+/// does allocate, which is why the find box keeps its result rather than parsing
+/// its text every frame (see ui.ui_find_needle).
 struct Needle
 {
     /// Elements, each a byte value, SEARCH_ANY or SEARCH_RUN.
     ushort[SEARCH_MAX] data;
-    /// How many of them are in use. Not the length of a match: a SEARCH_RUN
-    /// stands for as many bytes as it takes. See `search_least`.
+    /// How many are in use. Not the length of a match, a SEARCH_RUN standing for
+    /// as many bytes as it takes: see `search_least`.
     size_t length;
     /// ddhx's pattern flags, PATTERN_HAS_GLOB when a wildcard is among them.
     int flags;
@@ -82,11 +78,10 @@ bool search_parse(const(char)[] text, out Needle needle)
     catch (Exception)
         split = false; // an unterminated quote, or an escape that is not one
 
-    // Nothing in front to say what the text is means it is text - that is what
-    // someone typing into a find box means by it, spaces and all. Where the
-    // quoting did not come apart the argument is what says so, and a line that
-    // came to exactly one of them is taken from it, so `"hello world"` loses its
-    // quotes; where it did, the line as typed is all there is to ask.
+    // Nothing in front to say what the text is means it is text, spaces and all.
+    // A line that came to exactly one argument is taken from it, so `"hello
+    // world"` loses its quotes; where the split failed, the line as typed is all
+    // there is to ask.
     if (split == false)
     {
         // A prefix in front of a quote that has not been closed yet is a pattern
@@ -126,24 +121,14 @@ size_t search_least(ref const(Needle) needle)
     return least;
 }
 
-/// Find `needle` between `lo` and `hi` (both offsets a match may start at) and,
-/// failing that, in the rest of the document, so a search always wraps.
+/// Find `needle` from `from` - the first offset tried going forward, the last one
+/// going `backward` - and, failing that, in the rest of the document, so a search
+/// always wraps.
 ///
-/// Every offset in the range is tried, a window at a time, so a large document
-/// costs a read of itself; nothing is indexed and nothing is cached between
-/// calls. Direction decides which end of the range is answered with, and which
-/// side is searched first.
-/// Params:
-///     needle = What to look for.
-///     from = Where to start: the first offset tried going forward, the last
-///         one going backward.
-///     size = Document size in bytes.
-///     backward = Search towards the start of the document instead.
-///     length = Bytes the match came to, which is `search_least(needle)` unless
-///         a SEARCH_RUN stretched it. Zero when nothing was found.
-///     read = Byte source.
-///     user = Opaque pointer handed to `read`.
-/// Returns: Offset the match starts at, or -1 when the pattern is nowhere in it.
+/// Every offset is tried, a window at a time, so a large document costs a read of
+/// itself; nothing is indexed and nothing is cached between calls.
+/// Returns: Offset the match starts at, or -1 when the pattern is nowhere in it,
+///          with `length` the bytes it came to (0 when nothing was found).
 long search_find(ref const(Needle) needle, long from, long size, bool backward,
     out size_t length, SearchReadFn read, void* user)
 {
@@ -162,9 +147,9 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
 
     if (backward)
     {
-        // Asked to start before the document even begins - which is what the
-        // caret at offset zero comes to - there is nothing on this side of the
-        // wrap, so the whole document is searched and its last match answered.
+        // Before the document even begins - what the caret at offset zero comes
+        // to - there is nothing on this side of the wrap, so the whole document
+        // is searched and its last match answered.
         if (from < 0)
             return search_range(needle, 0, last, true, length, read, user);
 
@@ -188,30 +173,21 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
 enum size_t SEARCH_ELEMENT_MAX = 4096;
 
 /// Walk away from `from` until the `len` bytes there differ from the `len` bytes
-/// at `from`, which is how ddhx's skip-back / skip-forward cross a run of the
-/// same data (a field of zeroes, a stretch of padding, a table of identical
-/// records) in one keystroke. `len` is 1 for the byte under a bare caret, and the
-/// length of the selection when there is one.
+/// at `from`, which is how ddhx's skip-back / skip-forward cross a run of the same
+/// data in one keystroke. `len` is 1 for a bare caret and the selection's length
+/// otherwise, up to SEARCH_ELEMENT_MAX.
 ///
 /// Positions are aligned to `from`, again as ddhx aligns them: only offsets
-/// `from ± n * len` are looked at, so a run of records is walked a whole record
-/// at a time rather than sliding a window through them a byte at a time.
+/// `from ± n * len` are looked at, so a run of records is walked a record at a
+/// time rather than sliding a window through them byte by byte.
 ///
-/// Unlike a search this never wraps: a run reaching the end of the document
-/// answers with the last element that end leaves room for, since the intent was
-/// to move even when there is nothing different left - the same reading a text
-/// editor gives Ctrl+Left on a line of one repeated character.
-/// Params:
-///     from = Offset the element starts at (the low end of a selection).
-///     len = Element length in bytes, up to SEARCH_ELEMENT_MAX.
-///     size = Document size in bytes.
-///     backward = Walk towards the start of the document instead.
-///     read = Byte source.
-///     user = Opaque pointer handed to `read`.
-/// Returns: Offset the first differing element starts at, the last element the
-///     end of the document leaves room for, or -1 when there is nothing to read
-///     (an empty document, an element longer than the limit or than what is
-///     left of the document).
+/// Unlike a search this never wraps: the intent was to move even when there is
+/// nothing different left, the same reading a text editor gives Ctrl+Left on a
+/// line of one repeated character.
+/// Returns: Offset the first differing element starts at, the last element the end
+///          of the document leaves room for, or -1 when there is nothing to read
+///          (an empty document, or an element longer than the limit or than what
+///          is left of the document).
 long search_skip(long from, long len, long size, bool backward,
     SearchReadFn read, void* user)
 {
@@ -219,8 +195,8 @@ long search_skip(long from, long len, long size, bool backward,
         return -1;
 
     // The caret may sit on the append slot past the last byte, where there is no
-    // data to take a run from; the last element that fits is what a run there is
-    // made of. Same for a selection left hanging past a delete.
+    // data to take a run from, so the last element that fits is used instead.
+    // Same for a selection left hanging past a delete.
     if (from + len > size)
         from = size - len;
     if (from < 0)
@@ -272,22 +248,19 @@ long search_skip(long from, long len, long size, bool backward,
 
 private:
 
-/// Window pulled out of the document at a time. Not on the stack: the search
-/// runs on the main thread only, and 64 KiB of frame is more than some of the
-/// platforms this builds for care to give.
+/// Window pulled out of the document at a time. Not on the stack: the search runs
+/// on the main thread only, and 64 KiB of frame is more than some of the platforms
+/// this builds for care to give.
 enum size_t SEARCH_WINDOW = 64 * 1024;
 __gshared ubyte[SEARCH_WINDOW] window;
 
 /// The element a skip walks over, copied out of the document once so the windows
-/// below can be compared against it. Same reasoning as `window` for not being on
-/// the stack.
+/// can be compared against it. Off the stack for the same reason as `window`.
 __gshared ubyte[SEARCH_ELEMENT_MAX] element;
 
 /// Whether `text` opens with one of ddhx's pattern prefixes, or is a wildcard of
-/// its own - anything else being text the find box takes literally.
-///
-/// ddhx answers this, so a prefix it grows (`ascii:`, `re:`) is one the find box
-/// stops taking literally on the same day, with nothing here to keep in step.
+/// its own - anything else being text the find box takes literally. ddhx answers
+/// this, so a prefix it grows (`ascii:`, `re:`) needs nothing here to keep in step.
 bool search_prefixed(const(char)[] text)
 {
     if (text == "?" || text == "*")
@@ -306,9 +279,8 @@ bool search_puttext(ref Needle needle, const(char)[] text)
     return true;
 }
 
-/// Whether the pattern holds anything to actually match on. Wildcards alone fit
-/// at every offset in the document, which answers a search with "the next byte";
-/// that is not what was asked, so it is refused instead.
+/// Whether the pattern holds anything to actually match on. Wildcards alone fit at
+/// every offset, answering a search with "the next byte", so they are refused.
 bool search_matchable(ref const(Needle) needle)
 {
     foreach (ushort element; needle.data[0 .. needle.length])
@@ -317,9 +289,8 @@ bool search_matchable(ref const(Needle) needle)
     return false;
 }
 
-/// ddhx's view of the needle, for handing to `matchPattern`. That takes its
-/// pattern by value and only ever reads it, so the elements are lent to it out
-/// of the needle's own storage rather than copied into a new array.
+/// ddhx's view of the needle, for handing to `matchPattern`. That only ever reads
+/// its pattern, so the elements are lent out of the needle's own storage.
 Pattern search_pattern(ref const(Needle) needle)
 {
     Pattern pat;
@@ -328,7 +299,6 @@ Pattern search_pattern(ref const(Needle) needle)
     return pat;
 }
 
-/// Trim the blanks off both ends.
 const(char)[] search_strip(const(char)[] text)
 {
     size_t start;
@@ -344,11 +314,10 @@ const(char)[] search_strip(const(char)[] text)
 /// when `wantLast` is set (which is how a backward search is served: the range
 /// is still walked forwards, since a document reads one way).
 ///
-/// A SEARCH_RUN stands for a stretch of any length, so a pattern holding one is
-/// matched inside a single window: a run reaching further than SEARCH_WINDOW
-/// bytes past where its match began is not found. Nothing without a run is
-/// bounded that way - the window always reaches past the last candidate in it by
-/// the whole of a fixed-size match.
+/// A pattern holding a SEARCH_RUN is matched inside a single window, so a run
+/// reaching further than SEARCH_WINDOW bytes past where its match began is not
+/// found. Nothing without a run is bounded that way, the window always reaching
+/// past its last candidate by the whole of a fixed-size match.
 long search_range(ref const(Needle) needle, long lo, long hi, bool wantLast,
     out size_t length, SearchReadFn read, void* user)
 {
@@ -410,8 +379,7 @@ unittest
     }
     static const(ushort)[] elems(ref Needle n) { return n.data[0 .. n.length]; }
 
-    // Plain text, taken as it stands - spaces are part of it, not separators -
-    // and the same text said with a prefix, which is what ddhx would want.
+    // Plain text, spaces being part of it rather than separators.
     Needle n = parse("hi");
     assert(elems(n) == [ 'h', 'i' ]);
     n = parse("hello world");
@@ -481,8 +449,8 @@ unittest
 
 unittest
 {
-    // A whole document held in one array, read through the same hook shape the
-    // panel uses, so the search is exercised the way the application drives it.
+    // Read through the same hook shape the panel uses, so the search is exercised
+    // the way the application drives it.
     static ubyte[] data = [
         0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0xde, 0xad,
         0xbe, 0xef, 0x22, 0x33, 0xde, 0xad, 0x44, 0x55,
@@ -515,14 +483,12 @@ unittest
     assert(search_parse("0xdead", n));
     assert(search_find(n, 7, size, false, len, &reader, null) == 12);
 
-    // A one-byte wildcard.
     assert(search_parse("0xde ? 0xbe", n));
     assert(search_find(n, 0, size, false, len, &reader, null) == 0);
     assert(len == 3);
 
-    // A run, which is as short as it can be: from 0 the nearest 0xef after the
-    // 0xde at 0 is at 3, so the match is those four bytes and not the ten that
-    // reach the second one.
+    // A run is as short as it can be: from 0 the nearest 0xef is at 3, so the
+    // match is those four bytes and not the ten reaching the second one.
     assert(search_parse("0xde * 0xef", n));
     assert(search_find(n, 0, size, false, len, &reader, null) == 0);
     assert(len == 4);
@@ -547,7 +513,7 @@ unittest
 
 unittest
 {
-    // Skipping runs: a document of three runs, with singles either side of them.
+    // Three runs, with singles either side of them.
     static ubyte[] runs = [
         0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x02, 0x02, 0x02, 0xff, 0xff, 0x01,
@@ -581,11 +547,9 @@ unittest
     assert(search_skip(size, 1, size, true, &reader, null) == 14);
     assert(search_skip(0, 1, 0, false, &reader, null) == -1); // empty document
 
-    // A longer element, the shape a selection gives it. From 4 the pairs read
-    // 00 00, 00 00, 00 00, then 02 02 at 10; backwards from there the pair below
-    // is 4c 46 at 2, already different. Alignment follows the offset the walk
-    // started from, so the same walk from 3 reads its pairs on odd offsets and
-    // stops at 1 (45 4c against the 46 00 it started on).
+    // A longer element, the shape a selection gives it. Alignment follows the
+    // offset the walk started from, so the walk from 3 reads its pairs on odd
+    // offsets and stops at 1 (45 4c against the 46 00 it started on).
     assert(search_skip(4, 2, size, false, &reader, null) == 10);
     assert(search_skip(4, 2, size, true, &reader, null) == 2);
     assert(search_skip(3, 2, size, true, &reader, null) == 1);
@@ -598,8 +562,8 @@ unittest
 
 unittest
 {
-    // Across a window boundary: the document is longer than one read, and the
-    // match straddles the seam, which is what the overlap in search_range is for.
+    // A match straddling a window seam, which is what search_range's overlap is
+    // for.
     enum size_t SIZE = SEARCH_WINDOW + 1024;
     static __gshared ubyte[SIZE] big;
     enum long AT = SEARCH_WINDOW - 2; // starts inside the first window, ends past it

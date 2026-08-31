@@ -12,7 +12,7 @@
 ///     without a display. Convert the BMPs with `ffmpeg -y -i x.bmp x.png`.
 ///     Adding `--readme` runs one posed scenario instead of the regression set,
 ///     which is where assets/screenshot.png comes from.
-/// Authors: dd
+/// Authors: dd86k <dd@dax.moe>
 module screenshots;
 
 version (Screenshots):

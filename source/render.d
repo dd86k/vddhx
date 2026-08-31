@@ -1,12 +1,10 @@
 /// Glue between ddui (microui) draw commands and SDL3's 2D renderer.
 ///
-/// Text is drawn with SDL3_ttf: real system fonts, located by probing known
-/// Noto install paths, each with a Noto fallback chain for glyphs the primary
-/// face lacks. Drawing goes through the renderer text engine, which keeps its
-/// own multi-font glyph atlas, so one string can transparently pull glyphs from
-/// several faces (base + CJK + symbols). UI icons are Unicode glyphs drawn
-/// through the same path rather than a baked bitmap strip.
-/// Authors: dd
+/// Text is drawn with SDL3_ttf through the renderer text engine, whose glyph
+/// atlas spans every open face, so one string can pull glyphs from several
+/// (base + CJK + symbols). UI icons go the same way rather than through a baked
+/// bitmap strip.
+/// Authors: dd86k <dd@dax.moe>
 module render;
 
 import core.stdc.string : strlen;
@@ -23,9 +21,8 @@ private enum float FONT_SIZE = 14.0f;
 // The renderer text engine caches rasterised glyphs across every open face.
 private __gshared TTF_TextEngine* engine;
 
-// Proportional face for general UI (the default ctx.style.font) plus a
-// monospace face reserved for the hex panel component. Each carries the same
-// fallback chain so missing glyphs resolve no matter which face is selected.
+// Both carry the same fallback chain, so missing glyphs resolve whichever face
+// is selected.
 private __gshared TTF_Font* fontUI;
 private __gshared TTF_Font* fontMono;
 
@@ -33,18 +30,17 @@ private __gshared TTF_Font* fontMono;
 private __gshared TTF_Font*[8] fallbacks;
 private __gshared size_t fallbackCount;
 
-// UI icons as Unicode glyphs, drawn via the UI face and its symbol fallback.
-// Indexed by ddui's MU_ICON_* ids; index 0 is unused.
+// Drawn via the UI face and its symbol fallback. Index 0 is unused.
 private immutable(char)*[MU_ICON_MAX] iconGlyph = [
-    MU_ICON_CLOSE:     "✕", // ✕ multiplication x
-    MU_ICON_CHECK:     "✓", // ✓ check mark
-    MU_ICON_COLLAPSED: "▶", // ▶ right-pointing triangle
-    MU_ICON_EXPANDED:  "▼", // ▼ down-pointing triangle
-    MU_ICON_DROPDOWN:  "▾", // ▾ small down-pointing triangle
+    MU_ICON_CLOSE:     "✕",
+    MU_ICON_CHECK:     "✓",
+    MU_ICON_COLLAPSED: "▶",
+    MU_ICON_EXPANDED:  "▼",
+    MU_ICON_DROPDOWN:  "▾",
 ];
 
-// Known system locations for each face, tried in order. "System fonts" here
-// means probing these paths, since neither SDL nor SDL_ttf enumerates fonts.
+// Tried in order: neither SDL nor SDL_ttf enumerates fonts, so probing these
+// paths is what "system fonts" means here.
 version (Windows)
 {
     private immutable string[] uiPaths = [
@@ -101,18 +97,16 @@ bool render_init(SDL_Renderer* renderer)
     if (engine is null)
         return false;
 
-    // Honour the alpha channel of every colour ddui hands us. Without this the
-    // renderer writes fills as-is: a translucent tint (the minimap's viewport
-    // marker) comes out solid, and the fully transparent MU_COLOR_PANELBG paints
-    // an opaque black rectangle over whatever the panel sits on.
+    // Without this the renderer writes fills as-is: a translucent tint (the
+    // minimap's viewport marker) comes out solid, and the fully transparent
+    // MU_COLOR_PANELBG paints black over whatever the panel sits on.
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
     fontUI = openFirst(uiPaths);
     if (fontUI is null)
         return false;
 
-    // Missing the mono face is not fatal: fall back to the UI face so text
-    // still renders (the hex panel just will not be monospaced until installed).
+    // Missing the mono face is not fatal, the hex panel merely goes unaligned.
     fontMono = openFirst(monoPaths);
     if (fontMono is null)
         fontMono = fontUI;
@@ -218,7 +212,6 @@ void render_commands(SDL_Renderer* renderer, mu_Context* ctx)
 
 private:
 
-// Open the first face that exists from a candidate list.
 TTF_Font* openFirst(const(string)[] paths)
 {
     foreach (p; paths)
@@ -284,7 +277,6 @@ void draw_icon(int id, mu_Rect rect, mu_Color color)
 
     TTF_SetTextColor(text, color.r, color.g, color.b, color.a);
 
-    // Centre the glyph in its cell.
     int w, h;
     TTF_GetTextSize(text, &w, &h);
     int x = rect.x + (rect.w - w) / 2;

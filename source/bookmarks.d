@@ -1,24 +1,18 @@
 /// Bookmarked runs of bytes in a document.
 ///
-/// A bookmark is a run rather than a lone offset, because what is worth marking
-/// in a file is usually a field, a header or a record rather than one byte. The
-/// list is sorted by offset, and no two runs in it overlap or touch: setting one
-/// over its neighbours folds them together, so a run is always the whole of what
-/// was marked there.
-///
-/// The list is searched by halving: the hex panel asks whether a byte is
-/// bookmarked for every byte it draws, and asks bookmark_hits the same of a whole
-/// segment for every cell of the minimap, so both questions have to be cheap to
-/// answer. Nothing here knows about the UI or the editor, which keeps the list
-/// testable on its own.
-/// Authors: dd
+/// A bookmark is a run rather than a lone offset, since what is worth marking is
+/// usually a field or a record. The list is sorted by offset and no two runs in
+/// it overlap or touch, setting one over its neighbours folding them together, so
+/// every lookup here can halve the list: the hex panel asks about every byte it
+/// draws and the minimap about every cell.
+/// Authors: dd86k <dd@dax.moe>
 module bookmarks;
 
 /// One bookmarked run: `length` bytes from `at`.
 struct Bookmark
 {
-    long at;      /// First byte of the run.
-    long length;  /// How many bytes it covers, never below one.
+    long at;        /// Absolute position
+    long length;    /// Length in bytes
 }
 
 /// Whether `at` falls inside any bookmarked run.
@@ -41,10 +35,9 @@ bool bookmark_covers(const(Bookmark)[] list, long at, long length)
 
 /// Whether any byte of the run of `length` bytes from `at` is bookmarked.
 ///
-/// Where bookmark_covers asks about all of a run, this asks about any of it,
-/// which is what a minimap cell standing for a whole segment of the document
-/// needs: one marked byte anywhere in the segment has to colour it, and the
-/// sampled read the ribbon is built from would walk straight past a short mark.
+/// What a minimap cell standing for a whole segment needs: one marked byte
+/// anywhere has to colour it, and the sampled read behind the ribbon would walk
+/// straight past a short mark.
 bool bookmark_hits(const(Bookmark)[] list, long at, long length)
 {
     if (length < 1)
@@ -105,13 +98,10 @@ ptrdiff_t bookmark_step(const(Bookmark)[] list, long from, int dir)
     return cast(ptrdiff_t) list.length - 1;
 }
 
-/// Move the bookmarks past `at` along by `shift` places, and forget any left
-/// with nothing to point at. For keeping the marks on their bytes when the
-/// document grows or shrinks underneath them.
-///
-/// `shift` is how far the bytes at `at` moved: positive for an insert, negative
-/// for a removal, in which case whatever of a run sat in the removed span goes
-/// with it.
+/// Keep the marks on their bytes when the document grows or shrinks underneath
+/// them: `shift` is how far the bytes at `at` moved, positive for an insert and
+/// negative for a removal, which takes whatever of a run sat in the removed span
+/// with it. Runs left with nothing to point at are forgotten.
 void bookmark_shift(ref Bookmark[] list, long at, long shift)
 {
     if (shift == 0 || list.length == 0)
@@ -122,7 +112,7 @@ void bookmark_shift(ref Bookmark[] list, long at, long shift)
     foreach (ref const(Bookmark) b; list)
     {
         long head = b.at;
-        long tail = b.at + b.length; // one past its last byte
+        long tail = b.at + b.length;
 
         if (shift > 0)
         {
@@ -163,7 +153,7 @@ private void bookmark_add(ref Bookmark[] list, long at, long length)
 
     size_t i;
     for (; i < list.length && list[i].at + list[i].length < at; ++i)
-        kept ~= list[i]; // ends before the run starts: untouched
+        kept ~= list[i];
 
     for (; i < list.length && list[i].at <= end; ++i)
     {
@@ -249,21 +239,20 @@ unittest
     assert(bookmark_toggle(list, 0x30, 1));
     assert(list == [ Bookmark(0x10, 4), Bookmark(0x20, 1), Bookmark(0x30, 1) ]);
 
-    // Every byte of a run answers to it, and nothing past its end does.
     assert(bookmark_has(list, 0x10));
     assert(bookmark_has(list, 0x13));
     assert(bookmark_has(list, 0x14) == false);
     assert(bookmark_covers(list, 0x10, 4));
     assert(bookmark_covers(list, 0x10, 5) == false);
 
-    // Overlap, which a span only has to touch rather than fill.
-    assert(bookmark_hits(list, 0x00, 0x40));      // spans the lot
-    assert(bookmark_hits(list, 0x13, 1));         // the run's last byte
-    assert(bookmark_hits(list, 0x00, 0x11));      // ends one byte inside it
+    // A span only has to touch a run rather than fill it.
+    assert(bookmark_hits(list, 0x00, 0x40));
+    assert(bookmark_hits(list, 0x13, 1));             // the run's last byte
+    assert(bookmark_hits(list, 0x00, 0x11));          // ends one byte inside it
     assert(bookmark_hits(list, 0x14, 0x0c) == false); // the gap between two runs
     assert(bookmark_hits(list, 0x00, 0x10) == false); // stops where a run starts
-    assert(bookmark_hits(list, 0x31, 0x10) == false); // past the last one
-    assert(bookmark_hits(list, 0x10, 0) == false);    // an empty span hits nothing
+    assert(bookmark_hits(list, 0x31, 0x10) == false);
+    assert(bookmark_hits(list, 0x10, 0) == false);
     assert(bookmark_hits(null, 0, long.max) == false);
 
     // Setting the same run again clears it.
@@ -275,8 +264,8 @@ unittest
     assert(bookmark_toggle(list, 0x12, 2) == false);
     assert(list == [ Bookmark(0x10, 2), Bookmark(0x14, 4) ]);
 
-    // A run overlapping others swallows them, and one that only meets a
-    // neighbour end to end still folds in: a marked span is one run.
+    // A run swallows the ones it overlaps, and folds in a neighbour it only meets
+    // end to end.
     list = [ Bookmark(0x10, 2), Bookmark(0x14, 4) ];
     assert(bookmark_toggle(list, 0x11, 4));
     assert(list == [ Bookmark(0x10, 8) ]);
@@ -294,7 +283,7 @@ unittest
     assert(bookmark_step(list, 0x10, -1) == 1); // wrapped
     assert(bookmark_step(null, 0, 1) == -1);
 
-    // Edits move the runs after them; an insert of four bytes at 0x20...
+    // An insert moves the runs after it...
     list = [ Bookmark(0x10, 1), Bookmark(0x30, 1), Bookmark(0x40, 1) ];
     bookmark_shift(list, 0x20, 4);
     assert(list == [ Bookmark(0x10, 1), Bookmark(0x34, 1), Bookmark(0x44, 1) ]);

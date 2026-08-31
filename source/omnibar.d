@@ -12,31 +12,25 @@
 ///   @          the document's bookmarks
 ///   ?          the shortcut sheet, there to be read rather than run
 ///
-/// A mode whose answer is computed rather than picked - ':' is the first of them
-/// - hands in a single pinned row instead of a list: the query never filters it
-/// out, so the caller can keep rewriting it into a live preview of what taking
-/// it would do.
+/// A mode whose answer is computed rather than picked hands in a single pinned
+/// row instead of a list: the query never filters it out, so the caller can keep
+/// rewriting it into a live preview of what taking it would do.
 ///
-/// The widget owns the box, the matching and the selection. The caller owns the
-/// rows: it asks omni_mode what the box is currently after and rebuilds the
-/// candidate list for that mode each frame, which keeps every mode's contents -
-/// and what accepting one means - on its side of the fence.
-///
-/// The rows handed in are matched against the query as it stood at the start of
-/// the frame, since the box only reads this frame's keystrokes when it draws.
-/// That leaves the list one frame behind the text, which at a vsynced 60 Hz is
-/// not something a typist can see.
-/// Authors: dd
+/// The widget owns the box, the matching and the selection; the caller owns the
+/// rows, asking omni_mode what the box is after and rebuilding the candidates for
+/// that mode each frame. Those rows are matched against the query as it stood at
+/// the start of the frame, since the box only reads this frame's keystrokes when
+/// it draws, leaving the list one frame behind the text.
+/// Authors: dd86k <dd@dax.moe>
 module omnibar;
 
 import ddui;
 import uitext : ui_elide;
 
-/// Extra ddui key bits for the omnibar's list. ddui's own MU_KEY_* flags stop at
-/// (1 << 14) and the hex panel's carry on to (1 << 17), so these sit above both:
-/// the panel and the omnibar never take keys in the same frame, but keeping them
-/// distinct means one main-loop mapping mistake cannot silently mean something
-/// else in the other widget. main.d maps the arrow keys onto them.
+/// Extra ddui key bits for the omnibar's list, which main.d maps the arrows onto.
+/// ddui's own MU_KEY_* stop at (1 << 14) and the hex panel's carry on to
+/// (1 << 17), so these sit above both: the two never take keys in the same frame,
+/// but distinct bits mean a mapping mistake cannot quietly mean something else.
 enum
 {
     OMNI_KEY_UP   = (1 << 18),
@@ -85,27 +79,20 @@ struct OmniItem
     /// Also matched against the query, though it ranks below a label match.
     string detail;
     /// Extra terms the row answers to, matched but never drawn: the words a user
-    /// reaches for that are not what the row happens to be called ("diff" for a
-    /// row labelled "Compare With..."). Space-separated by convention, though the
-    /// matcher does not care - it is one more string to score against.
+    /// reaches for that are not what the row is called ("diff" for a row labelled
+    /// "Compare With..."). Ranked with the detail column, below a label match, so
+    /// an alias only decides between rows that would otherwise not be there at all.
     ///
-    /// Ranked with the detail column, below a label match, so a row named for what
-    /// was typed always comes first and an alias only decides between rows that
-    /// would otherwise not be there at all.
-    ///
-    /// Kept apart from the label rather than folded into it so the two can differ
-    /// in kind: the label is what this build shows the user, these are the terms
-    /// it answers to. A translated list would keep its English aliases here, and
-    /// go on answering to them alongside the translated names.
+    /// Kept apart from the label so the two can differ in kind: a translated list
+    /// would keep its English aliases here and go on answering to them.
     string keywords;
     /// Handed back to the caller when the row is accepted; its meaning is the
     /// caller's (a tab index, a command code). -1 for a row that does nothing.
     int id = -1;
     /// Draw the unsaved-changes dot, as the tab strip does.
     bool marked;
-    /// A row the query never filters out, sorted above the rest. For a mode whose
-    /// answer is computed from the query rather than picked out of a list: the
-    /// caller rewrites the label each frame and the box just shows it.
+    /// A row the query never filters out, sorted above the rest, for a mode whose
+    /// answer is computed rather than picked.
     bool pinned;
 }
 
@@ -121,12 +108,12 @@ struct Omnibar
 
     private:
 
-    // Whether the box is up. The container's open flag follows this every frame.
+    // The container's open flag follows this every frame.
     bool shown;
     // Set the frame the box is raised, so it takes the keyboard without a click.
     bool focusWanted;
-    // The query, NUL-terminated, prefix character and all. ddui's textbox owns
-    // the editing; this is just where it keeps the text.
+    // The query, NUL-terminated, prefix character and all. ddui's textbox owns the
+    // editing; this is where it keeps the text.
     char[TEXT_MAX] text = 0;
     // Highlighted row, and the first row on screen when the list overflows.
     int selected;
@@ -177,13 +164,13 @@ OmniMode omni_mode(ref const(Omnibar) o)
     return omni_prefix_mode(o.text[0]);
 }
 
-/// The text being searched for: everything past the mode's prefix character,
-/// with the blanks after it dropped so ": 20" finds what ":20" does.
+/// The text being searched for: everything past the mode's prefix character, with
+/// the blanks after it dropped so ": 20" finds what ":20" does.
 ///
-/// The box does its own matching, so a list mode has no reason to read this; it
-/// is here for the modes that compute their row from the query - and for acting
-/// on one once it is taken. The slice is into the box's own buffer, so it is
-/// good until the next keystroke reaches it.
+/// For the modes that compute their row from the query, and for acting on a row
+/// once it is taken; the box does its own matching, so a list mode has no reason
+/// to read this. The slice is into the box's own buffer, good until the next
+/// keystroke reaches it.
 const(char)[] omni_query(ref const(Omnibar) o)
 {
     size_t at = omni_prefix_mode(o.text[0]) == OmniMode.switcher ? 0 : 1;
@@ -198,25 +185,18 @@ const(char)[] omni_query(ref const(Omnibar) o)
 /// Draw the box and drive it. Call once per frame from the frame builder, after
 /// the main window is ended, so it lands as its own root container on top.
 ///
-/// The rows are matched against the query, ranked, and the best ones drawn under
-/// the box; the selection is held inside the list as it grows and shrinks. Only
-/// one row can be taken per frame, so a single action comes back.
-/// Params:
-///     ctx = ddui context.
-///     o = Box state, persisted across frames by the caller.
-///     items = Candidate rows for the mode omni_mode reports, in natural order.
-///     width = Current window width in pixels.
-///     height = Current window height in pixels.
-///     chosen = Set to the accepted row's id, else -1.
-/// Returns: What the user did this frame.
+/// `items` are the candidate rows for the mode omni_mode reports, in natural
+/// order; they are matched against the query, ranked, and the best drawn under the
+/// box, the selection holding inside the list as it grows and shrinks.
+/// Returns: What the user did this frame - only one row can be taken per frame -
+///          with `chosen` the accepted row's id, else -1.
 OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     int width, int height, out int chosen)
 {
     chosen = -1;
 
     // The container outlives a hidden box, so its open flag is what decides
-    // whether ddui draws it; keep that in step with `shown` every frame rather
-    // than only when something toggles.
+    // whether ddui draws it: keep the two in step every frame.
     mu_Container* cnt = mu_get_container(ctx, TITLE);
     cnt.open = o.shown;
     if (o.shown == false)
@@ -230,9 +210,8 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     int th   = ctx.text_height(font);
     int boxH = th + BOX_PAD * 2;
     int rowH = th + ROW_PAD * 2;
-    // With nothing matched the list keeps one row's worth of room, for the notice
-    // that goes there: an empty box collapsing to the input alone reads as if the
-    // omnibar had broken rather than as an answer.
+    // With nothing matched the list keeps one row's room for the notice: a box
+    // collapsing to the input alone reads as broken rather than as an answer.
     int visible = count ? mu_min(count, o.maxRows) : 1;
 
     int w = mu_clamp(width - MARGIN * 2, MIN_WIDTH, o.width);
@@ -250,10 +229,9 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
 
     static immutable int[1] full = [ -1 ];
 
-    // The query box. Its id is taken by hand rather than through mu_textbox so
-    // focus can be handed to it the frame the omnibar opens - before
-    // mu_update_control, which is what reports the focus as still live and keeps
-    // ddui from dropping it at frame end.
+    // The query box's id is taken by hand rather than through mu_textbox so focus
+    // can be handed to it the frame the omnibar opens - before mu_update_control,
+    // which is what keeps ddui from dropping that focus at frame end.
     mu_layout_row(ctx, 1, full.ptr, boxH);
     mu_Rect box = mu_layout_next(ctx);
     mu_Id qid = mu_get_id(ctx, QUERY.ptr, cast(int) QUERY.length);
@@ -265,13 +243,12 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     int res = mu_textbox_raw(ctx, o.text.ptr, cast(int) o.text.length, qid, box, 0);
     if (res & MU_RES_CHANGE)
     {
-        // The text moved, so next frame's list is a different list: put the
-        // highlight back on its best row rather than on whatever index it held.
+        // Next frame's list is a different list, so put the highlight back on its
+        // best row rather than on whatever index it held.
         o.selected = 0;
         o.scroll   = 0;
     }
 
-    // What the box is for, spelled out until there is something in it.
     if (o.text[0] == 0)
         mu_draw_text(ctx, font, HINT,
             mu_Vec2(box.x + pad + HINT_INSET, box.y + (box.h - th) / 2), OMNI_HINT);
@@ -309,9 +286,7 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
         int i = o.scroll + k;
         mu_Rect r = mu_Rect(list.x, list.y + k * rowH, list.w, rowH);
 
-        // A row is a control only so it can be hovered and clicked; taking focus
-        // off the query box is what a click on one does anyway, since it settles
-        // the box in the same breath.
+        // A row is a control only so it can be hovered and clicked.
         mu_Id rid = mu_get_id(ctx, &i, i.sizeof);
         mu_update_control(ctx, rid, r, 0);
         if (ctx.mouse_pressed == MU_MOUSE_LEFT && ctx.focus == rid)
@@ -332,9 +307,9 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
         omni_row(ctx, rows[i], r);
     }
 
-    // Anything that takes focus from the query box - a click on the grid behind,
-    // a menu - means the user is done with the omnibar, the way every quick-open
-    // box behaves. Enter clears the focus itself, so that route is settled above.
+    // Anything that takes focus from the query box - a click on the grid behind, a
+    // menu - means the user is done with the omnibar. Enter clears the focus
+    // itself, so that route is settled above.
     if (action == OmniAction.none && ctx.focus != qid)
         action = OmniAction.dismiss;
 
@@ -365,8 +340,7 @@ enum string EMPTY = "no matches";
 /// Query buffer size. Long enough for any path a switcher search would spell out.
 enum size_t TEXT_MAX = 192;
 
-// Colours. The window frame itself is ddui's own, so the box reads as raised
-// above the application's darker chrome, and these dress what sits inside it.
+// The window frame itself is ddui's own; these dress what sits inside it.
 enum mu_Color OMNI_LIST      = mu_Color( 30,  30,  38, 255); // bed behind the rows
 enum mu_Color OMNI_ROW_SEL   = mu_Color( 52,  72, 110, 255);
 enum mu_Color OMNI_ROW_HOVER = mu_Color( 62,  62,  74, 255);
@@ -424,9 +398,8 @@ const(OmniItem)[] omni_filter(ref Omnibar o, const(OmniItem)[] items)
             score = omni_score(it.label, query);
             // A hit in the detail column counts too - typing a directory should
             // find the file under it - but at half weight, so a name match
-            // outranks it. The row's unshown aliases are weighed the same way and
-            // for the same reason: they are there to find a row that its own name
-            // would have hidden, not to reorder the rows that name already found.
+            // outranks it. Aliases are weighed the same way, being there to find a
+            // row its own name would have hidden, not to reorder the ones it found.
             int alt = omni_score(it.detail, query);
             if (alt > 0 && alt / 2 > score)
                 score = alt / 2;
@@ -453,14 +426,12 @@ const(OmniItem)[] omni_filter(ref Omnibar o, const(OmniItem)[] items)
 }
 
 /// Score `text` against `query`: how well the query's characters, in that order
-/// but not necessarily together, pick their way through the text. Higher is a
-/// better match; -1 means the characters are not all there, in which case the
-/// row drops out of the list. An empty query matches everything, flatly.
+/// but not necessarily together, pick their way through the text. Higher is
+/// better; -1 drops the row, and an empty query matches everything flatly.
 ///
-/// Runs of adjacent characters and matches landing at the start of a word count
-/// for most, which is what makes "sa" find "Save As..." ahead of "Close Tab".
-/// Case folding is ASCII-only: this ranks file names and command labels, and a
-/// full Unicode fold would buy nothing a hex editor's user would notice.
+/// Runs of adjacent characters and matches at the start of a word count for most,
+/// which is what makes "sa" find "Save As..." ahead of "Close Tab". Case folding
+/// is ASCII-only, this ranking file names and command labels.
 int omni_score(const(char)[] text, const(char)[] query)
 {
     if (query.length == 0)
@@ -543,7 +514,6 @@ unittest
         o.text[q.length] = 0;
     }
 
-    // The word the row is not called finds it, and nothing else.
     type("diff");
     const(OmniItem)[] got = omni_filter(o, rows);
     assert(got.length == 1);
@@ -555,9 +525,8 @@ unittest
     assert(got.length == 1);
     assert(got[0].id == 3);
 
-    // A row named for the query wins over one that only answers to it as an alias,
-    // which is what keeps the aliases from reordering the obvious answers: "Search
-    // Marks" is called that, "Find..." merely answers to "search".
+    // A row named for the query wins over one that only answers to it as an alias:
+    // "Search Marks" is called that, "Find..." merely answers to "search".
     type("search");
     got = omni_filter(o, rows);
     assert(got.length == 2);
@@ -587,7 +556,7 @@ void omni_row(mu_Context* ctx, ref const(OmniItem) it, mu_Rect r)
     int y  = r.y + (r.h - th) / 2;
     int right = r.x + r.w - ROW_INSET;
 
-    // The detail is the first to give way: it is context, and a long path would
+    // The detail is the first to give way, being context: a long path would
     // otherwise crowd out the name the user is actually reading.
     char[256] dscratch = void;
     string detail = ui_elide(ctx, it.detail, r.w / DETAIL_SHARE, dscratch);

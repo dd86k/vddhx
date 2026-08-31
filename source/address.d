@@ -1,9 +1,6 @@
 /// Reading document offsets the way ddhx's front-end reads them.
 ///
-/// The omnibar's ':' mode takes the expressions ddhx's `goto` command takes, so
-/// a position written one way in the terminal front-end means the same thing
-/// here: a plain number in whatever base its prefix says, a signed step from the
-/// caret, or a percentage of the document.
+/// The omnibar's ':' mode takes the expressions ddhx's `goto` command takes:
 ///
 ///   1234        decimal, the default base
 ///   0x1f40      hexadecimal
@@ -12,10 +9,9 @@
 ///   +16 / -16   forward or back from where the caret is
 ///   %50         half way into the document, fractions allowed
 ///
-/// Nothing here throws. The omnibar reads what is in its box on every frame it
-/// draws, so a half-typed offset is the ordinary state rather than an error, and
-/// paying for an exception object sixty times a second to say so would be silly.
-/// Authors: dd
+/// Nothing here throws: the omnibar reparses its box every frame, so a half-typed
+/// offset is the ordinary state rather than an error.
+/// Authors: dd86k <dd@dax.moe>
 module address;
 
 /// How an offset was written down.
@@ -29,24 +25,20 @@ enum AddressKind
 /// A parsed offset.
 struct Address
 {
-    /// Whether the text spells out an offset at all. Everything below is only
-    /// meaningful when this is true.
+    /// Whether the text spells out an offset at all; the rest only means
+    /// something when this is true.
     bool ok;
-    /// The offset landed outside the document and was pulled back to its edge.
-    /// Worth saying out loud: "%150" and "+999999" are answered, not refused.
+    /// The offset landed outside the document and was pulled back to its edge:
+    /// "%150" and "+999999" are answered, not refused.
     bool clamped;
-    /// How it was written.
     AddressKind kind;
-    /// Where it resolves to, held within [0, size]. The end itself is a valid
-    /// caret: it is the append slot one past the last byte.
+    /// Where it resolves to, held within [0, size]. The end is a valid caret, it
+    /// being the append slot one past the last byte.
     long pos;
 }
 
-/// Read an offset expression and resolve it against a document.
-/// Params:
-///     text = What the user typed, blanks and all.
-///     caret = Where the caret is, for the relative forms.
-///     size = Document size in bytes, for the percentage form and the clamp.
+/// Read an offset expression and resolve it against a document of `size` bytes,
+/// `caret` serving the relative forms.
 /// Returns: The offset, or a result with `ok` clear when the text is not one.
 Address address_parse(const(char)[] text, long caret, long size)
 {
@@ -100,15 +92,15 @@ Address address_parse(const(char)[] text, long caret, long size)
 
 unittest
 {
-    // Bases. Decimal is the default, the way ddhx's own scanner has it, so "10"
-    // is ten and not sixteen however much a hex editor might suggest otherwise.
+    // Decimal is the default, the way ddhx's own scanner has it, so "10" is ten
+    // and not sixteen however much a hex editor might suggest otherwise.
     assert(address_parse("10",     0, 4096).pos == 10);
     assert(address_parse("0x10",   0, 4096).pos == 0x10);
     assert(address_parse("0X1f40", 0, 65536).pos == 0x1f40);
     assert(address_parse("0b1011", 0, 4096).pos == 0b1011);
     assert(address_parse("0755",   0, 4096).pos == 493); // octal from the lead zero
     assert(address_parse("07",     0, 4096).pos == 7);   // too short to be octal: same either way
-    assert(address_parse("  32  ", 0, 4096).pos == 32);  // blanks around it are nothing
+    assert(address_parse("  32  ", 0, 4096).pos == 32);
 
     assert(address_parse("0x10", 0, 4096).kind == AddressKind.absolute);
     assert(address_parse("0x10", 0, 4096).ok);
@@ -168,8 +160,8 @@ const(char)[] address_strip(const(char)[] text)
 }
 
 /// Read a whole number in the base its prefix names: 0x hex, 0b binary, a lead
-/// zero octal, otherwise decimal. Returns false for anything else, a number too
-/// large to be a document offset included - it is refused rather than wrapped.
+/// zero octal, otherwise decimal. A number too large for an offset is refused
+/// rather than wrapped.
 bool address_number(const(char)[] text, out long value)
 {
     text = address_strip(text);
@@ -240,8 +232,7 @@ bool address_percent(const(char)[] text, out double per)
     return true;
 }
 
-/// A hex digit's value, or -1. Bases below 16 are caught by the caller, which
-/// knows its radix.
+/// A hex digit's value, or -1. Narrower bases are the caller's to range-check.
 int address_digit(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -251,7 +242,7 @@ int address_digit(char c)
 }
 
 /// Add, saturating rather than wrapping: an absurd step lands on the end of the
-/// range and is clamped into the document from there.
+/// range, to be clamped into the document from there.
 long address_add(long a, long b)
 {
     if (b > 0 && a > long.max - b)
