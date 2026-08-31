@@ -657,6 +657,24 @@ unittest
     assert(buf[0 .. 4] == "0000"); // too narrow: only the low nibbles survive
 }
 
+// Whether `chars` glyphs starting at `x` end before `endX`. Text is clipped by
+// the pixel, so a label straddling a pane's edge comes out as half a glyph, which
+// reads as a digit rather than as nothing; a narrow pane stops on the last whole
+// one instead. Rects (washes, the caret) are left to the clip rect, having no
+// half-legible state to fall into.
+bool hex_fits(int x, int chars, int charW, int endX)
+{
+    return x + chars * charW <= endX;
+}
+
+unittest
+{
+    assert(hex_fits(0, 2, 8, 16));       // exactly reaches the edge
+    assert(hex_fits(0, 2, 8, 15) == false);
+    assert(hex_fits(100, 5, 8, 200));
+    assert(hex_fits(180, 5, 8, 200) == false); // straddles it
+}
+
 // Fixed column titles: the offset heading and the 00..0F byte-lane numbers,
 // drawn dim so they read as chrome rather than data.
 void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
@@ -676,21 +694,79 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     mu_Color dim = mu_Color(140, 140, 150, 255);
     int charW = lay.charW;
 
-    mu_draw_text(ctx, font, "offset", 6, mu_Vec2(r.x, r.y), dim);
+    int endX = r.x + r.w;
+    if (hex_fits(r.x, 6, charW, endX))
+        mu_draw_text(ctx, font, "offset", 6, mu_Vec2(r.x, r.y), dim);
 
     int cols = v.columns > 0 ? v.columns : 16;
     char[2] cell = void;
     for (int i; i < cols; ++i)
     {
-        hex_format(cell.ptr, i & 0xff, 2);
         int x = r.x + hex_col_for(lay, i) * charW;
+        if (hex_fits(x, 2, charW, endX) == false)
+            break; // columns only go rightwards
+        hex_format(cell.ptr, i & 0xff, 2);
         mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(x, r.y), dim);
     }
 
     int ax = r.x + lay.asciiStart * charW;
-    mu_draw_text(ctx, font, "ascii", 5, mu_Vec2(ax, r.y), dim);
+    if (hex_fits(ax, 5, charW, endX))
+        mu_draw_text(ctx, font, "ascii", 5, mu_Vec2(ax, r.y), dim);
 
     mu_pop_clip_rect(ctx);
+}
+
+unittest
+{
+    // Drive real frames at widths that cut the grid mid-column and check every
+    // text command the header and the rows emit: none may cross the pane's edge,
+    // where the clip rect would halve a glyph.
+    enum int CW = 8;
+    static extern (C) int width(mu_Font f, const(char)* s, int len)
+    {
+        import core.stdc.string : strlen;
+        return (len < 0 ? cast(int) strlen(s) : len) * CW;
+    }
+    static extern (C) int height(mu_Font f) { return 16; }
+
+    static mu_Context ctx;
+    mu_init(&ctx);
+    ctx.text_width   = &width;
+    ctx.text_height  = &height;
+    ctx.style.padding = 0;
+    ctx.style.spacing = 0;
+
+    HexView v;
+    v.data    = cast(const(ubyte)[]) "0123456789abcdef0123456789abcdef";
+    v.columns = 16;
+    HexLayout lay = hex_layout(8, 16, CW);
+
+    foreach (int paneW; [180, 260, 337, 400, 512, 640])
+        foreach (bool rows; [false, true])
+        {
+            mu_begin(&ctx);
+            if (mu_begin_window_ex(&ctx, "w", mu_Rect(0, 0, paneW, 400),
+                    MU_OPT_NOTITLE | MU_OPT_NORESIZE | MU_OPT_NOSCROLL | MU_OPT_NOFRAME))
+            {
+                if (rows)
+                    hex_paint(&ctx, v, lay, mu_Rect(0, 20, paneW, 200), 0, 16, 16, null);
+                else
+                    hex_header(&ctx, v, lay, 16, null);
+                mu_end_window(&ctx);
+            }
+            mu_end(&ctx);
+
+            int drawn;
+            mu_Command* cmd;
+            while (mu_get_next_command(&ctx, &cmd))
+            {
+                if (cmd.type != MU_COMMAND_TEXT)
+                    continue;
+                ++drawn;
+                assert(cmd.text.pos.x + width(null, mu_command_text(&ctx, cmd), -1) <= paneW);
+            }
+            assert(drawn > 0); // or the check above passes by drawing nothing
+        }
 }
 
 // Map a mouse position (screen space) to a byte index, or -1 if it misses a
@@ -1347,8 +1423,8 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     for (long row = firstRow; row <= lastRow; ++row)
     {
         int y = body.y + cast(int)((row - topRow) * rowH);
-        hex_draw_row(ctx, v, lay, colorFn, v.backFn, body.x, y, row, cols, rowH,
-            charW, selLow, selHigh, font);
+        hex_draw_row(ctx, v, lay, colorFn, v.backFn, body.x, body.x + body.w, y,
+            row, cols, rowH, charW, selLow, selHigh, font);
     }
 
     // The caret parked one slot past the last byte sits in no row's byte range, so
@@ -1366,8 +1442,8 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
 }
 
 void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
-    HexColorFn colorFn, HexBackFn backFn, int originX, int y, long row, int cols,
-    int rowH, int charW, size_t selLow, size_t selHigh, mu_Font font)
+    HexColorFn colorFn, HexBackFn backFn, int originX, int endX, int y, long row,
+    int cols, int rowH, int charW, size_t selLow, size_t selHigh, mu_Font font)
 {
     size_t total = hex_total(v);
     size_t rowStart = cast(size_t)(row * cols);
@@ -1378,7 +1454,8 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     char[24] off = void;
     int digits = lay.offsetDigits > off.length ? cast(int) off.length : lay.offsetDigits;
     hex_format(off.ptr, cast(ulong)(v.baseAddress + row * cols), digits);
-    mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, y), offColor);
+    if (hex_fits(originX, digits, charW, endX))
+        mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, y), offColor);
 
     // Backgrounds under the glyphs, in rendering priority: the hook's wash, the
     // selection over it, the wash's own outline over that.
@@ -1412,13 +1489,17 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
         ubyte b = hex_byte(v, idx);
         mu_Color color = colorFn(idx, b, cast(void*) v.colorUser);
 
-        hex_format(cell.ptr, b, 2);
         int hx = originX + hex_col_for(lay, i) * charW;
-        mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(hx, y), color);
+        if (hex_fits(hx, 2, charW, endX))
+        {
+            hex_format(cell.ptr, b, 2);
+            mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(hx, y), color);
+        }
 
         ch[0] = (b >= 0x20 && b < 0x7f) ? cast(char) b : '.';
         int ax = originX + (lay.asciiStart + i) * charW;
-        mu_draw_text(ctx, font, ch.ptr, 1, mu_Vec2(ax, y), color);
+        if (hex_fits(ax, 1, charW, endX))
+            mu_draw_text(ctx, font, ch.ptr, 1, mu_Vec2(ax, y), color);
     }
 
     if (v.active && v.cursor >= rowStart && v.cursor < rowStart + count)
