@@ -1120,8 +1120,8 @@ mu_Color hex_map_wash(ref const(HexView) v, long index, int cells, long total)
 {
     long start = index * total / cells;
     long end   = (index + 1) * total / cells;
-    if (end <= start)
-        return mu_Color(0, 0, 0, 0);
+    if (end <= start) // ditto hex_build_minimap: the cell stands on `start`
+        end = start + 1;
 
     size_t selLow  = hex_sel_low(v);
     size_t selHigh = hex_sel_high(v);
@@ -1133,6 +1133,31 @@ mu_Color hex_map_wash(ref const(HexView) v, long index, int cells, long total)
 
     mu_Color wash = v.backSpanFn(start, end - start, cast(void*) v.backUser);
     return wash.a ? hex_wash_lift(wash) : wash;
+}
+
+unittest
+{
+    enum int CELLS = 176;
+
+    HexView v;
+    v.data   = cast(const(ubyte)[]) "0123456789abcdef\x00\x01";
+    v.active = true;
+    v.anchor = 0;
+    v.cursor = 1; // a two-byte selection at the head
+    long total = cast(long) v.data.length;
+
+    // One run, not one washed cell per selected byte with backdrop between them.
+    int runs;
+    bool prev;
+    foreach (int c; 0 .. CELLS)
+    {
+        bool washed = hex_map_wash(v, c, CELLS, total).a != 0;
+        if (washed && prev == false)
+            ++runs;
+        prev = washed;
+    }
+    assert(runs == 1);
+    assert(hex_map_wash(v, 0, CELLS, total).a != 0);
 }
 
 // The plain scroll strip shown when the minimap is off: a track with a thumb sized
@@ -1189,16 +1214,34 @@ void hex_build_minimap(ref HexView v, int cells)
     {
         long start = c * len / cells;
         long end   = (c + 1) * len / cells;
-        long span  = end - start;
-        if (span <= 0)
-        {
-            v.mapCells[c] = mu_Color(0, 0, 0, 0);
-            continue;
-        }
+        // A document shorter than the ribbon has cells gives most of them an empty
+        // span. Each still stands on the byte at `start`, so a small file draws as
+        // bands; an uncoloured cell would show the backdrop and stripe the ribbon.
+        long span = end > start ? end - start : 1;
         size_t take = span < MINIMAP_PROBE ? cast(size_t) span : MINIMAP_PROBE;
         ubyte[] chunk = hex_probe(v, start, v.mapProbe[0 .. take]);
         v.mapCells[c] = hex_dominant(v, chunk, start);
     }
+}
+
+unittest
+{
+    enum int CELLS = 176; // a 600px window's worth, where the striping showed
+
+    HexView v;
+    v.data = cast(const(ubyte)[]) "0123456789abcdef\x00\x01";
+    hex_build_minimap(v, CELLS);
+
+    // Every cell takes a colour even though there are ten times as many cells as
+    // bytes: an uncoloured one lets the backdrop through and stripes the ribbon.
+    assert(v.mapCells.length == CELLS);
+    foreach (mu_Color c; v.mapCells)
+        assert(c.a != 0);
+
+    // And they still walk the document in order, ends included.
+    assert(hex_coleq(v.mapCells[0], hex_dominant(v, v.data[0 .. 1], 0)));
+    assert(hex_coleq(v.mapCells[CELLS - 1],
+        hex_dominant(v, v.data[$ - 1 .. $], cast(long) v.data.length - 1)));
 }
 
 // Read up to buf.length bytes at document offset `pos`, from the editor window
