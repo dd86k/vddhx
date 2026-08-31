@@ -2698,7 +2698,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         char[64] cmpbuf = void;
         const(char)[] cmp = other ?
             sformat(cmpbuf, "  vs %s", ui_clip(other.doc.title, 48)) : "";
-        char[] status = sformat(statusbuf, "%s%s  offset %08X  selected %u byte(s)%s",
+        char[] status = sformat(statusbuf, "%s%s  offset %08x  selected %u byte(s)%s",
             mode, dirty, view.hex.cursor, selLen, cmp);
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
