@@ -9,7 +9,9 @@
 ///     calls this live when Ctrl+Shift+F12 is pressed.
 ///   - screenshot_run: a headless, scripted driver (offscreen SDL) that renders
 ///     canned UI states and captures each, so visual regressions can be checked
-///     without a display. Convert the BMPs with `ffmpeg -y -i x.bmp x.png`.
+///     without a display. It writes its own input files (see Fixtures), so a run
+///     needs nothing but the executable. Convert the BMPs with
+///     `ffmpeg -y -i x.bmp x.png`.
 ///     Adding `--readme` runs one posed scenario instead of the regression set,
 ///     which is where assets/screenshot.png comes from.
 /// Authors: dd86k <dd@dax.moe>
@@ -54,6 +56,59 @@ bool screenshot_save(SDL_Renderer* renderer, const(char)* path)
         return false;
     scope(exit) SDL_DestroySurface(surface);
     return SDL_SaveBMP(surface, path);
+}
+
+/// Paths to the scenarios' input files: `mid` is the multi-screen document most
+/// of them work on, `other` a second name for tabs and panes to show, and
+/// `diffB` is `diffA` with bytes overwritten and a tail added.
+private struct Fixtures
+{
+    string mid, other, diffA, diffB;
+}
+
+/// Write the scenarios' input files and return their paths.
+///
+/// Made on the fly rather than committed so a run needs nothing but the
+/// executable, and seeded rather than truly random so two runs produce the same
+/// pixels - the whole point of the set is comparing one run against the last.
+private Fixtures screenshot_fixtures()
+{
+    import std.file : mkdirRecurse, tempDir, write;
+    import std.path : buildPath;
+    import std.random : Xorshift, uniform;
+
+    string dir = buildPath(tempDir, "vddhx-shots");
+    mkdirRecurse(dir);
+
+    Xorshift rnd = Xorshift(0x5eed);
+    ubyte[] noise(size_t n)
+    {
+        ubyte[] bytes = new ubyte[n];
+        foreach (ref ubyte b; bytes)
+            b = cast(ubyte) uniform(0, 256, rnd);
+        return bytes;
+    }
+
+    Fixtures f;
+    f.mid   = buildPath(dir, "mid.bin");
+    f.other = buildPath(dir, "other.bin");
+    f.diffA = buildPath(dir, "diff-a.bin");
+    f.diffB = buildPath(dir, "diff-b.bin");
+
+    // 0x1000 so the goto, find and scroll scenarios have somewhere to go: the
+    // window holds about 0x210 bytes, so %50 and Ctrl+End are real jumps and a
+    // find started at the end has to wrap to reach a needle written at the top.
+    write(f.mid, noise(0x1000));
+    write(f.other, noise(0x200));
+
+    ubyte[] a = noise(0x800);
+    ubyte[] b = a.dup;
+    // Differences inside the first screenful, or diff.bmp is a wall of agreement.
+    foreach (size_t at; [0x08, 0x09, 0x31, 0x32, 0x33, 0xa0, 0x155, 0x1f0, 0x1f1])
+        b[at] = cast(ubyte) ~b[at];
+    write(f.diffA, a);
+    write(f.diffB, b ~ noise(0x400)); // the tail diffA does not have
+    return f;
 }
 
 /// Run both sets, one child process each. They cannot share a process: the two
@@ -148,7 +203,12 @@ int screenshot_run(string[] args)
             if (cmd.type == MU_COMMAND_TEXT &&
                 strncmp(mu_command_text(&ctx, cmd), label, cast(int) strlen(label)) == 0)
                 return cmd.text.pos;
-        return mu_Vec2(-1, -1);
+
+        // Not (-1, -1): every caller adds 3 to it and clicks, and (2, 2) is the
+        // File menubar, so a miss left a dropdown over every shot after it.
+        import std.conv : text;
+        import std.string : fromStringz;
+        throw new Exception(text("no drawn label matching \"", label.fromStringz, '"'));
     }
 
     // Two move frames: hover_root lags input by a frame, so the control under
@@ -214,8 +274,10 @@ int screenshot_run(string[] args)
         return 0;
     }
 
+    Fixtures fix = screenshot_fixtures();
+
     // Scenario 0 (debug): open a multi-row file so offsets past 0x0F appear.
-    ui_open("/tmp/mid.bin");
+    ui_open(fix.mid);
     frame();
     shot("rows.bmp");
 
@@ -330,7 +392,7 @@ int screenshot_run(string[] args)
     // scenarios above earned it, the scratch buffer in front.
     mu_Vec2 close = find("Close");
     click(close.x + 3, close.y + 3);
-    ui_open("/tmp/other.bin");
+    ui_open(fix.other);
     ui_new_tab();
     frame();
     shot("tabs.bmp");
@@ -409,7 +471,7 @@ int screenshot_run(string[] args)
     frame();
     shot("drop-hover.bmp");
 
-    ui_drop_file("/tmp/other.bin", 700, 300);
+    ui_drop_file(fix.other, 700, 300);
     frame(); frame();
     shot("drop-landed.bmp");
 
@@ -743,9 +805,9 @@ int screenshot_run(string[] args)
     // The two panes should not look alike. diff-a.bin was already open and goes on
     // drawing as an ordinary view; diff-b.bin is the one opened against it and
     // carries the comparison - dimmed where the two agree, red where they do not.
-    ui_open("/tmp/diff-a.bin");
+    ui_open(fix.diffA);
     frame();
-    ui_compare_with("/tmp/diff-b.bin");
+    ui_compare_with(fix.diffB);
     frame();
     shot("diff.bmp");
 
