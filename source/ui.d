@@ -2263,9 +2263,27 @@ void ui_goto_preview(out string label, out string detail)
 }
 
 /// The pattern the find box is currently spelling out, read out of its text.
+///
+/// Kept from one frame to the next: the preview row below is built every frame
+/// the box is up, and reading a pattern allocates now that ddhx's parser does
+/// the reading, so the text only goes through it when it has actually changed.
 bool ui_find_needle(out Needle needle)
 {
-    return search_parse(omni_query(omni), needle);
+    const(char)[] query = omni_query(omni);
+    if (query.length > findText.length) // too long to remember: read it every time
+    {
+        findTextLen = size_t.max;
+        return search_parse(query, needle);
+    }
+
+    if (findTextLen != query.length || findText[0 .. findTextLen] != query)
+    {
+        findTextLen = query.length;
+        findText[0 .. findTextLen] = query;
+        findHave = search_parse(query, findNeedle);
+    }
+    needle = findNeedle;
+    return findHave;
 }
 
 /// Text for the '/' mode's one row: the bytes the pattern comes to, so what is
@@ -2275,14 +2293,15 @@ void ui_find_preview(out string label, out string detail)
     Needle needle;
     if (ui_find_needle(needle) == false)
     {
-        label  = `pattern: text, "quoted text", 0xdeadbeef, x:de ad, d:255, o:377, ?`;
+        label  = `pattern: text, "quoted text", utf8:text, 0xdeadbeef, x:de ad, ` ~
+            `u16:255, i8:-1, f32:1.0, ?, *`;
         detail = "waiting for a pattern";
         return;
     }
 
-    // The elements as bytes, with '??' where a wildcard stands. Long patterns
-    // are cut off here rather than in the row: the box would elide the tail
-    // anyway, and this keeps the arena's slice short.
+    // The elements as bytes, with '??' for a one-byte wildcard and '**' for a
+    // run. Long patterns are cut off here rather than in the row: the box would
+    // elide the tail anyway, and this keeps the arena's slice short.
     char[128] buf = void;
     size_t at;
     foreach (ushort element; needle.data[0 .. needle.length])
@@ -2294,19 +2313,24 @@ void ui_find_preview(out string label, out string detail)
         }
         if (at)
             buf[at++] = ' ';
-        if (element == SEARCH_ANY)
+        if (element == SEARCH_ANY || element == SEARCH_RUN)
         {
-            buf[at .. at + 2] = "??";
+            buf[at .. at + 2] = element == SEARCH_ANY ? "??" : "**";
             at += 2;
         }
         else
             at += sformat(buf[at .. $], "%02x", cast(ubyte) element).length;
     }
 
+    // A run stands for as many bytes as it takes, so the count it comes to is a
+    // floor rather than the length; saying so beats naming a number that is not
+    // what the search will select.
+    size_t least = search_least(needle);
     char[64] count = void;
     label  = ui_row_text(buf[0 .. at]);
-    detail = ui_row_text(sformat(count, "%u byte(s), from the caret",
-        needle.length));
+    detail = ui_row_text(sformat(count, least == needle.length
+        ? "%u byte(s), from the caret" : "%u byte(s) or more, from the caret",
+        least));
 }
 
 /// One row of the '=' inspector: a type, and the byte order it is read in.
@@ -2465,6 +2489,17 @@ __gshared Needle lastNeedle;
 /// Ditto.
 __gshared bool haveNeedle;
 
+/// The pattern the find box last had read out of it, and the text it was read
+/// from, so the box's own frames do not put the same query through the parser
+/// over and over. See ui_find_needle.
+__gshared Needle findNeedle;
+/// Ditto.
+__gshared bool findHave;
+/// Ditto. size_t.max for "nothing remembered", which no query length can be.
+__gshared size_t findTextLen = size_t.max;
+/// Ditto. As long as the omnibar's own buffer, so a query it holds fits here.
+__gshared char[192] findText;
+
 /// Look through `v`'s document for the last pattern from `from`, in whichever
 /// direction, and put that view's selection on what turns up. Reports through the
 /// status bar either way: a search that found nothing has to say so, or it reads
@@ -2479,15 +2514,19 @@ void ui_find_step(ref View v, bool backward, long from)
     if (v.doc.editor is null)
         return;
 
+    // The length comes back from the search rather than off the needle: a '*'
+    // stands for a run of whatever length the document turned out to hold, so
+    // only the match itself knows how much of it to select.
+    size_t length;
     long at = search_find(lastNeedle, from, cast(long) hex_total(v.hex),
-        backward, &hexRead, cast(void*) v.doc.editor);
+        backward, length, &hexRead, cast(void*) v.doc.editor);
     if (at < 0)
     {
         ui_status("not found");
         return;
     }
 
-    ui_select_range(v, cast(size_t) at, lastNeedle.length);
+    ui_select_range(v, cast(size_t) at, length);
     ui_status("found at %#x", at);
 }
 

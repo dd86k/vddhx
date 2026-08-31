@@ -5,44 +5,62 @@
 /// document is reached through the same kind of read hook the hex panel uses -
 /// so the matching can be tested against a plain array.
 ///
-/// The pattern syntax follows ddhx's own, with one concession to a graphical
-/// find box: text with no prefix at all is taken literally, spaces and all, so
-/// typing `hello world` finds those eleven bytes rather than being read as two
-/// tokens. Anything that opens with a prefix is read as ddhx reads it, a token
-/// at a time, each token inheriting the last one's type:
+/// The pattern syntax is ddhx's own, read by ddhx's own parser - `utils.arguments`
+/// splits the line and resolves its quoting, `patterns.pattern` compiles the
+/// tokens - so the two spell a needle the same way and neither drifts from the
+/// other. One concession to a graphical find box: text with no prefix at all is
+/// taken literally, spaces and all, so typing `hello world` finds those eleven
+/// bytes rather than being read as two tokens with nothing to say what they are.
 ///
 ///   hello world     the bytes of the text, exactly as typed
-///   "hello world"   the same, said explicitly
-///   s:hello         ditto, ddhx's prefix
+///   "hello world"   the same, the quoting saying where it ends
+///   utf8:hello      ditto, said with a prefix
+///   utf16:hello     the same text, as UTF-16 code units
 ///   0xdeadbeef      four bytes, written out in hex
-///   x:de ad be ef   the same four; "ad" and the rest inherit the hex prefix
-///   d:255  o:377    one byte each, in decimal and octal
-///   0xde ? 0xef     '?' stands for any one byte
+///   x:de ad be ef   the same four; "ad" and the rest inherit the prefix
+///   u16:255  i8:-1  a value encoded into the width its prefix names
+///   f32:1.0         IEEE-754, the bits a float occupies
+///   0xde ? 0xef     '?' stands for one byte, whatever it is
+///   0xde * 0xef     '*' for a run of them, however long
 ///
-/// Two places this deliberately parts from ddhx's scanner: hex is read as a
-/// string of bytes rather than as a number, so "0x00de" is the two bytes 00 de
-/// and not the one byte de a number's leading zeros would collapse to; and
-/// decimal and octal tokens are one byte each (0-255), since without a width or
-/// an endianness a longer number cannot be turned into bytes unambiguously.
+/// Scalars are encoded little-endian. ddhx follows a setting there; vddhx has
+/// none to follow, its inspector listing both orders as readings of their own
+/// instead, so write the bytes out with `x:` when the other order is wanted.
 /// Authors: dd
 module search;
 
-/// One element of a pattern: a byte value, or ANY for "one byte, whatever".
-enum ushort SEARCH_ANY = 0x100;
+import std.system : Endian;
+
+import patterns : matchPattern, pattern, Pattern, patternpfx, PatternType,
+    PATTERN_GLOB_MANY, PATTERN_GLOB_ONE, PATTERN_HAS_GLOB;
+import utils : Argument, arguments;
+
+/// One element of a pattern: a byte value, ANY for "one byte, whatever", or RUN
+/// for "however many bytes, including none". ddhx's own sentinels, so a compiled
+/// pattern drops straight into a needle.
+enum ushort SEARCH_ANY = PATTERN_GLOB_ONE;
+/// Ditto
+enum ushort SEARCH_RUN = PATTERN_GLOB_MANY;
 
 /// Longest pattern taken, in elements. A needle is compared at every offset in
 /// the document, so this is a limit on the work one search can be asked to do as
 /// much as it is on the pattern itself.
 enum size_t SEARCH_MAX = 256;
 
-/// A parsed pattern. Fixed storage: it is re-read on every frame the find box is
-/// open, and a pattern that cannot outgrow the struct cannot allocate either.
+/// A parsed pattern. Fixed storage: the elements are copied out of what ddhx's
+/// parser hands back, so a needle held between searches is a needle that owns
+/// nothing, and the caret can walk the document without a read of the pattern
+/// behind it. Reading one does allocate, which is why the find box keeps its
+/// result rather than parsing its text every frame (see ui.ui_find_needle).
 struct Needle
 {
-    /// Elements, each a byte value or SEARCH_ANY.
+    /// Elements, each a byte value, SEARCH_ANY or SEARCH_RUN.
     ushort[SEARCH_MAX] data;
-    /// How many of them are in use.
+    /// How many of them are in use. Not the length of a match: a SEARCH_RUN
+    /// stands for as many bytes as it takes. See `search_least`.
     size_t length;
+    /// ddhx's pattern flags, PATTERN_HAS_GLOB when a wildcard is among them.
+    int flags;
 }
 
 /// On-demand byte source, the same shape the hex panel reads through: fill `buf`
@@ -57,47 +75,55 @@ bool search_parse(const(char)[] text, out Needle needle)
     if (text.length == 0)
         return false;
 
-    // No prefix anywhere in front means the whole thing is literal text, spaces
-    // included; that is what someone typing into a find box means by it.
-    if (search_prefix(text) == Token.none)
+    // ddhx's own splitting, so the quoting is read by the rules that wrote it.
+    Argument[] args;
+    bool split = true;
+    try args = arguments(text);
+    catch (Exception)
+        split = false; // an unterminated quote, or an escape that is not one
+
+    // Nothing in front to say what the text is means it is text - that is what
+    // someone typing into a find box means by it, spaces and all. Where the
+    // quoting did not come apart the argument is what says so, and a line that
+    // came to exactly one of them is taken from it, so `"hello world"` loses its
+    // quotes; where it did, the line as typed is all there is to ask.
+    if (split == false)
     {
-        if (search_put_text(needle, text) == false)
+        // A prefix in front of a quote that has not been closed yet is a pattern
+        // mid-keystroke, not text; text with a quote in it has no prefix.
+        if (search_prefixed(text))
             return false;
-        return search_literal(needle);
+        return search_puttext(needle, text);
     }
+    if (args.length == 0)
+        return false;
+    if (search_prefixed(cast(const(char)[]) args[0].data) == false)
+        return search_puttext(needle,
+            args.length == 1 ? cast(const(char)[]) args[0].data : text);
 
-    Token last = Token.none;
-    size_t at;
-    while (at < text.length)
-    {
-        while (at < text.length && text[at] == ' ')
-            ++at;
-        if (at >= text.length)
-            break;
+    Pattern pat;
+    try pat = pattern(Endian.littleEndian, args);
+    catch (Exception)
+        return false; // not a pattern, or not one yet: it is still being typed
 
-        // A quoted run is one token however many blanks are inside it.
-        size_t end = void;
-        if (text[at] == '"')
-        {
-            end = at + 1;
-            while (end < text.length && text[end] != '"')
-                ++end;
-            if (end >= text.length)
-                return false; // still being typed: no closing quote yet
-            ++end;
-        }
-        else
-        {
-            end = at;
-            while (end < text.length && text[end] != ' ')
-                ++end;
-        }
+    if (pat.data.length == 0 || pat.data.length > SEARCH_MAX)
+        return false;
+    needle.data[0 .. pat.data.length] = pat.data;
+    needle.length = pat.data.length;
+    needle.flags  = pat.flags;
+    return search_matchable(needle);
+}
 
-        if (search_token(needle, text[at .. end], last) == false)
-            return false;
-        at = end;
-    }
-    return search_literal(needle);
+/// The fewest bytes a match can come to: every element bar a SEARCH_RUN stands
+/// for exactly one byte, and a run may stand for none. Equal to `needle.length`
+/// when there is no run in it, which is what makes a match a fixed size.
+size_t search_least(ref const(Needle) needle)
+{
+    size_t least;
+    foreach (ushort element; needle.data[0 .. needle.length])
+        if (element != SEARCH_RUN)
+            ++least;
+    return least;
 }
 
 /// Find `needle` between `lo` and `hi` (both offsets a match may start at) and,
@@ -113,16 +139,22 @@ bool search_parse(const(char)[] text, out Needle needle)
 ///         one going backward.
 ///     size = Document size in bytes.
 ///     backward = Search towards the start of the document instead.
+///     length = Bytes the match came to, which is `search_least(needle)` unless
+///         a SEARCH_RUN stretched it. Zero when nothing was found.
 ///     read = Byte source.
 ///     user = Opaque pointer handed to `read`.
 /// Returns: Offset the match starts at, or -1 when the pattern is nowhere in it.
 long search_find(ref const(Needle) needle, long from, long size, bool backward,
-    SearchReadFn read, void* user)
+    out size_t length, SearchReadFn read, void* user)
 {
     if (needle.length == 0 || read is null)
         return -1;
 
-    long last = size - cast(long) needle.length; // last offset a match can start at
+    size_t least = search_least(needle);
+    if (least == 0)
+        return -1; // nothing but runs: see search_matchable
+
+    long last = size - cast(long) least; // last offset a match can start at
     if (last < 0)
         return -1;
     if (from > last)
@@ -134,19 +166,19 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
         // caret at offset zero comes to - there is nothing on this side of the
         // wrap, so the whole document is searched and its last match answered.
         if (from < 0)
-            return search_range(needle, 0, last, true, read, user);
+            return search_range(needle, 0, last, true, length, read, user);
 
-        long hit = search_range(needle, 0, from, true, read, user);
+        long hit = search_range(needle, 0, from, true, length, read, user);
         if (hit < 0 && from < last) // wrap: carry on from the far end
-            hit = search_range(needle, from + 1, last, true, read, user);
+            hit = search_range(needle, from + 1, last, true, length, read, user);
         return hit;
     }
 
     if (from < 0)
         from = 0;
-    long hit = search_range(needle, from, last, false, read, user);
+    long hit = search_range(needle, from, last, false, length, read, user);
     if (hit < 0 && from > 0)
-        hit = search_range(needle, 0, from - 1, false, read, user);
+        hit = search_range(needle, 0, from - 1, false, length, read, user);
     return hit;
 }
 
@@ -251,139 +283,49 @@ __gshared ubyte[SEARCH_WINDOW] window;
 /// the stack.
 __gshared ubyte[SEARCH_ELEMENT_MAX] element;
 
-/// Which of the pattern syntaxes a token is written in.
-enum Token
+/// Whether `text` opens with one of ddhx's pattern prefixes, or is a wildcard of
+/// its own - anything else being text the find box takes literally.
+///
+/// ddhx answers this, so a prefix it grows (`ascii:`, `re:`) is one the find box
+/// stops taking literally on the same day, with nothing here to keep in step.
+bool search_prefixed(const(char)[] text)
 {
-    none,   /// No prefix recognised.
-    hex,
-    dec,
-    oct,
-    text,
-    any,    /// '?', a single byte of anything.
-}
-
-/// The syntax `text` opens with, if any.
-Token search_prefix(const(char)[] text)
-{
-    static bool starts(const(char)[] text, string prefix)
-    {
-        return text.length >= prefix.length && text[0 .. prefix.length] == prefix;
-    }
-
-    if (starts(text, "x:") || starts(text, "0x")) return Token.hex;
-    if (starts(text, "d:"))                       return Token.dec;
-    if (starts(text, "o:") || starts(text, "0o")) return Token.oct;
-    if (starts(text, "s:"))                       return Token.text;
-    if (text.length && text[0] == '"')            return Token.text;
-    if (text == "?")                              return Token.any;
-    return Token.none;
-}
-
-/// Read one token onto the end of `needle`, inheriting `last`'s syntax when it
-/// carries no prefix of its own. Updates `last` for the token after it.
-bool search_token(ref Needle needle, const(char)[] token, ref Token last)
-{
-    Token kind = search_prefix(token);
-    if (kind == Token.none)
-    {
-        if (last == Token.none || last == Token.any)
-            return false; // nothing to inherit: "de ad" alone is not a pattern
-        kind = last;
-    }
-    else if (kind != Token.any)
-    {
-        // Drop the prefix. The "0x" and "0o" forms keep their digits, the
-        // "x:"-style ones are two characters either way, and a quoted run loses
-        // the quotes at both ends.
-        if (token[0] == '"')
-            token = token[1 .. $ - 1];
-        else if (token.length >= 2 && token[1] == ':')
-            token = token[2 .. $];
-        else
-            token = token[2 .. $];
-    }
-
-    final switch (kind)
-    {
-    case Token.any:
-        last = Token.any;
-        return search_put(needle, SEARCH_ANY);
-    case Token.text:
-        last = Token.text;
-        return search_put_text(needle, token);
-    case Token.hex:
-        last = Token.hex;
-        if (token.length == 0 || token.length % 2)
-            return false; // whole bytes only; a lone digit is half of one
-        for (size_t i; i < token.length; i += 2)
-        {
-            int hi = search_digit(token[i]);
-            int lo = search_digit(token[i + 1]);
-            if (hi < 0 || hi > 15 || lo < 0 || lo > 15)
-                return false;
-            if (search_put(needle, cast(ushort)((hi << 4) | lo)) == false)
-                return false;
-        }
+    if (text == "?" || text == "*")
         return true;
-    case Token.dec, Token.oct:
-        last = kind;
-        int radix = kind == Token.dec ? 10 : 8;
-        if (token.length == 0)
-            return false;
-        int value;
-        foreach (char c; token)
-        {
-            int digit = search_digit(c);
-            if (digit < 0 || digit >= radix)
-                return false;
-            value = value * radix + digit;
-            if (value > 255)
-                return false; // one byte per token: see the module header
-        }
-        return search_put(needle, cast(ushort) value);
-    case Token.none:
-        return false;
-    }
+    return patternpfx(text).spec.type != PatternType.unknown;
 }
 
-/// Append the bytes of `text` as they were typed.
-bool search_put_text(ref Needle needle, const(char)[] text)
+/// Take `text` as the needle, byte for byte.
+bool search_puttext(ref Needle needle, const(char)[] text)
 {
-    if (text.length == 0)
+    if (text.length == 0 || text.length > SEARCH_MAX)
         return false;
-    foreach (char c; text)
-        if (search_put(needle, cast(ubyte) c) == false)
-            return false;
+    foreach (size_t i, char c; text)
+        needle.data[i] = cast(ubyte) c;
+    needle.length = text.length;
     return true;
 }
 
 /// Whether the pattern holds anything to actually match on. Wildcards alone fit
 /// at every offset in the document, which answers a search with "the next byte";
 /// that is not what was asked, so it is refused instead.
-bool search_literal(ref const(Needle) needle)
+bool search_matchable(ref const(Needle) needle)
 {
     foreach (ushort element; needle.data[0 .. needle.length])
-        if (element != SEARCH_ANY)
+        if (element < SEARCH_ANY)
             return true;
     return false;
 }
 
-/// Append one element, unless the pattern is already as long as it may be.
-bool search_put(ref Needle needle, ushort value)
+/// ddhx's view of the needle, for handing to `matchPattern`. That takes its
+/// pattern by value and only ever reads it, so the elements are lent to it out
+/// of the needle's own storage rather than copied into a new array.
+Pattern search_pattern(ref const(Needle) needle)
 {
-    if (needle.length >= SEARCH_MAX)
-        return false;
-    needle.data[needle.length++] = value;
-    return true;
-}
-
-/// A hex digit's value, or -1. Callers below 16 check their own radix.
-int search_digit(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
+    Pattern pat;
+    pat.data  = cast(ushort[]) needle.data[0 .. needle.length];
+    pat.flags = needle.flags;
+    return pat;
 }
 
 /// Trim the blanks off both ends.
@@ -401,56 +343,61 @@ const(char)[] search_strip(const(char)[] text)
 /// Try every offset in [lo, hi] and answer with the first match, or the last one
 /// when `wantLast` is set (which is how a backward search is served: the range
 /// is still walked forwards, since a document reads one way).
+///
+/// A SEARCH_RUN stands for a stretch of any length, so a pattern holding one is
+/// matched inside a single window: a run reaching further than SEARCH_WINDOW
+/// bytes past where its match began is not found. Nothing without a run is
+/// bounded that way - the window always reaches past the last candidate in it by
+/// the whole of a fixed-size match.
 long search_range(ref const(Needle) needle, long lo, long hi, bool wantLast,
-    SearchReadFn read, void* user)
+    out size_t length, SearchReadFn read, void* user)
 {
     if (lo > hi)
         return -1;
 
-    size_t n = needle.length;
+    Pattern pat = search_pattern(needle);
+    size_t least = search_least(needle);
+    // How far past a candidate the window has to reach: exactly the match for a
+    // pattern of a fixed size, as far as a window will go for one with a run.
+    size_t span = least == needle.length ? least : SEARCH_WINDOW;
+
     long best = -1;
+    size_t bestlen;
     long pos = lo;
     while (pos <= hi)
     {
         // Enough bytes for every candidate left in the range, up to a window.
-        long want = (hi - pos) + cast(long) n;
+        long want = (hi - pos) + cast(long) span;
         if (want > cast(long) SEARCH_WINDOW)
             want = SEARCH_WINDOW;
 
         ubyte[] have = read(pos, window[0 .. cast(size_t) want], user);
-        if (have.length < n)
+        if (have.length < least)
             break; // what is left cannot hold a match
 
-        size_t limit = have.length - n; // last index in the window one can start at
+        size_t limit = have.length - least; // last index in the window one can start at
         foreach (size_t i; 0 .. limit + 1)
         {
             if (pos + cast(long) i > hi)
                 break;
-            if (search_at(needle, have[i .. i + n]) == false)
+            ptrdiff_t got = matchPattern(have, pat, i, 0);
+            if (got < 0)
                 continue;
             if (wantLast == false)
+            {
+                length = cast(size_t) got;
                 return pos + cast(long) i;
+            }
             best = pos + cast(long) i;
+            bestlen = cast(size_t) got;
         }
 
         // Step past the candidates just tried, leaving the tail that the next
         // window's first candidates still need.
         pos += cast(long)(limit + 1);
     }
+    length = bestlen;
     return best;
-}
-
-/// Whether the pattern sits exactly on `bytes`.
-bool search_at(ref const(Needle) needle, const(ubyte)[] bytes)
-{
-    foreach (size_t i, ushort element; needle.data[0 .. needle.length])
-    {
-        if (element == SEARCH_ANY)
-            continue;
-        if (bytes[i] != element)
-            return false;
-    }
-    return true;
 }
 
 unittest
@@ -463,17 +410,24 @@ unittest
     }
     static const(ushort)[] elems(ref Needle n) { return n.data[0 .. n.length]; }
 
-    // Plain text, taken as it stands - spaces are part of it, not separators.
+    // Plain text, taken as it stands - spaces are part of it, not separators -
+    // and the same text said with a prefix, which is what ddhx would want.
     Needle n = parse("hi");
     assert(elems(n) == [ 'h', 'i' ]);
     n = parse("hello world");
     assert(n.length == 11);
-    n = parse(`"hello world"`);
+    n = parse(`"hello world"`); // one argument, so the quotes come off it
     assert(n.length == 11);
-    n = parse("s:abc");
+    n = parse("utf8:abc");
     assert(elems(n) == [ 'a', 'b', 'c' ]);
+    n = parse("utf16:hi");      // code units, little-endian like any scalar
+    assert(elems(n) == [ 'h', 0, 'i', 0 ]);
+    n = parse("utf32:h");
+    assert(elems(n) == [ 'h', 0, 0, 0 ]);
+    n = parse(`C:\Users`);      // a path is text, backslashes and colon and all
+    assert(n.length == 8);
 
-    // Numbers, in each base ddhx spells out.
+    // Numbers, in each base and width ddhx spells out.
     n = parse("0xdeadbeef");
     assert(elems(n) == [ 0xde, 0xad, 0xbe, 0xef ]);
     n = parse("x:de ad");
@@ -482,26 +436,47 @@ unittest
     assert(elems(n) == [ 0xde, 0xbe, 0xef ]);
     n = parse("0x00de");      // kept as two bytes, not read as a number
     assert(elems(n) == [ 0x00, 0xde ]);
-    n = parse("d:255");
+    n = parse("u8:255");
     assert(elems(n) == [ 0xff ]);
-    n = parse("o:377");
+    n = parse("o8:377");
     assert(elems(n) == [ 0xff ]);
+    n = parse("u16:255");     // as many bytes as the width asked for
+    assert(elems(n) == [ 0xff, 0x00 ]);
+    n = parse("i16:-1");
+    assert(elems(n) == [ 0xff, 0xff ]);
+    n = parse("f32:1.0");
+    assert(elems(n) == [ 0x00, 0x00, 0x80, 0x3f ]);
+    n = parse(`0xde utf8:ab`); // bases and text in one pattern
+    assert(elems(n) == [ 0xde, 'a', 'b' ]);
+
+    // Wildcards, and the flag that says one is in there.
     n = parse("0xde ? 0xef");
     assert(elems(n) == [ 0xde, SEARCH_ANY, 0xef ]);
-    n = parse(`0xde "ab"`);   // bases and text in one pattern
-    assert(elems(n) == [ 0xde, 'a', 'b' ]);
+    assert(n.flags & PATTERN_HAS_GLOB);
+    assert(search_least(n) == 3);
+    n = parse("0xde * 0xef");
+    assert(elems(n) == [ 0xde, SEARCH_RUN, 0xef ]);
+    assert(search_least(n) == 2); // a run may stand for no bytes at all
+    n = parse(`utf8:"?"`);        // said with a prefix, so it is the character
+    assert(elems(n) == [ '?' ]);
 
     // Not patterns.
     Needle bad;
     assert(search_parse("", bad) == false);
     assert(search_parse("   ", bad) == false);
-    assert(search_parse("0x", bad) == false);    // a prefix with nothing behind it
+    assert(search_parse("0x", bad) == false);     // a prefix with nothing behind it
     assert(search_parse("0xde a", bad) == false); // half a byte
     assert(search_parse("0xzz", bad) == false);
-    assert(search_parse("d:256", bad) == false); // over a byte
-    assert(search_parse("o:8", bad) == false);   // not an octal digit
-    assert(search_parse(`"unclosed`, bad) == false);
-    assert(search_parse("?", bad) == false);     // matches everything: not a search
+    assert(search_parse("u8:256", bad) == false); // over the width
+    assert(search_parse("o8:8", bad) == false);   // not an octal digit
+    assert(search_parse("utf8:'abc", bad) == false); // still being typed
+    assert(search_parse("?", bad) == false);      // matches everything: not a search
+    assert(search_parse("* ?", bad) == false);
+
+    // An unterminated quote with no prefix in front is not a half-typed pattern,
+    // it is text with a quote in it, and the find box takes it as such.
+    assert(search_parse(`"unclosed`, bad));
+    assert(bad.length == 9);
 }
 
 unittest
@@ -523,30 +498,51 @@ unittest
     }
 
     Needle n;
+    size_t len;
     assert(search_parse("0xdeadbeef", n));
     long size = cast(long) data.length;
 
-    assert(search_find(n, 0, size, false, &reader, null) == 0);
-    assert(search_find(n, 1, size, false, &reader, null) == 6);
-    assert(search_find(n, 7, size, false, &reader, null) == 0);  // wrapped around
-    assert(search_find(n, 6, size, true,  &reader, null) == 6);
-    assert(search_find(n, 5, size, true,  &reader, null) == 0);
-    assert(search_find(n, 0, size, true,  &reader, null) == 0);  // 0 is itself a match
-    assert(search_find(n, -1, size, true, &reader, null) == 6);  // wrapped the other way
+    assert(search_find(n, 0, size, false, len, &reader, null) == 0);
+    assert(len == 4);
+    assert(search_find(n, 1, size, false, len, &reader, null) == 6);
+    assert(search_find(n, 7, size, false, len, &reader, null) == 0);  // wrapped around
+    assert(search_find(n, 6, size, true,  len, &reader, null) == 6);
+    assert(search_find(n, 5, size, true,  len, &reader, null) == 0);
+    assert(search_find(n, 0, size, true,  len, &reader, null) == 0);  // 0 is itself a match
+    assert(search_find(n, -1, size, true, len, &reader, null) == 6);  // wrapped the other way
 
     // The trailing "de ad" has no "be ef" behind it, so it is not a match.
     assert(search_parse("0xdead", n));
-    assert(search_find(n, 7, size, false, &reader, null) == 12);
+    assert(search_find(n, 7, size, false, len, &reader, null) == 12);
 
-    // Wildcards.
+    // A one-byte wildcard.
     assert(search_parse("0xde ? 0xbe", n));
-    assert(search_find(n, 0, size, false, &reader, null) == 0);
+    assert(search_find(n, 0, size, false, len, &reader, null) == 0);
+    assert(len == 3);
+
+    // A run, which is as short as it can be: from 0 the nearest 0xef after the
+    // 0xde at 0 is at 3, so the match is those four bytes and not the ten that
+    // reach the second one.
+    assert(search_parse("0xde * 0xef", n));
+    assert(search_find(n, 0, size, false, len, &reader, null) == 0);
+    assert(len == 4);
+    // ...and a run may stand for nothing at all.
+    assert(search_parse("0xde * 0xad", n));
+    assert(search_find(n, 0, size, false, len, &reader, null) == 0);
+    assert(len == 2);
+    // The last one found, which is how a backward search is answered.
+    assert(search_parse("0xbe * 0x33", n));
+    assert(search_find(n, size - 1, size, true, len, &reader, null) == 8);
+    assert(len == 4);
 
     // Nowhere in the document, and longer than the document.
     assert(search_parse("0xc0ffee", n));
-    assert(search_find(n, 0, size, false, &reader, null) == -1);
+    assert(search_find(n, 0, size, false, len, &reader, null) == -1);
+    assert(len == 0);
+    assert(search_parse("0xde * 0xc0ffee", n));
+    assert(search_find(n, 0, size, false, len, &reader, null) == -1);
     assert(search_parse("hello world, and then some more text than fits", n));
-    assert(search_find(n, 0, size, false, &reader, null) == -1);
+    assert(search_find(n, 0, size, false, len, &reader, null) == -1);
 }
 
 unittest
@@ -620,7 +616,9 @@ unittest
     }
 
     Needle n;
+    size_t len;
     assert(search_parse("0xcafebabe", n));
-    assert(search_find(n, 0, SIZE, false, &reader, null) == AT);
-    assert(search_find(n, SIZE - 1, SIZE, true, &reader, null) == AT);
+    assert(search_find(n, 0, SIZE, false, len, &reader, null) == AT);
+    assert(len == 4);
+    assert(search_find(n, SIZE - 1, SIZE, true, len, &reader, null) == AT);
 }
