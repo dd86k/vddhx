@@ -1404,7 +1404,7 @@ public bool ui_open(string path)
 }
 
 /// Build a document around `path`, or null when it cannot be opened (the error is
-/// logged, and nothing already open is disturbed).
+/// logged and put in the status bar, and nothing already open is disturbed).
 ///
 /// Split out of ui_open because a comparison needs the file loaded without a tab
 /// being found for it: the second document goes in a pane of its own rather than
@@ -1421,6 +1421,10 @@ Document* ui_load(string path)
     catch (Exception e)
     {
         logWarn("open failed: %s", e.msg);
+        // Both callers leave the window as it was, so a file picked from the Open
+        // dialog that cannot be read would otherwise look like nothing happened.
+        // Clipped because ui_status drops a message that overflows.
+        ui_status("cannot open %s: %s", ui_clip(baseName(path), 32), ui_clip(e.msg, 44));
         return null;
     }
 
