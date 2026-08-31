@@ -11,7 +11,7 @@ import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_KEY_UP, OMNI_KEY_DOWN;
 import render;
 import ui;
-version (Screenshot) import screenshot;
+version (Screenshots) import screenshots;
 
 void main(string[] args)
 {
@@ -26,7 +26,7 @@ void main(string[] args)
         return;
     scope(exit) loader_quit();
 
-    version (Screenshot)
+    version (Screenshots)
     {
         import std.algorithm.searching : canFind;
         if (args.canFind("--screenshot"))

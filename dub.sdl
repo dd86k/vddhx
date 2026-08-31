@@ -60,9 +60,12 @@ configuration "static" {
 }
 
 // Debug-only frame capture. Adds the Ctrl+Shift+F12 live shortcut and the
-// --screenshot headless driver (source/screenshot.d). Kept out of the default
-// build via a buildType so `dub build` stays release-clean: `dub build -b screenshot`.
-buildType "screenshot" {
-	versions "Screenshot"
+// --screenshot headless driver (source/screenshots.d), both writing into
+// ./screenshots. Kept out of the default build via a buildType so `dub build`
+// stays release-clean: `dub build -b screenshots`. A buildType rather than a
+// configuration because it only adds flags, so it composes with the SDL linkage
+// pair above: `dub build -c static -b screenshots`.
+buildType "screenshots" {
+	versions "Screenshots"
 	buildOptions "debugMode" "debugInfo"
 }
