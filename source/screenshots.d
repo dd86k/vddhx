@@ -56,13 +56,42 @@ bool screenshot_save(SDL_Renderer* renderer, const(char)* path)
     return SDL_SaveBMP(surface, path);
 }
 
+/// Run both sets, one child process each. They cannot share a process: the two
+/// want different window sizes, and ui.d's module state (docs, columns, panes)
+/// has no teardown, so the second set would start on whatever the first left
+/// behind. Re-running the executable is the prototype's way out of both.
+private int screenshot_all(string[] args)
+{
+    import std.algorithm.iteration : filter;
+    import std.array : array;
+    import std.file : thisExePath;
+    import std.process : spawnProcess, wait;
+
+    // Everything but the set selectors, which this adds back one at a time.
+    string[] base = args[1 .. $]
+        .filter!(a => a != "--all" && a != "--readme")
+        .array;
+
+    foreach (string set; ["", "--readme"])
+    {
+        string[] argv = thisExePath ~ base;
+        if (set.length)
+            argv ~= set;
+        if (wait(spawnProcess(argv)) != 0)
+            return 1;
+    }
+    return 0;
+}
+
 /// Headless capture of a few UI states. Run with SDL_VIDEODRIVER=offscreen:
 /// `SDL_VIDEODRIVER=offscreen dub run -b screenshots -- --screenshot`.
 int screenshot_run(string[] args)
 {
     // `--readme` poses one showcase frame for the project page instead of running
-    // the regression scenarios: a wider window and real files.
+    // the regression scenarios: a wider window and real files. `--all` is both.
     import std.algorithm.searching : canFind, startsWith;
+    if (args.canFind("--all"))
+        return screenshot_all(args);
     const bool readme = args.canFind("--readme");
     const int W = readme ? 1280 : 800;
     const int H = readme ?  800 : 600;
@@ -100,6 +129,12 @@ int screenshot_run(string[] args)
     ui_style(&ctx);
 
     ui_init(window);
+
+    // Closing the last view of an edited document would otherwise reach for the
+    // native Save / Don't Save box (and, on Save, the Save As dialog behind it),
+    // which blocks a scripted run on a window nothing is there to click. This is
+    // what lets scenarios close panes without balancing every edit first.
+    uiConfirmAuto = ConfirmAuto.discard;
 
     void frame() { mu_begin(&ctx); ui_frame(&ctx, W, H); mu_end(&ctx); }
 

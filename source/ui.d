@@ -1800,6 +1800,17 @@ enum Confirm { proceed, cancel }
 /// Button ids for the prompt, kept distinct from the unset -1 sentinel.
 enum { btnSave = 1, btnDontSave = 2, btnCancel = 3 }
 
+version (Screenshots)
+{
+    /// What a scripted run wants every unsaved-changes prompt answered with.
+    /// `ask` (the .init) leaves the native box alone, so the live build under
+    /// this buildType still behaves like the real one.
+    public enum ConfirmAuto { ask, discard, keep }
+
+    /// Set by the headless driver before it starts posing scenarios.
+    public __gshared ConfirmAuto uiConfirmAuto;
+}
+
 /// Resolve unsaved edits in `d` before an action that would discard them (closing
 /// the last view of it, or quitting). With no edits pending it proceeds silently;
 /// otherwise it brings a view of that document to the front - so the prompt is
@@ -1816,6 +1827,13 @@ Confirm ui_confirm_discard(Document* d, const(char)* title)
         return Confirm.proceed;
 
     ui_focus_document(d);
+
+    // The focus above still runs, so a scripted close leaves the same tab in
+    // front a real one would; only the box itself is skipped. It is a native
+    // window, and nothing in a headless run can click it.
+    version (Screenshots)
+        if (uiConfirmAuto != ConfirmAuto.ask)
+            return uiConfirmAuto == ConfirmAuto.discard ? Confirm.proceed : Confirm.cancel;
 
     static immutable SDL_MessageBoxButtonData[3] buttons = [
         { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, btnSave,     "Save" },
