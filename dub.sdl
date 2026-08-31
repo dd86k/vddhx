@@ -21,6 +21,7 @@ versions "SDL_TTF_3_2_2"
 # dub build -c static   # static
 configuration "application" {
 	targetType "executable"
+	mainSourceFile "source/main.d"
 
 	// bindbc-sdl's default subconfiguration: every binding is a function
 	// pointer bound by loadSDL()/loadSDLTTF(), so the libraries are only
@@ -31,6 +32,7 @@ configuration "application" {
 
 configuration "static" {
 	targetType "executable"
+	mainSourceFile "source/main.d"
 
 	// The "static" subconfiguration makes bindbc-sdl emit direct extern
 	// bindings (sets version BindSDL_Static) instead of runtime function
