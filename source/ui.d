@@ -242,6 +242,10 @@ __gshared Omnibar omni;
 /// Ditto.
 __gshared OmniItem[] omniItems;
 
+/// Whether the box was up at the end of the last frame, so ui_frame can spot the
+/// frame it goes up on and take the menubar's dropdown down with it.
+__gshared bool omniWasShown;
+
 /// The pane and tab each switcher row stands for, parallel to `omniItems` while
 /// the switcher is the mode showing. A row's id indexes this.
 struct OmniTab
@@ -2658,7 +2662,19 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             ui_save_pending(pendingSavePath.ptr.fromStringz.idup);
         }
 
+        // The omnibar and a dropdown are both one-at-a-time overlays, and neither
+        // can usefully sit over the other: ddui fronts an open menu every frame
+        // (mu_begin_menu), so a menu left up covers the box for as long as both are
+        // open. Whichever was raised last gets the window, checked either side of
+        // the bar because this frame's click is what opens a menu.
+        if (omni_shown(omni) && omniWasShown == false)
+            ctx.menu_stack_len = 0;
+
         ui_menubar(ctx);
+
+        if (ctx.menu_stack_len > 0 && omni_shown(omni))
+            ui_omni_close();
+        omniWasShown = omni_shown(omni);
 
         // The panes take the rest of the window, save a strip at the bottom for the
         // status bar.
