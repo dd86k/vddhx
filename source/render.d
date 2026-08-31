@@ -9,8 +9,9 @@ module render;
 
 import core.stdc.string : strlen;
 import std.file : exists;
-import std.string : toStringz;
+import std.string : fromStringz, toStringz;
 import bindbc.sdl; // publicly re-exports SDL3_ttf (TTF_*) under the static config
+import ddlogger;
 import ddui;
 import elite : MU_COMMAND_SHIP, elite_draw;
 
@@ -91,25 +92,40 @@ else
 bool render_init(SDL_Renderer* renderer)
 {
     if (TTF_Init() == false)
+    {
+        logCritical("TTF_Init: %s", SDL_GetError().fromStringz);
         return false;
+    }
 
     engine = TTF_CreateRendererTextEngine(renderer);
     if (engine is null)
+    {
+        logCritical("TTF_CreateRendererTextEngine: %s", SDL_GetError().fromStringz);
         return false;
+    }
 
     // Without this the renderer writes fills as-is: a translucent tint (the
     // minimap's viewport marker) comes out solid, and the fully transparent
     // MU_COLOR_PANELBG paints black over whatever the panel sits on.
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
+    // Nothing here consults SDL_GetError: a face is missing because none of the
+    // paths existed, which SDL never saw, so the caller has only the list to go on.
     fontUI = openFirst(uiPaths);
     if (fontUI is null)
+    {
+        logCritical("no UI font; install one of: %s", uiPaths);
         return false;
+    }
 
     // Missing the mono face is not fatal, the hex panel merely goes unaligned.
     fontMono = openFirst(monoPaths);
     if (fontMono is null)
+    {
+        logWarn("no monospace font, falling back to the UI face (the hex grid " ~
+            "will not align); install one of: %s", monoPaths);
         fontMono = fontUI;
+    }
 
     addFallback(cjkPaths);
     addFallback(symPaths);

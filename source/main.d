@@ -13,7 +13,7 @@ import render;
 import ui;
 version (Screenshots) import screenshots;
 
-void main(string[] args)
+int main(string[] args)
 {
     // Ideally, should be logging to a file (appdata etc.),
     // but this is a stopgap to see if loader loads proper
@@ -23,20 +23,20 @@ void main(string[] args)
     // Under the dynamic configuration nothing may touch SDL_* or TTF_* before
     // this, the screenshot driver included.
     if (loader_init() == false)
-        return;
+        return 1;
     scope(exit) loader_quit();
 
     version (Screenshots)
     {
         import std.algorithm.searching : canFind;
         if (args.canFind("--screenshot"))
-            return cast(void) screenshot_run(args);
+            return screenshot_run(args);
     }
 
     if (SDL_Init(SDL_INIT_VIDEO) == false)
     {
         logCritical("SDL_Init: %s", SDL_GetError().fromStringz);
-        return;
+        return 1;
     }
     scope(exit) SDL_Quit();
 
@@ -44,21 +44,21 @@ void main(string[] args)
     if (window is null)
     {
         logCritical("SDL_CreateWindow: %s", SDL_GetError().fromStringz);
-        return;
+        return 1;
     }
     scope(exit) SDL_DestroyWindow(window);
 
     if (SDL_SetWindowMinimumSize(window, 640, 480) == false)
     {
         logCritical("SDL_SetWindowMinimumSize: %s", SDL_GetError().fromStringz);
-        return;
+        return 1;
     }
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, null);
     if (renderer is null)
     {
         logCritical("SDL_CreateRenderer: %s", SDL_GetError().fromStringz);
-        return;
+        return 1;
     }
     scope(exit) SDL_DestroyRenderer(renderer);
 
@@ -72,7 +72,7 @@ void main(string[] args)
     if (render_init(renderer) == false)
     {
         logCritical("render_init: %s", SDL_GetError().fromStringz);
-        return;
+        return 1;
     }
     scope(exit) render_quit();
 
@@ -87,7 +87,7 @@ void main(string[] args)
         import core.stdc.string : strerror;
         import core.stdc.errno : errno;
         logCritical("malloc: %s", strerror(errno).fromStringz);
-        return;
+        return 1;
     }
     
     // Set up the ddui context
@@ -403,6 +403,8 @@ void main(string[] args)
         SDL_RenderPresent(renderer);
         --frames;
     }
+
+    return 0;
 }
 
 /// Map an SDL3 keycode for the omnibar's text box (0 if unmapped).

@@ -20,7 +20,9 @@ module screenshots;
 version (Screenshots):
 
 import core.stdc.string : strncmp, strlen;
+import std.string : fromStringz;
 import bindbc.sdl;
+import ddlogger;
 import ddui;
 import hexview : HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
@@ -132,8 +134,13 @@ private int screenshot_all(string[] args)
         string[] argv = thisExePath ~ base;
         if (set.length)
             argv ~= set;
-        if (wait(spawnProcess(argv)) != 0)
+        int status = wait(spawnProcess(argv));
+        if (status != 0)
+        {
+            logCritical("screenshot: %s set exited %d",
+                set.length ? set : "--screenshot", status);
             return 1;
+        }
     }
     return 0;
 }
@@ -155,25 +162,39 @@ int screenshot_run(string[] args)
     foreach (string arg; args)
         if (arg.startsWith("--outdir="))
             outdir = arg["--outdir=".length .. $];
+    // Each of these used to fail mute, and main threw the status away on top, so a
+    // run that set nothing up looked exactly like one that wrote every shot.
     if (screenshot_mkdir(outdir) == false)
+    {
+        logCritical("screenshot: cannot create %s", outdir);
         return 1;
+    }
 
     if (SDL_Init(SDL_INIT_VIDEO) == false)
+    {
+        logCritical("SDL_Init: %s", SDL_GetError().fromStringz);
         return 1;
+    }
     scope(exit) SDL_Quit();
 
     SDL_Window* window = SDL_CreateWindow("vddhx-shot", W, H, 0);
     if (window is null)
+    {
+        logCritical("SDL_CreateWindow: %s", SDL_GetError().fromStringz);
         return 1;
+    }
     scope(exit) SDL_DestroyWindow(window);
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, null);
     if (renderer is null)
+    {
+        logCritical("SDL_CreateRenderer: %s", SDL_GetError().fromStringz);
         return 1;
+    }
     scope(exit) SDL_DestroyRenderer(renderer);
 
     if (render_init(renderer) == false)
-        return 1;
+        return 1; // render_init says which step went wrong
     scope(exit) render_quit();
 
     static mu_Context ctx; // ~4 MB; keep it off the stack
@@ -229,6 +250,8 @@ int screenshot_run(string[] args)
         mu_input_keyup(&ctx, mod);
     }
 
+    // Every caller ignores the result, so a capture that fails has to say so here
+    // or the run just comes up short of files.
     bool shot(string name)
     {
         import std.path : buildPath;
@@ -236,7 +259,11 @@ int screenshot_run(string[] args)
         SDL_SetRenderDrawColor(renderer, 30, 30, 46, 255);
         SDL_RenderClear(renderer);
         render_commands(renderer, &ctx);
-        return screenshot_save(renderer, buildPath(outdir, name).toStringz);
+        string path = buildPath(outdir, name);
+        if (screenshot_save(renderer, path.toStringz))
+            return true;
+        logWarn("screenshot: %s: %s", path, SDL_GetError().fromStringz);
+        return false;
     }
 
     // The showcase frame, off the repo's own files (run it from the repo root).
