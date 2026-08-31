@@ -486,8 +486,9 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
 
     HexLayout lay = hex_layout(offsetDigits, cols, charW);
 
-    // Fixed above the scroll area, so it never scrolls away.
-    hex_header(ctx, v, lay, rowH, font);
+    // Fixed above the scroll area, so it never scrolls away. The same strip the
+    // panel below carves off, so the two agree on the last usable column.
+    hex_header(ctx, v, lay, rowH, font, v.minimap ? MINIMAP_WIDTH : SCROLLBAR_WIDTH);
 
     // A negative row height fills to the container floor; pushing it up by
     // reserveBottom plus a spacing gap leaves exactly that band free below, where
@@ -677,8 +678,12 @@ unittest
 
 // Fixed column titles: the offset heading and the 00..0F byte-lane numbers,
 // drawn dim so they read as chrome rather than data.
+//
+// `stripW` is the scroll strip the grid below gives up on its right edge; the
+// header row spans it, so without subtracting it a narrow pane labels one more
+// column than hex_paint has room to draw.
 void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
-    int rowH, mu_Font font)
+    int rowH, mu_Font font, int stripW)
 {
     int head = -1;
     mu_layout_row(ctx, 1, &head, rowH);
@@ -694,7 +699,7 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     mu_Color dim = mu_Color(140, 140, 150, 255);
     int charW = lay.charW;
 
-    int endX = r.x + r.w;
+    int endX = r.x + r.w - stripW;
     if (hex_fits(r.x, 6, charW, endX))
         mu_draw_text(ctx, font, "offset", 6, mu_Vec2(r.x, r.y), dim);
 
@@ -741,32 +746,81 @@ unittest
     v.columns = 16;
     HexLayout lay = hex_layout(8, 16, CW);
 
-    foreach (int paneW; [180, 260, 337, 400, 512, 640])
-        foreach (bool rows; [false, true])
-        {
-            mu_begin(&ctx);
-            if (mu_begin_window_ex(&ctx, "w", mu_Rect(0, 0, paneW, 400),
-                    MU_OPT_NOTITLE | MU_OPT_NORESIZE | MU_OPT_NOSCROLL | MU_OPT_NOFRAME))
-            {
-                if (rows)
-                    hex_paint(&ctx, v, lay, mu_Rect(0, 20, paneW, 200), 0, 16, 16, null);
-                else
-                    hex_header(&ctx, v, lay, 16, null);
-                mu_end_window(&ctx);
-            }
-            mu_end(&ctx);
+    // The strip the grid gives up on its right edge: the header spans it, so it
+    // has to end that much earlier or it labels a column with no bytes under it.
+    enum int STRIP = MINIMAP_WIDTH;
 
-            int drawn;
-            mu_Command* cmd;
-            while (mu_get_next_command(&ctx, &cmd))
-            {
-                if (cmd.type != MU_COMMAND_TEXT)
-                    continue;
-                ++drawn;
-                assert(cmd.text.pos.x + width(null, mu_command_text(&ctx, cmd), -1) <= paneW);
-            }
-            assert(drawn > 0); // or the check above passes by drawing nothing
+    // Two-glyph draws on line `topY` are the header's column labels and the grid's
+    // byte pairs; the offset (8) and "ascii" (5) are longer, the ASCII lane
+    // shorter. Returns how many, and checks none of the line crosses `endX`.
+    int columnsOn(int topY, int endX)
+    {
+        int drawn, columns;
+        mu_Command* cmd;
+        while (mu_get_next_command(&ctx, &cmd))
+        {
+            if (cmd.type != MU_COMMAND_TEXT)
+                continue;
+            ++drawn;
+            int w = width(null, mu_command_text(&ctx, cmd), -1);
+            assert(cmd.text.pos.x + w <= endX); // no glyph crosses the edge
+            if (w == 2 * CW && cmd.text.pos.y == topY)
+                ++columns;
         }
+        assert(drawn > 0); // or the bound above passes by drawing nothing
+        return columns;
+    }
+
+    // The header takes a full layout row, so its rect - not the window's - is what
+    // the grid has to be measured against. It is the panel background, the first
+    // rect the header emits.
+    mu_Rect headerRect(int paneW)
+    {
+        mu_begin(&ctx);
+        if (mu_begin_window_ex(&ctx, "w", mu_Rect(0, 0, paneW, 400),
+                MU_OPT_NOTITLE | MU_OPT_NORESIZE | MU_OPT_NOSCROLL | MU_OPT_NOFRAME))
+        {
+            hex_header(&ctx, v, lay, 16, null, STRIP);
+            mu_end_window(&ctx);
+        }
+        mu_end(&ctx);
+
+        mu_Command* cmd;
+        while (mu_get_next_command(&ctx, &cmd))
+            if (cmd.type == MU_COMMAND_RECT)
+                return cmd.rect.rect;
+        assert(0, "header drew no background");
+    }
+
+    foreach (int paneW; [180, 260, 337, 400, 512, 640])
+    {
+        mu_Rect hr = headerRect(paneW);
+        int endX = hr.x + hr.w - STRIP;
+
+        mu_begin(&ctx);
+        if (mu_begin_window_ex(&ctx, "w", mu_Rect(0, 0, paneW, 400),
+                MU_OPT_NOTITLE | MU_OPT_NORESIZE | MU_OPT_NOSCROLL | MU_OPT_NOFRAME))
+        {
+            hex_header(&ctx, v, lay, 16, null, STRIP);
+            mu_end_window(&ctx);
+        }
+        mu_end(&ctx);
+        int headerCols = columnsOn(hr.y, endX);
+
+        mu_begin(&ctx);
+        if (mu_begin_window_ex(&ctx, "w2", mu_Rect(0, 0, paneW, 400),
+                MU_OPT_NOTITLE | MU_OPT_NORESIZE | MU_OPT_NOSCROLL | MU_OPT_NOFRAME))
+        {
+            hex_paint(&ctx, v, lay, mu_Rect(hr.x, 20, hr.w - STRIP, 200), 0, 16, 16, null);
+            mu_end_window(&ctx);
+        }
+        mu_end(&ctx);
+        int gridCols = columnsOn(20, endX);
+
+        // The header must label exactly the columns the grid has room to draw.
+        assert(headerCols > 0);
+        assert(headerCols == gridCols);
+    }
 }
 
 // Map a mouse position (screen space) to a byte index, or -1 if it misses a
