@@ -3,12 +3,14 @@
 module about;
 
 import std.format : format;
+import std.math : sqrt;
 import std.string : toStringz;
 import bindbc.sdl : SDL_OpenURL, SDL_GetVersion,
     SDL_VERSIONNUM_MAJOR, SDL_VERSIONNUM_MINOR, SDL_VERSIONNUM_MICRO;
 import ddlogger;
 import ddui;
 import elite : elite_open;
+import hexview : hex_classify;
 
 /// Application version. Single source of truth: dub.sdl carries no version
 /// field, since dub derives package versions from git tags.
@@ -51,7 +53,10 @@ private string sdlVersion()
 private enum TITLE = "About vddhx";
 
 private enum int WIDTH  = 460;
-private enum int HEIGHT = 238;
+private enum int HEIGHT = 246;
+
+/// Side of the icon beside the heading.
+private enum int MARK = 48;
 
 private enum mu_Color LINK_COLOR = mu_Color(110, 170, 255, 255);
 private enum mu_Color LINK_HOVER = mu_Color(160, 205, 255, 255);
@@ -90,7 +95,12 @@ void about_frame(mu_Context* ctx, int width, int height)
             MU_OPT_NORESIZE | MU_OPT_NOSCROLL | MU_OPT_CLOSED) == 0)
         return;
 
+    static immutable int[2] heading = [ MARK, -1 ];
+    mu_layout_row(ctx, 2, heading.ptr, MARK);
+    about_mark(ctx, mu_layout_next(ctx));
+
     static immutable int[1] full = [ -1 ];
+    mu_layout_begin_column(ctx);
     mu_layout_row(ctx, 1, full.ptr, 0);
     if (about_secret(ctx, "vddhx " ~ VERSION))
     {
@@ -100,7 +110,8 @@ void about_frame(mu_Context* ctx, int width, int height)
         // just launched.
         mu_get_current_container(ctx).open = 0;
     }
-    mu_label(ctx, "Visual DDHX, a hex editor.");
+    mu_label(ctx, "A graphical port of the ddhx hex editor.");
+    mu_layout_end_column(ctx);
 
     // Label column wide enough for the longest caption, value column fills.
     static immutable int[2] fields = [ 92, -1 ];
@@ -132,6 +143,89 @@ void about_frame(mu_Context* ctx, int width, int height)
         mu_get_current_container(ctx).open = 0;
 
     mu_end_window(ctx);
+}
+
+// The application icon's palette. The eight byte-class cells come from
+// hex_classify itself, so the mark cannot drift from what the hex panel draws.
+private enum mu_Color NUL    = hex_classify(0, 0x00, null);
+private enum mu_Color PRINT  = hex_classify(0, 'A',  null);
+private enum mu_Color WS     = hex_classify(0, '\n', null);
+private enum mu_Color CTRL   = hex_classify(0, 0x01, null);
+private enum mu_Color HIGH   = hex_classify(0, 0x80, null);
+/// Not a byte class: the bookmark wash is a background tint, too dark to carry a
+/// whole cell on its own.
+private enum mu_Color ACCENT = mu_Color(230, 170, 60, 255);
+/// ui.d's CANVAS is pure black, which would vanish into a dark dialog.
+private enum mu_Color PLATE  = mu_Color(18, 18, 22, 255);
+
+private immutable mu_Color[3][3] MARK_CELLS = [
+    [HIGH,  PRINT,  CTRL],
+    [PRINT, ACCENT, WS],
+    [NUL,   NUL,    HIGH],
+];
+
+/// Draw the application icon into `box`.
+///
+/// Redrawn from tools/mkicon.d's geometry rather than loaded from assets/icon,
+/// so the dialog looks right whether or not the icon files were ever installed.
+/// Rasterising the real thing was measured at 28ms for a 256 - fine to spend
+/// once in a build script, not on every launch - and at this size the difference
+/// is the antialiasing alone.
+private void about_mark(mu_Context* ctx, mu_Rect box)
+{
+    // mkicon.d's design space: plate inset 2 of 64, side 60, radius 13; cells 12
+    // wide and 3 apart from 11, corners at 2.5.
+    const int n = box.w < box.h ? box.w : box.h;
+    const float u = n / 64.0f;
+    const int ox = box.x + (box.w - n) / 2;
+    const int oy = box.y + (box.h - n) / 2;
+
+    int at(float v) { return cast(int)(v * u + 0.5f); }
+
+    round_rect(ctx, mu_Rect(ox + at(2), oy + at(2), at(60), at(60)), 13 * u, PLATE);
+
+    const int cw = at(12);
+    foreach (int row, const mu_Color[3] line; MARK_CELLS)
+        foreach (int col, mu_Color c; line)
+        {
+            round_rect(ctx, mu_Rect(ox + at(11 + col * 15), oy + at(11 + row * 15), cw, cw),
+                2.5f * u, c);
+        }
+}
+
+/// Fill a rounded rectangle out of ddui's only shape.
+///
+/// One scanline at a time, except that consecutive rows sharing an inset collapse
+/// into a single rect: a radius of r contributes at most r distinct insets per
+/// corner, so the whole mark costs about sixty rects rather than one per row.
+/// Unantialiased, which at a 2px cell radius is a single-pixel jag.
+private void round_rect(mu_Context* ctx, mu_Rect r, float rad, mu_Color color)
+{
+    int runY, runInset = row_inset(0, r.h, rad);
+    foreach (int y; 1 .. r.h)
+    {
+        const int inset = row_inset(y, r.h, rad);
+        if (inset == runInset)
+            continue;
+        mu_draw_rect(ctx, mu_Rect(r.x + runInset, r.y + runY, r.w - 2 * runInset, y - runY), color);
+        runInset = inset;
+        runY = y;
+    }
+    mu_draw_rect(ctx, mu_Rect(r.x + runInset, r.y + runY, r.w - 2 * runInset, r.h - runY), color);
+}
+
+/// Horizontal inset of one scanline, 0 between the corner arcs.
+private int row_inset(int y, int h, float rad)
+{
+    const float mid = y + 0.5f;
+    float d = void;
+    if (mid < rad)
+        d = rad - mid;
+    else if (mid > h - rad)
+        d = mid - (h - rad);
+    else
+        return 0;
+    return cast(int)(rad - sqrt(rad * rad - d * d) + 0.5f);
 }
 
 /// A label that quietly answers to a click. Drawn exactly as mu_label draws it,

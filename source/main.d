@@ -6,6 +6,7 @@ import ddlogger;
 import bindbc.sdl;
 import ddui;
 import hexview;
+import icon : icon_apply;
 import loader;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_KEY_UP, OMNI_KEY_DOWN;
@@ -47,6 +48,8 @@ int main(string[] args)
         return 1;
     }
     scope(exit) SDL_DestroyWindow(window);
+
+    icon_apply(window);
 
     if (SDL_SetWindowMinimumSize(window, 640, 480) == false)
     {
