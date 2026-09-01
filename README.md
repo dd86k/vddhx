@@ -1,6 +1,6 @@
-# vddhx
+# <img src="assets/icon/vddhx-64.png" width="28" alt=""> vddhx
 
-Visual DDHX: a graphical port of the [ddhx](https://github.com/dd86k/ddhx) hex editor on
+A graphical port of the [ddhx](https://github.com/dd86k/ddhx) hex editor on
 SDL3 and [ddui](https://github.com/dd86k/ddui), while using the same robust document core as ddhx.
 
 Tabs and splits, byte-class colouring, a minimap, ddhx's find and goto syntax,
