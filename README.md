@@ -12,10 +12,16 @@ Status: 0.1.0, in development.
 
 ## Building
 
-Needs a D compiler and dub. The default configuration opens SDL3 at startup, so
-it wants the SDL3 and SDL3_ttf shared libraries installed (`libsdl3-0` and
-`libsdl3-ttf-0` on Debian/Ubuntu, `SDL3.dll` and `SDL3_ttf.dll` beside the
-executable on Windows).
+Requirements:
+- A D compiler with front-end 2.103 or newer (bindbc-sdl uses named arguments)
+  - DMD: 2.103 or newer
+  - GDC: 14 or newer (13 has the front-end, but its back-end crashes on bindbc-sdl)
+  - LDC: 1.33 or newer
+- DUB: Available via dlang.org (bundled with dmd) or your distro's package manager
+
+The default configuration opens SDL3 dynamically at startup, so you'll need the
+SDL3 and SDL3_ttf shared libraries installed (`libsdl3-0` and `libsdl3-ttf-0` on
+Debian/Ubuntu, `SDL3.dll` and `SDL3_ttf.dll` beside the executable on Windows).
 
 ```
 dub build
