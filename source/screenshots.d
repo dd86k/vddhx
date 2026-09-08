@@ -430,6 +430,19 @@ int screenshot_run(string[] args)
     frame();
     shot("tabs-select.bmp");
 
+    // The pointer resting on a tab puts the document's full path up, which is what
+    // the tab has no room for. Real time has to pass: the tip is on a delay, and a
+    // scripted run draws its frames faster than a hand can hold still.
+    {
+        import core.thread : Thread;
+        import core.time : msecs;
+        mu_Vec2 rest = find("other.bin");
+        mu_input_mousemove(&ctx, rest.x + 3, rest.y + 3); frame(); frame();
+        Thread.sleep(600.msecs);
+        frame();
+        shot("tab-tip.bmp");
+    }
+
     // Dragging a tab sideways reorders the strip, each move past a neighbour's
     // middle reporting one step, so the two moves below walk mid.bin from the
     // front of the strip to the back. The tab is drawn from the pointer while this

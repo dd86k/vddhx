@@ -51,6 +51,11 @@ struct TabBar
 
     private:
 
+    // The tab the pointer is resting on this frame and where it sits, for a caller
+    // with more to say about it than fits on a tab. -1 for none. See tab_hover.
+    int hovered = -1;
+    mu_Rect hoverRect;
+
     // Pixels the strip is scrolled right by when the tabs overflow it.
     int scrollX;
 
@@ -170,6 +175,10 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     // strip has nothing to show.
     int badgeW = tab_badge(ctx, bar, strip, th, font);
 
+    // Settled afresh every frame from where the pointer is now, so a tab that closes
+    // or scrolls out from under it cannot leave a stale one reported.
+    bar.hovered = -1;
+
     if (items.length == 0)
         return action;
 
@@ -271,6 +280,12 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
         bool bodyHot  = ctx.hover == id;
         bool closeHot = ctx.hover == cid;
 
+        if (bodyHot || closeHot)
+        {
+            bar.hovered = cast(int) i;
+            bar.hoverRect = r;
+        }
+
         if (ctx.mouse_pressed == MU_MOUSE_LEFT)
         {
             if (ctx.focus == cid)
@@ -367,6 +382,19 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     mu_draw_control_text(ctx, "+", newR, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
 
     return action;
+}
+
+/// The tab the pointer is resting on (`index`, into the slice the strip was handed)
+/// and where it sits in window coordinates, for a caller wanting to say more about
+/// it than the tab has room for.
+///
+/// False while a tab is in hand: what the pointer is over during a drag is a
+/// destination, not something being asked about.
+bool tab_hover(ref const(TabBar) bar, out int index, out mu_Rect r)
+{
+    index = bar.hovered;
+    r = bar.hoverRect;
+    return bar.hovered >= 0 && bar.dragging == false;
 }
 
 /// Whether a tab is being dragged out of `bar`'s strip, and if so which one

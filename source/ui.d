@@ -2,6 +2,7 @@
 module ui;
 
 import core.atomic : atomicLoad, atomicStore;
+import core.time : Duration, MonoTime, msecs;
 import std.string : fromStringz, toStringz, strip;
 import bindbc.sdl;
 import ddlogger;
@@ -13,6 +14,7 @@ import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
 import bookmarks;
 import hexview;
+import uitext : ui_elide;
 import omnibar;
 import search;
 import split;
@@ -255,6 +257,36 @@ struct OmniTab
 }
 /// Ditto.
 __gshared OmniTab[] omniTabs;
+
+/// The hover behind the tab tooltip: which tab the pointer is resting on, where it
+/// sits, and since when.
+///
+/// A tab shows a base name, which is what a tab has room for and what tells one
+/// file from another most of the time; the path is what tells two files of the same
+/// name apart, and it goes here rather than on the tab.
+///
+/// Reported by ui_pane as each strip draws and settled by ui_panes once they all
+/// have: only one pane can hold the pointer, and no strip can know it is the one.
+struct TabTip
+{
+    Pane* pane;
+    int index = -1;
+    mu_Rect rect;
+    MonoTime since;
+    bool seen;
+}
+/// Ditto.
+__gshared TabTip tip;
+
+/// How long the pointer rests on a tab before its path comes up. Long enough that
+/// crossing the strip on the way somewhere else puts nothing on screen.
+enum Duration TIP_DELAY = msecs(500);
+
+/// The window's size this frame, for the few things placed against its edges from
+/// outside ddui's layout. See ui_tip.
+__gshared int winW;
+/// Ditto.
+__gshared int winH;
 
 /// The bookmark the naming prompt is about: the document it belongs to, and the
 /// offset it starts at rather than its place in the list, since an edit made while
@@ -1256,6 +1288,20 @@ __gshared Pane* dropPane;
 enum mu_Color FOCUS_EDGE = mu_Color(110, 170, 255, 130);
 /// Ditto, thickness in pixels.
 enum int FOCUS_EDGE_W = 2;
+
+/// The tab tooltip: a panel a shade lighter than the strip it drops out of, so it
+/// reads as sitting over the window rather than cut into it.
+enum mu_Color TIP_BACK = mu_Color(48, 48, 58, 255);
+/// Ditto.
+enum mu_Color TIP_EDGE = mu_Color(80, 80, 95, 255);
+/// Ditto.
+enum mu_Color TIP_TEXT = mu_Color(215, 215, 225, 255);
+/// Ditto, the inset around its text.
+enum int TIP_PAD = 5;
+/// Ditto, the gap between it and the tab it belongs to.
+enum int TIP_DROP = 2;
+/// Ditto, how close to the window's edges it may come.
+enum int TIP_MARGIN = 4;
 
 enum mu_Color DROP_EDGE = mu_Color(110, 170, 255, 255);
 /// Ditto, the wash over the pane itself, translucent so the bytes read through.
@@ -2936,12 +2982,15 @@ void ui_omni_run(int id)
 /// proper animates (for now), so this is only ever the easter egg.
 public bool ui_animating()
 {
-    return elite_animating();
+    return elite_animating() || ui_tip_pending();
 }
 
 /// Build one frame of UI. Call between mu_begin and mu_end.
 public void ui_frame(mu_Context* ctx, int width, int height)
 {
+    winW = width;
+    winH = height;
+
     // The menubar sits flush against the window's top and side edges. The body's
     // inset is fixed when mu_begin_window_ex pushes it, so the padding is zeroed
     // across that call and restored for the content below.
@@ -3199,6 +3248,13 @@ void ui_panes(mu_Context* ctx, int statusH)
             tab_ghost(ctx, src.tabs, src.items[ghost.index], ghost.rect);
     }
 
+    // Every strip has had its say, so a hover nobody reported is the pointer having
+    // left the tabs altogether.
+    if (tip.seen == false)
+        tip = TabTip.init;
+    tip.seen = false;
+    ui_tip(ctx);
+
     // Every pane has drawn, so where each is scrolled to is settled: carry that
     // across the comparisons before anything can rearrange the grid.
     ui_sync_diffs();
@@ -3342,6 +3398,57 @@ void ui_mark_pane(mu_Context* ctx, mu_Rect r)
     ui_outline(ctx, r, DROP_EDGE, DROP_EDGE_W);
 }
 
+/// Whether a hover is counting towards its tooltip but has not got there yet.
+///
+/// Public because the loop sleeps: the pointer has stopped moving, so nothing is
+/// going to arrive to wake it when the wait is up, and the frame the tip is due on
+/// would never be drawn. It stops holding the moment the tip is up, so this costs
+/// TIP_DELAY of frames per hover and nothing while one is on screen.
+public bool ui_tip_pending()
+{
+    return tip.pane !is null && MonoTime.currTime - tip.since < TIP_DELAY;
+}
+
+/// The tab tooltip: the full path of the document under the pointer, once it has
+/// rested there long enough.
+///
+/// Drawn from ui_panes once every pane is down, so it passes over the panels rather
+/// than being clipped to the strip it belongs to.
+void ui_tip(mu_Context* ctx)
+{
+    if (tip.pane is null || ui_tip_pending())
+        return;
+    // The grid can have moved under a hover reported earlier in the same frame.
+    if (ui_pane_index(tip.pane) < 0 || tip.index >= tip.pane.views.length)
+        return;
+
+    Document* d = tip.pane.views[tip.index].doc;
+    string full = d.path.length ? d.path : "not saved yet";
+
+    mu_Font font = ctx.style.font;
+    int th = ctx.text_height(font);
+    // Never wider than the window, however deep the path is nested.
+    char[512] scratch = void;
+    string text = ui_elide(ctx, full, winW - TIP_PAD * 2 - TIP_MARGIN * 2, scratch);
+    if (text.length == 0)
+        return;
+
+    int tw = ctx.text_width(font, text.ptr, cast(int) text.length);
+    mu_Rect r = mu_Rect(tip.rect.x, tip.rect.y + tip.rect.h + TIP_DROP,
+        tw + TIP_PAD * 2, th + TIP_PAD * 2);
+
+    // Held inside the window rather than pinned to the tab: a tab at the right edge
+    // would otherwise hang its path off the side, and the strip of a pane stacked at
+    // the bottom has no room under it.
+    r.x = mu_clamp(r.x, TIP_MARGIN, mu_max(TIP_MARGIN, winW - TIP_MARGIN - r.w));
+    if (r.y + r.h > winH - TIP_MARGIN)
+        r.y = tip.rect.y - TIP_DROP - r.h;
+
+    mu_draw_rect(ctx, r, TIP_BACK);
+    ui_outline(ctx, r, TIP_EDGE, 1);
+    mu_draw_text(ctx, font, text, mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD), TIP_TEXT);
+}
+
 /// A rectangle's four edges, `w` pixels thick, drawn inside it.
 void ui_outline(mu_Context* ctx, mu_Rect r, mu_Color c, int w)
 {
@@ -3381,6 +3488,22 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
         p.items[0 .. p.views.length], cast(int) p.current, at, target);
     if (action != TabAction.none)
         req = TabRequest(p, action, at, target);
+
+    int hoverAt;
+    mu_Rect hoverRect;
+    if (tab_hover(p.tabs, hoverAt, hoverRect))
+    {
+        // Moving to another tab restarts the wait; resting on the same one goes on
+        // counting, so sliding along a strip does not flash a path per tab.
+        if (tip.pane !is p || tip.index != hoverAt)
+        {
+            tip.pane  = p;
+            tip.index = hoverAt;
+            tip.since = MonoTime.currTime;
+        }
+        tip.rect = hoverRect;
+        tip.seen = true;
+    }
 
     View* v = p.views[p.current];
     v.hex.minimap = minimapOn != 0;

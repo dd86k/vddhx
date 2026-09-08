@@ -36,6 +36,10 @@ ddui is immediate mode, so nothing is retained between frames but the state
 modules hold themselves. Two consequences worth knowing before touching the
 loop:
 
+- **A delay needs `ui_animating`.** Anything that has to appear a while after the
+  last input - the tab tooltip - has nothing to wake the loop when its wait is up,
+  the pointer having stopped moving. `ui_tip_pending` holds `ui_animating` for as
+  long as the wait, and lets go once the tip is up.
 - **The loop sleeps.** Idle frames are not drawn: `SDL_WaitEvent` blocks until
   something arrives, then `FRAMES_PER_INPUT` frames are drawn and it sleeps
   again. One frame is not enough, because a click that opens a popup or moves
