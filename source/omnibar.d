@@ -313,6 +313,10 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     mu_Rect list = mu_layout_next(ctx);
     mu_draw_rect(ctx, list, OMNI_LIST);
 
+    // Room for the position indicator, and only when the list runs past its
+    // window: under a list shown whole a bar would say nothing.
+    int barW = count > visible ? BAR_W + BAR_INSET * 2 : 0;
+
     OmniAction action = (res & MU_RES_SUBMIT) && count ?
         OmniAction.accept : OmniAction.none;
 
@@ -344,8 +348,14 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
         else if (ctx.hover == rid)
             mu_draw_rect(ctx, r, OMNI_ROW_HOVER);
 
-        omni_row(ctx, rows[i], r);
+        // The text stops short of the bar, so a long label elides rather than
+        // running under it; the row itself stays full width to click and highlight.
+        omni_row(ctx, rows[i], mu_Rect(r.x, r.y, r.w - barW, r.h));
     }
+
+    if (barW)
+        omni_scrollbar(ctx, mu_Rect(list.x + list.w - BAR_INSET - BAR_W, list.y,
+            BAR_W, list.h), o.scroll, visible, count);
 
     // Anything that takes focus from the query box - a click on the grid behind, a
     // menu - means the user is done with the omnibar. Enter clears the focus
@@ -387,6 +397,8 @@ enum mu_Color OMNI_ROW_HOVER = mu_Color( 62,  62,  74, 255);
 enum mu_Color OMNI_ACCENT    = mu_Color(110, 170, 255, 255); // selected row's edge, unsaved dot
 enum mu_Color OMNI_DIM       = mu_Color(150, 150, 165, 255); // detail column
 enum mu_Color OMNI_HINT      = mu_Color(120, 120, 135, 255); // placeholder, empty notice
+enum mu_Color OMNI_BAR_TRACK = mu_Color( 44,  44,  54, 255);
+enum mu_Color OMNI_BAR_THUMB = mu_Color( 90, 110, 150, 255);
 
 enum int MARGIN     = 40; // pixels kept clear either side of the box
 enum int MIN_WIDTH  = 240;
@@ -397,6 +409,9 @@ enum int ROW_GAP    = 10; // kept clear between the label and what follows it
 enum int ACCENT_W   = 2;  // width of the selected row's left edge
 enum int ROW_DOT    = 6;  // side of the unsaved-changes dot
 enum int HINT_INSET = 4;  // placeholder's offset past the caret
+enum int BAR_W      = 3;  // position indicator's width
+enum int BAR_INSET  = 3;  // kept clear either side of it
+enum int BAR_MIN    = 12; // shortest thumb, so a long list still shows one
 /// Fraction of a row the detail column may take before it is elided too.
 enum int DETAIL_SHARE = 2;
 
@@ -585,6 +600,21 @@ unittest
     assert(got.length == 1);
     type("zzz");
     assert(omni_filter(o, bare).length == 0);
+}
+
+/// Where the visible rows sit in the whole list: a thumb as tall a fraction of the
+/// track as `visible` is of `count`, at the scroll's place along it. Read only - the
+/// list is driven by the arrows, so there is nothing here to grab.
+void omni_scrollbar(mu_Context* ctx, mu_Rect track, int scroll, int visible, int count)
+{
+    mu_draw_rect(ctx, track, OMNI_BAR_TRACK);
+
+    // Floored, so a list of hundreds still leaves something to see.
+    int thumbH = mu_clamp(visible * track.h / count, BAR_MIN, track.h);
+    int travel = track.h - thumbH;
+    int last   = count - visible;
+    int y = track.y + (last > 0 ? scroll * travel / last : 0);
+    mu_draw_rect(ctx, mu_Rect(track.x, y, track.w, thumbH), OMNI_BAR_THUMB);
 }
 
 /// Draw one row's text: the label on the left, elided to what is left after the
