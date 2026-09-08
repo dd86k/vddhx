@@ -11,7 +11,7 @@
 ///     canned UI states and captures each, so visual regressions can be checked
 ///     without a display. It writes its own input files (see Fixtures), so a run
 ///     needs nothing but the executable. Convert the BMPs with
-///     `ffmpeg -y -i x.bmp x.png`.
+///     `rdmd tools/bmp2png.d x.bmp x.png` (or ffmpeg, if it is around).
 ///     Adding `--readme` runs one posed scenario instead of the regression set,
 ///     which is where assets/screenshot.png comes from.
 /// Authors: dd86k <dd@dax.moe>
@@ -752,6 +752,26 @@ int screenshot_run(string[] args)
     frame();
     shot("omni-marks-jump.bmp");
 
+    // Scenario 15b: naming the run the jump above landed on. The box comes up on a
+    // prompt rather than a prefix, so the typing is the name; afterwards the status
+    // bar carries it, and the '@' list reads as the name with the offset behind it.
+    ui_mark_name();
+    frame(); frame();
+    mu_input_text(&ctx, "magic");
+    frame(); frame();
+    shot("mark-name.bmp");
+    tap(MU_KEY_RETURN);
+    frame();
+    shot("mark-named.bmp");
+    ui_omni_toggle(OMNI_BOOKMARK);
+    frame(); frame();
+    shot("omni-marks-named.bmp");
+    mu_input_text(&ctx, "mag");
+    frame(); frame();
+    find("magic"); // the name is what the row is found by now
+    ui_omni_close();
+    frame();
+
     // A command that puts the box back up on another prefix, rather than doing
     // something and going away: the palette's own route into the inspector.
     ui_omni_toggle(OMNI_COMMAND);
@@ -876,12 +896,13 @@ int screenshot_run(string[] args)
     // that opened it, and every one of these used to blink and be gone the next
     // frame. One shot for the sheet, the rest checked by finding a row of the mode
     // they should have put up.
-    static immutable string[3][5] raises = [
+    static immutable string[3][6] raises = [
         [ "Help",      "Keyboard Shortcuts...", "Omnibar: this sheet" ],
         [ "Search",    "Find...",               "waiting for a pattern" ],
         [ "Search",    "Go to Offset...",       "waiting for an offset" ],
         [ "View",      "Inspect Bytes...",      "u8" ],
         [ "Bookmarks", "List Bookmarks...",     "no bookmarks in this document" ],
+        [ "Bookmarks", "Name Bookmark...",      "type a name, Enter to set" ],
     ];
     foreach (ref immutable string[3] step; raises)
     {
@@ -897,6 +918,8 @@ int screenshot_run(string[] args)
         ui_omni_close();
         frame();
     }
+    ui_mark_clear(); // Name Bookmark marked the caret to have something to name
+    frame();
 
     // Scenario 19: the easter egg. Last of the set, since it leaves two dialogs
     // stacked and both own a control the label search would find first. The version
