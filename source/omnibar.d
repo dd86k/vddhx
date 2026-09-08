@@ -72,6 +72,10 @@ enum OmniAction
 {
     none,    /// Still open, nothing settled.
     accept,  /// A row was taken (Enter, or a click on it). The box has closed.
+    /// Ditto, with Shift held: "take this row, and bring it to me" rather than
+    /// "go to it". The box only reports which it was; what the difference means -
+    /// or that there is none - is the caller's to decide, mode by mode.
+    transfer,
     dismiss, /// The box lost focus and closed without taking anything.
 }
 
@@ -317,8 +321,11 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     // window: under a list shown whole a bar would say nothing.
     int barW = count > visible ? BAR_W + BAR_INSET * 2 : 0;
 
-    OmniAction action = (res & MU_RES_SUBMIT) && count ?
-        OmniAction.accept : OmniAction.none;
+    // Shift decides which of the two takings it is, read at the moment the row goes
+    // rather than stored: the same modifier answers for Enter and for a click, so
+    // the pointer is not the second-class way in.
+    OmniAction taken = (ctx.key_down & MU_KEY_SHIFT) ? OmniAction.transfer : OmniAction.accept;
+    OmniAction action = (res & MU_RES_SUBMIT) && count ? taken : OmniAction.none;
 
     if (count == 0)
     {
@@ -336,7 +343,7 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
         if (ctx.mouse_pressed == MU_MOUSE_LEFT && ctx.focus == rid)
         {
             o.selected = i;
-            action = OmniAction.accept;
+            action = taken;
         }
 
         bool active = i == o.selected;
@@ -365,7 +372,7 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
 
     if (action != OmniAction.none)
     {
-        if (action == OmniAction.accept)
+        if (action != OmniAction.dismiss)
             chosen = rows[o.selected].id;
         omni_hide(o);
     }

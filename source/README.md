@@ -79,6 +79,25 @@ So a document does not know what is looking at it, and several views can point a
 one: that is what puts the same file in two panes at different offsets. Closing a
 tab closes a view; the document outlives it until its last view goes.
 
+**One document per file.** `ui_load` hands back the document a path already has
+rather than building a second one over the same bytes, and `ui_save_pending`
+refuses a destination another document holds. Two documents on one file would
+each carry their own editor, undo history and bookmarks, so an edit in one tab
+would be invisible in the other and the last save would win silently - while two
+views of one document share all of it. On screen the two states are the same
+picture, which is why only one of them is allowed to exist. Everything the user
+sees of the distinction hangs off it: the `x2` on a tab and the switcher's pane
+column.
+
+Document -> Multiple Views
+
+Each part of that model is shown in exactly one place: the document is the window
+title and the tab, the pane is the number on its strip, the view is the tab. So
+the status bar carries none of them, only what nothing else on screen says - the
+caret offset, the entry mode, the selection length and the bookmark under the
+caret. Anything tempted into it should go to whichever surface owns that fact
+instead; the bar had already grown past the window's width once.
+
 Every level is held by pointer, never by value, because the hex panel's callbacks park a `Document*`
 and a `View*` for ddui to hand back on every read, colour and edit, and those
 have to survive their neighbours closing. A pane is likewise named by its pointer
@@ -126,3 +145,5 @@ Two rules in the routing:
   wants text where the panel wants hex digits and chords.
 - Punctuation shortcuts bind to **typed characters, not keycodes** - a `[` is not
   at a fixed position on every layout.
+- One modifier per level of the grid: `Ctrl+1..9` counts panes, `Alt+1..9` counts
+  tabs within the focused one. A number key never means both at once.

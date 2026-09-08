@@ -5,6 +5,7 @@
 module tabbar;
 
 import core.stdc.string : strlen;
+import std.format : sformat;
 import std.math : abs;
 import ddui;
 import uitext : ui_elide;
@@ -17,6 +18,11 @@ struct TabItem
     string label;
     /// Unsaved changes: the close box shows a dot until it is hovered.
     bool modified;
+    /// How many views the document behind this tab has open in all. Above one the
+    /// tab says so: without it, two tabs named the same are indistinguishable from
+    /// two copies of a file, when in truth they share an editor, an undo history
+    /// and a set of bookmarks.
+    int views;
 }
 
 /// Persistent strip state; keep one across frames. The scroll offset and the
@@ -37,6 +43,11 @@ struct TabBar
     /// keys: with several side by side, only the lit accent says which of their
     /// front tabs the keyboard is in.
     bool unfocused;
+
+    /// Short text drawn left of the first tab, empty for none: the pane's ordinal,
+    /// so the key that jumps to a pane by number is a thing to read rather than to
+    /// count out. Lit with the accent while the strip has the keyboard.
+    string badge;
 
     private:
 
@@ -155,6 +166,10 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     mu_Rect strip = mu_layout_next(ctx);
     mu_draw_rect(ctx, strip, ctx.style.colors[MU_COLOR_TITLEBG]);
 
+    // Before the early return below: a pane is still that pane's number when its
+    // strip has nothing to show.
+    int badgeW = tab_badge(ctx, bar, strip, th, font);
+
     if (items.length == 0)
         return action;
 
@@ -166,7 +181,8 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     // starting a little in so the first tab is not welded to the window edge.
     int newW = h; // square
     mu_Rect newR = mu_Rect(strip.x + strip.w - newW, strip.y, newW, h);
-    mu_Rect lane = mu_Rect(strip.x + TAB_INSET, strip.y, strip.w - newW - TAB_INSET, h);
+    int laneX = strip.x + TAB_INSET + badgeW;
+    mu_Rect lane = mu_Rect(laneX, strip.y, strip.x + strip.w - newW - laneX, h);
 
     int closeW = th;         // the close box: a square one glyph high
     int inset  = pad + TAB_PAD; // a tab's own left, middle and right insets
@@ -382,6 +398,33 @@ void tab_ghost(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it, mu
 
 private:
 
+// Draw the pane ordinal at the strip's left end and report how much width it took,
+// nothing and zero when the strip carries no badge (one pane needs no number).
+//
+// Not a control: it is a label saying where this pane is in the order the jump keys
+// count, and clicking a pane is what clicking its panel already does.
+int tab_badge(mu_Context* ctx, ref const(TabBar) bar, mu_Rect strip, int th, mu_Font font)
+{
+    if (bar.badge.length == 0)
+        return 0;
+
+    int tw = ctx.text_width(font, bar.badge.ptr, cast(int) bar.badge.length);
+    mu_draw_text(ctx, font, bar.badge,
+        mu_Vec2(strip.x + TAB_INSET + TAB_PAD, strip.y + (strip.h - th) / 2),
+        bar.unfocused ? TAB_DIM : TAB_ACCENT);
+    return tw + TAB_PAD * 2 + TAB_INSET;
+}
+
+// The count drawn on a tab whose document has views elsewhere, empty for a document
+// with only this one. Formatted into the caller's buffer, since it is wanted twice a
+// frame - once to reserve the room, once to draw it - and neither wants a heap.
+const(char)[] tab_tag(ref const(TabItem) it, return ref char[8] buf)
+{
+    if (it.views <= 1)
+        return null;
+    return sformat(buf, "x%d", it.views);
+}
+
 // The strip's own hit test, for deciding a drag has left it: ddui's mu_mouse_over
 // also asks whether the pointer is inside the current clip and hover root, and the
 // whole question here is about a pointer that has gone somewhere else.
@@ -411,6 +454,10 @@ int tab_width(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
 {
     int tw = it.label.length ?
         ctx.text_width(ctx.style.font, it.label.ptr, cast(int) it.label.length) : 0;
+    char[8] tagbuf = void;
+    const(char)[] tag = tab_tag(it, tagbuf);
+    if (tag.length)
+        tw += ctx.text_width(ctx.style.font, tag.ptr, cast(int) tag.length) + inset;
     return mu_clamp(tw + closeW + inset * 3 + TAB_GAP, bar.minWidth, bar.maxWidth);
 }
 
@@ -554,13 +601,30 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
 
     int textX = r.x + inset;
     int textW = closeR.x - inset - textX;
+    int textY = r.y + top + (r.h - top - th) / 2;
+
+    // The shared-views count, dropped when the label would have to be elided to fit
+    // it: tab_width reserves the room, but a strip squeezed to even shares has less
+    // than it asked for, and the name tells tabs apart where the count only hints.
+    char[8] tagbuf = void;
+    const(char)[] tag = tab_tag(it, tagbuf);
+    if (tag.length && textW > 0)
+    {
+        int labelW = ctx.text_width(font, it.label.ptr, cast(int) it.label.length);
+        int tagW = ctx.text_width(font, tag.ptr, cast(int) tag.length);
+        if (labelW + inset + tagW <= textW)
+        {
+            mu_draw_text(ctx, font, cast(string) tag, mu_Vec2(closeR.x - inset - tagW, textY), TAB_DIM);
+            textW -= tagW + inset;
+        }
+    }
+
     if (textW > 0)
     {
         char[256] scratch = void;
         string label = ui_elide(ctx, it.label, textW, scratch);
         if (label.length)
-            mu_draw_text(ctx, font, label,
-                mu_Vec2(textX, r.y + top + (r.h - top - th) / 2), ink);
+            mu_draw_text(ctx, font, label, mu_Vec2(textX, textY), ink);
     }
 
     if (it.modified && closeHot == false)

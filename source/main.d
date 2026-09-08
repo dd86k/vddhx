@@ -268,6 +268,16 @@ int main(string[] args)
                         mu_input_keyup(ctx, okey);
                     break;
                 }
+                // Alt+1..9 picks a tab within the focused pane, counting the way
+                // Ctrl+1..9 counts panes: one modifier per level of the grid, so a
+                // number key is never ambiguous about which it means. After the
+                // omnibar, whose text these would otherwise be typed into.
+                if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_ALT &&
+                    event.key.key >= SDLK_1 && event.key.key <= SDLK_9)
+                {
+                    ui_select_tab(event.key.key - SDLK_1);
+                    break;
+                }
                 // Menu chords: the File and Edit entries, keyed the way every GUI
                 // toolkit keys them.
                 if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)

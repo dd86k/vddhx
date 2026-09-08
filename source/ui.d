@@ -938,6 +938,32 @@ unittest
     assert(ui_clip("é", 1) == "");
 }
 
+/// `n` written out, for the small counts the chrome numbers things with. A table
+/// rather than a format call: every pane asks for its own every frame, and nothing
+/// drawn per frame is allowed to allocate. Past the table it is a dash, a window
+/// with that many panes in it having no room to read them anyway.
+string ui_ordinal(ptrdiff_t n)
+{
+    static immutable string[64] NUMBERS = ()
+    {
+        string[64] t;
+        foreach (int i; 0 .. 64)
+            t[i] = format("%d", i);
+        return t;
+    }();
+
+    return n >= 0 && n < NUMBERS.length ? NUMBERS[n] : "-";
+}
+
+unittest
+{
+    assert(ui_ordinal(1) == "1");
+    assert(ui_ordinal(12) == "12");
+    assert(ui_ordinal(63) == "63");
+    assert(ui_ordinal(64) == "-");
+    assert(ui_ordinal(-1) == "-");
+}
+
 /// Compose "name * - vddhx" into `buf`, which must have room for the fixed parts,
 /// and return the slice written. A name too long for it is cut back.
 char[] ui_title_text(char[] buf, string name, bool dirty)
@@ -1223,6 +1249,14 @@ void wireView(View* v)
 __gshared Pane* dropPane;
 
 /// Colour a pane is picked out in while a file is held over it.
+/// The focused pane's outline, in the accent the tab strip and the omnibar use for
+/// the same thing. Faint on purpose: it says where keys land, which the user only
+/// looks for when they have lost track, and a full-strength frame around a quarter
+/// of the window would compete with the bytes for the whole time they have not.
+enum mu_Color FOCUS_EDGE = mu_Color(110, 170, 255, 130);
+/// Ditto, thickness in pixels.
+enum int FOCUS_EDGE_W = 2;
+
 enum mu_Color DROP_EDGE = mu_Color(110, 170, 255, 255);
 /// Ditto, the wash over the pane itself, translucent so the bytes read through.
 enum mu_Color DROP_WASH = mu_Color(110, 170, 255, 40);
@@ -1289,13 +1323,16 @@ public void ui_drop_clear()
 /// Open a dropped file in the pane it was dropped on rather than the one with the
 /// keyboard, dropping being a pointing gesture; that pane takes the focus with the
 /// file. A drop that misses every pane falls back to the focused one.
+///
+/// The gesture names a pane, so a file already open elsewhere gets a second view
+/// here rather than the window jumping away to where it already was.
 public void ui_drop_file(string path, int x, int y)
 {
     Pane* at = ui_pane_at(x, y);
     if (at)
         focused = at;
     ui_drop_clear();
-    ui_open(path);
+    cast(void)ui_open(path, true);
 }
 
 /// Put up the native Open dialog. It runs async: ui_on_file_picked stashes the
@@ -1383,12 +1420,18 @@ Pane* ui_view_pane(const(View)* v)
     return null;
 }
 
-/// Open `path` through a fresh ddhx editor and give it a tab.
+/// Open `path` and give it a tab in the focused pane.
 ///
 /// The file lands in a new tab, unless the one in front is an untouched scratch
 /// buffer - the state the app starts in - which it takes over instead. On failure
 /// nothing changes and the error is logged.
-public bool ui_open(string path)
+///
+/// A file already open is revealed rather than opened again: the window goes to the
+/// tab that has it. `here` asks for it in the focused pane instead, for the routes
+/// that are a gesture at a particular pane rather than a request for the file - a
+/// drop lands where it was let go, even when the same document is already up
+/// elsewhere. Either way it is one document with two views, never two documents.
+public bool ui_open(string path, bool here = false)
 {
     Document* d = ui_load(path);
     if (d is null)
@@ -1397,6 +1440,30 @@ public bool ui_open(string path)
     // The focused pane is where the user was working - or, on a drop, the pane the
     // file was let go over.
     Pane* p = focused;
+
+    if (ui_view_count(d) > 0)
+    {
+        // Already up in this very pane: nothing to open either way, just come to it.
+        foreach (size_t i, View* q; p.views)
+        {
+            if (q.doc is d)
+            {
+                ui_select_tab_in(p, i);
+                ui_status("%s is already open here", ui_clip(d.title, 48));
+                return true;
+            }
+        }
+
+        if (here == false)
+        {
+            ui_focus_document(d);
+            Pane* at = focused;
+            ui_status("%s is already open in pane %d",
+                ui_clip(d.title, 40), cast(int)(ui_pane_index(at) + 1));
+            return true;
+        }
+    }
+
     View* v = p.views[p.current];
     Document* scratch = v.doc;
 
@@ -1432,14 +1499,51 @@ public bool ui_open(string path)
     return true;
 }
 
+/// The open document for `path`, or null when that file is not open. Paths are
+/// compared after normalising, so the same file reached two ways - a relative path
+/// on the command line, an absolute one from the Open dialog - is one document.
+Document* ui_find_document(string path)
+{
+    string want = ui_path_key(path);
+    if (want.length == 0)
+        return null;
+    foreach (Document* d; docs)
+        if (d.path.length && ui_path_key(d.path) == want)
+            return d;
+    return null;
+}
+
+/// What two paths are compared as. Absolute and normalised, which settles `./x`
+/// against `x` and `a/../b` against `b`. Not symlinks or case: resolving those
+/// means asking the filesystem, and a path that cannot be resolved (a file deleted
+/// under us) would then answer differently from one that can.
+string ui_path_key(string path)
+{
+    import std.path : absolutePath, buildNormalizedPath;
+    try
+        return buildNormalizedPath(absolutePath(path));
+    catch (Exception)
+        return path;
+}
+
 /// Build a document around `path`, or null when it cannot be opened (the error is
 /// logged and put in the status bar, and nothing already open is disturbed).
+///
+/// A file already open comes back as the document it already is, rather than as a
+/// second one over the same bytes. Two documents on one file would each have their
+/// own editor, undo history and bookmarks, so an edit in one tab would be invisible
+/// in the other and the last save would quietly win - while two *views* of one
+/// document, which is what a split makes, share all of it. Those two states look
+/// identical on screen, so only one of them is allowed to exist.
 ///
 /// Split out of ui_open because a comparison needs the file loaded without a tab
 /// being found for it: the second document goes in a pane of its own rather than
 /// wherever an Open would have landed. See ui_compare_with.
 Document* ui_load(string path)
 {
+    if (Document* open = ui_find_document(path))
+        return open;
+
     IDocumentEditor ed;
     try
     {
@@ -1573,6 +1677,21 @@ void ui_save_pending(string dest)
     {
         if (d.editor !is pendingSaveTarget)
             continue;
+
+        // Saving onto a file another tab is holding would leave two documents on one
+        // path: two editors, two undo histories and two sets of bookmarks over the
+        // same bytes, which is the state one-document-per-file exists to rule out -
+        // and the other tab's unsaved edits would be next to write over this. Refused
+        // rather than merged, closing the other tab being the user's call to make.
+        Document* held = ui_find_document(dest);
+        if (held && held !is d)
+        {
+            ui_status("%s is open in another tab; close it first",
+                ui_clip(baseName(dest), 40));
+            logWarn("save as: %s is already open as another document", dest);
+            return;
+        }
+
         if (saveTo(*d, dest))
         {
             d.path  = dest;
@@ -1993,11 +2112,11 @@ immutable Entry[] COMMANDS = [
     Entry("Previous Bookmark","[",            CMD_MARK_PREV,    "mark back backward"),
     Entry("Bookmarks...",     "",             CMD_MARK_LIST,    "marks list show all"),
     Entry("Clear Bookmarks",  "",             CMD_MARK_CLEAR,   "marks remove delete none"),
-    Entry("Split Pane Right", "Ctrl+\\",      CMD_SPLIT,        "vsplit vertical side window new"),
-    Entry("Split Pane Down",  "Ctrl+Shift+\\",CMD_SPLIT_DOWN,   "hsplit horizontal below window new"),
-    Entry("Close Pane",       "",             CMD_CLOSE_PANE,   "unsplit window remove"),
-    Entry("Next Pane",        "",             CMD_PANE_NEXT,    "window forward switch"),
-    Entry("Previous Pane",    "",             CMD_PANE_PREV,    "window back backward switch"),
+    Entry("Split Pane Right", "Ctrl+\\",      CMD_SPLIT,        "vsplit vertical side view new second"),
+    Entry("Split Pane Down",  "Ctrl+Shift+\\",CMD_SPLIT_DOWN,   "hsplit horizontal below view new second"),
+    Entry("Close Pane",       "",             CMD_CLOSE_PANE,   "unsplit remove"),
+    Entry("Next Pane",        "",             CMD_PANE_NEXT,    "forward switch go"),
+    Entry("Previous Pane",    "",             CMD_PANE_PREV,    "back backward switch go"),
     Entry("Toggle Minimap",   "",             CMD_MINIMAP,      "ribbon overview scrollbar sidebar"),
     Entry("Keyboard Shortcuts...", "",       CMD_KEYS,          "keys chords bindings help cheat sheet"),
     Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
@@ -2009,7 +2128,7 @@ immutable Entry[] COMMANDS = [
 /// characters come from the omnibar's own enums, so the sheet cannot drift from
 /// what the box answers to.
 immutable Entry[] PREFIXES = [
-    Entry("Omnibar: switch tab",             "(no prefix)"),
+    Entry("Omnibar: go to an open view",     "(no prefix)"),
     Entry("Omnibar: run a command",          "" ~ OMNI_COMMAND),
     Entry("Omnibar: go to an offset",        "" ~ OMNI_ADDRESS),
     Entry("Omnibar: find a pattern",         "" ~ OMNI_FIND),
@@ -2025,6 +2144,7 @@ immutable Entry[] SHORTCUTS = [
     Entry("Omnibar",                      "Ctrl+E"),
     Entry("Omnibar, on commands",         "Ctrl+Shift+P"),
     Entry("Omnibar, on an offset",        "Ctrl+G"),
+    Entry("Take a row / bring it here",   "Enter / Shift+Enter"),
     Entry("Close the omnibar",            "Esc"),
     Entry("New tab",                      "Ctrl+T"),
     Entry("Open file",                    "Ctrl+O"),
@@ -2034,6 +2154,7 @@ immutable Entry[] SHORTCUTS = [
     Entry("Next / previous tab",          "Ctrl+Tab / Ctrl+Shift+Tab"),
     Entry("Split the pane",               "Ctrl+\\"),
     Entry("Go to pane 1, 2, 3...",        "Ctrl+1 .. Ctrl+9"),
+    Entry("Go to tab 1, 2, 3...",         "Alt+1 .. Alt+9"),
     Entry("Quit",                         "Ctrl+Q"),
     Entry("Find",                         "Ctrl+F"),
     Entry("Find next / previous",         "Ctrl+N / Ctrl+Shift+N"),
@@ -2104,15 +2225,21 @@ const(OmniItem)[] ui_omni_items()
     final switch (omni_mode(omni))
     {
     case OmniMode.switcher:
-        // One row per tab rather than per document: the switcher picks a panel to
-        // go to, and two views of one file are two places to be. The path tells two
-        // same-named files apart, so it is both the detail column and, through the
-        // omnibar's matching, searchable.
+        // One row per view rather than per document: the switcher picks a place to
+        // be, and one file open in two panes is two places.
+        //
+        // The detail column says which pane, and nothing about which tab: the strip
+        // is on screen showing that already, while the pane a row belongs to is the
+        // part a name on its own cannot tell you - and the number is what Ctrl+1..9
+        // then takes. With one pane there is no such question, so the column goes
+        // back to being the path. Either way the path is matched against, so any
+        // part of it still finds the row.
         //
         // A row's id is its place in this list rather than a tab index, which means
         // nothing without the pane it counts within; omniTabs carries the pair back
         // for ui_omni_accept.
         size_t at;
+        bool split = ui_pane_count() > 1;
         foreach (Column* c; columns)
         {
             foreach (Pane* p; c.panes)
@@ -2122,8 +2249,23 @@ const(OmniItem)[] ui_omni_items()
                     if (at >= omniTabs.length)
                         omniTabs.length = at + 16;
                     omniTabs[at] = OmniTab(p, ti);
-                    put(v.doc.title, v.doc.path.length ? v.doc.path : "not saved yet",
-                        cast(int) at, v.doc.editor && v.doc.editor.edited());
+
+                    string path = v.doc.path.length ? v.doc.path : "not saved yet";
+                    string detail = path;
+                    if (split)
+                    {
+                        char[32] where = void;
+                        size_t used = sformat(where, "pane %s",
+                            ui_ordinal(ui_pane_index(p) + 1)).length;
+                        // The row the user is already on, so Enter on it is known to
+                        // be a no-op before it is pressed.
+                        if (p is focused && ti == p.current)
+                            used += sformat(where[used .. $], "  here").length;
+                        detail = ui_row_text(where[0 .. used]);
+                    }
+
+                    put(v.doc.title, detail, cast(int) at,
+                        v.doc.editor && v.doc.editor.edited(), false, path);
                     ++at;
                 }
             }
@@ -2387,15 +2529,27 @@ const(char)[] ui_inspect_value(int index, ubyte[] bytes, char[] buf)
 /// Act on the row the omnibar took, in the mode it was showing when the list was
 /// built (which is not necessarily the mode its text spells out now: a prefix
 /// typed this frame only reaches the list on the next one).
-void ui_omni_accept(OmniMode mode, int id)
+///
+/// `transfer` is the row taken with Shift held: bring it here rather than go to it.
+/// Only the switcher has two readings of a row; every other mode does the one thing
+/// it does either way.
+void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
 {
     final switch (mode)
     {
     case OmniMode.switcher:
         // The id indexes the flat list the rows were built from, which carries the
         // pane as well as the tab.
-        if (id >= 0 && id < omniTabs.length)
-            ui_select_tab_in(omniTabs[id].pane, omniTabs[id].tab); // takes focus itself
+        if (id < 0 || id >= omniTabs.length)
+            break;
+        Pane* from = omniTabs[id].pane;
+        size_t tab = omniTabs[id].tab;
+        // Moving a view to the pane it is already in is the plain jump; so is
+        // moving one when there is nowhere else for it to be.
+        if (transfer && from !is focused)
+            ui_move_view(from, tab, focused); // takes focus itself, as does the jump
+        else
+            ui_select_tab_in(from, tab);
         break;
     case OmniMode.command:
         ui_omni_run(id);
@@ -2854,31 +3008,34 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         int statusH = ctx.text_height(ctx.style.font) + 6;
         ui_panes(ctx, statusH);
 
-        // Edit mode, a dirty marker, caret offset and selection length, in the
-        // strip ui_panes kept free above.
+        // What is under the caret and what typing into it would do, in the strip
+        // ui_panes kept free above. Only what nothing else on screen says: which
+        // document and whether it is dirty are the window title and the tab, which
+        // pane is the number on its strip, which tab is the strip itself. Anything
+        // tempted in here belongs on whichever of those owns it - with a comparison
+        // up and a bookmark under the caret this line used to run off the window,
+        // which is the one state where a status bar has to stay readable.
+        //
+        // The offset and the mode come first because they are there in every frame
+        // and a fixed width: leading with them keeps both at a column the eye can go
+        // straight to, whatever the two variable fields behind them are doing.
         static immutable int[1] srow = [ -1 ];
         mu_layout_row(ctx, 1, srow.ptr, statusH);
         mu_Rect sr = mu_layout_next(ctx);
         mu_draw_rect(ctx, sr, mu_Color(30, 30, 40, 255));
-        char[256] statusbuf = void;
+
         size_t selLen = hex_total(view.hex) ?
             hex_sel_high(view.hex) - hex_sel_low(view.hex) + 1 : 0;
-        string mode  = view.hex.insertMode ? "INS" : "OVR";
-        string dirty = (doc.editor && doc.editor.edited()) ? " *" : "";
-        // Name the counterpart while a comparison is up: without it the dimmed
-        // bytes and the red ones are a state the window gives no other account of.
-        View* other = diff_peer(&view());
-        char[64] cmpbuf = void;
-        const(char)[] cmp = other ?
-            sformat(cmpbuf, "  vs %s", ui_clip(other.doc.title, 48)) : "";
         // The name of the run the caret is in: the wash says a byte is marked, and
         // this is the only place that says what it was marked as.
         ptrdiff_t mark = bookmark_find(doc.marks, cast(long) view.hex.cursor);
         char[64] markbuf = void;
         const(char)[] marked = mark >= 0 && doc.marks[mark].name.length ?
             sformat(markbuf, "  [%s]", ui_clip(doc.marks[mark].name, 40)) : "";
-        char[] status = sformat(statusbuf, "%s%s  offset %08x  selected %u byte(s)%s%s",
-            mode, dirty, view.hex.cursor, selLen, marked, cmp);
+
+        char[160] statusbuf = void;
+        char[] status = sformat(statusbuf, "offset %08x  %s  selected %u byte(s)%s",
+            view.hex.cursor, view.hex.insertMode ? "INS" : "OVR", selLen, marked);
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
         mu_draw_text(ctx, ctx.style.font, cast(string) status,
@@ -2915,9 +3072,10 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     const(OmniItem)[] rows = ui_omni_active() ? ui_omni_items() : null;
     final switch (omni_frame(ctx, omni, rows, width, height, chosen))
     {
-    case OmniAction.none:    break;
-    case OmniAction.accept:  ui_omni_accept(mode, chosen); break;
-    case OmniAction.dismiss: view.hex.takeFocus = true;     break;
+    case OmniAction.none:     break;
+    case OmniAction.accept:   ui_omni_accept(mode, chosen);       break;
+    case OmniAction.transfer: ui_omni_accept(mode, chosen, true);  break;
+    case OmniAction.dismiss:  view.hex.takeFocus = true;           break;
     }
 }
 
@@ -3006,6 +3164,13 @@ void ui_panes(mu_Context* ctx, int statusH)
                     q.weight = colWeights[j];
         }
     }
+
+    // Which pane the keyboard is in, outlined once every pane is down, for the same
+    // reason the drop marker below is drawn there. Only with a choice of panes: an
+    // outline around the only one says nothing, and the tab strip's accent already
+    // covers a window that has never been split.
+    if (ui_pane_count() > 1 && ui_pane_index(focused) >= 0)
+        ui_outline(ctx, focused.rect, FOCUS_EDGE, FOCUS_EDGE_W);
 
     // A file held over the window picks out the pane it would land in. After the
     // loop so it washes over the panel rather than under it: a hex panel is a ddui
@@ -3174,10 +3339,16 @@ void ui_column(mu_Context* ctx, Column* c, mu_Rect r, ref TabRequest req,
 void ui_mark_pane(mu_Context* ctx, mu_Rect r)
 {
     mu_draw_rect(ctx, r, DROP_WASH);
-    mu_draw_rect(ctx, mu_Rect(r.x, r.y, r.w, DROP_EDGE_W), DROP_EDGE);
-    mu_draw_rect(ctx, mu_Rect(r.x, r.y + r.h - DROP_EDGE_W, r.w, DROP_EDGE_W), DROP_EDGE);
-    mu_draw_rect(ctx, mu_Rect(r.x, r.y, DROP_EDGE_W, r.h), DROP_EDGE);
-    mu_draw_rect(ctx, mu_Rect(r.x + r.w - DROP_EDGE_W, r.y, DROP_EDGE_W, r.h), DROP_EDGE);
+    ui_outline(ctx, r, DROP_EDGE, DROP_EDGE_W);
+}
+
+/// A rectangle's four edges, `w` pixels thick, drawn inside it.
+void ui_outline(mu_Context* ctx, mu_Rect r, mu_Color c, int w)
+{
+    mu_draw_rect(ctx, mu_Rect(r.x, r.y, r.w, w), c);
+    mu_draw_rect(ctx, mu_Rect(r.x, r.y + r.h - w, r.w, w), c);
+    mu_draw_rect(ctx, mu_Rect(r.x, r.y, w, r.h), c);
+    mu_draw_rect(ctx, mu_Rect(r.x + r.w - w, r.y, w, r.h), c);
 }
 
 /// Draw one pane: its tab strip, then the hex panel filling what is left of the
@@ -3193,11 +3364,17 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     if (p.items.length < p.views.length)
         p.items.length = p.views.length;
     foreach (size_t i, View* v; p.views)
-        p.items[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited());
+        p.items[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited(),
+            cast(int) ui_view_count(v.doc));
 
     // Only the pane taking keys lights its accent, so with several panes open it
     // is never a guess which one a keystroke lands in.
     p.tabs.unfocused = p !is focused;
+
+    // The number the jump keys count in, on the strip that answers to it. Only worth
+    // the room once there is a choice: a lone pane is nothing to pick out, and its
+    // strip is better off spending the pixels on tabs.
+    p.tabs.badge = ui_pane_count() > 1 ? ui_ordinal(ui_pane_index(p) + 1) : null;
 
     int at, target;
     TabAction action = tab_bar(ctx, "tabs", p.tabs,
