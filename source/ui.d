@@ -21,7 +21,7 @@ import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector
 import std.system : Endian;
 import render : render_font_mono;
 import std.array : Appender, appender;
-import std.format : format, sformat;
+import std.format : format, sformat, formattedWrite;
 import std.path : baseName;
 
 private:
@@ -419,12 +419,26 @@ __gshared char[96] statusText;
 /// Ditto.
 __gshared size_t statusLen;
 
-/// Ditto. Formatted into a fixed buffer, so keep the message short; anything
-/// that does not fit is dropped rather than half-shown.
+/// Ditto. Formatted into a fixed buffer, so keep the message short; whatever
+/// runs past the end is cut.
 void ui_status(Args...)(string fmt, Args args)
 {
+    // NOTE: sformat throws if the message doesn't fit
+    //       "comparing %s with %s" was enough to make it trip.
+    static struct Sink
+    {
+        void put(scope const(char)[] s)
+        {
+            size_t room = statusText.length - statusLen;
+            size_t n = s.length < room ? s.length : room;
+            statusText[statusLen .. statusLen + n] = s[0 .. n];
+            statusLen += n;
+        }
+    }
+    statusLen = 0;
+    Sink sink;
     try
-        statusLen = sformat(statusText, fmt, args).length;
+        formattedWrite(sink, fmt, args);
     catch (Exception e)
         statusLen = 0;
 }
