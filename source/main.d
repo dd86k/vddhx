@@ -354,7 +354,10 @@ int main(string[] args)
                     }
                     if (event.key.key == SDLK_B)
                     {
-                        ui_mark_toggle();
+                        if (event.key.mod & SDL_KMOD_SHIFT)
+                            ui_mark_name();
+                        else
+                            ui_mark_toggle();
                         break;
                     }
                     // ddhx's skip-back / skip-forward, caught here so the arrow

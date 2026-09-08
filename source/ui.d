@@ -2,7 +2,7 @@
 module ui;
 
 import core.atomic : atomicLoad, atomicStore;
-import std.string : fromStringz, toStringz;
+import std.string : fromStringz, toStringz, strip;
 import bindbc.sdl;
 import ddlogger;
 import ddui;
@@ -255,6 +255,17 @@ struct OmniTab
 }
 /// Ditto.
 __gshared OmniTab[] omniTabs;
+
+/// The bookmark the naming prompt is about: the document it belongs to, and the
+/// offset it starts at rather than its place in the list, since an edit made while
+/// the box is up renumbers the list but leaves a mark on its own bytes.
+struct MarkPrompt
+{
+    Document* doc;
+    long at;
+}
+/// Ditto.
+__gshared MarkPrompt markPrompt;
 
 /// The pane taking the keyboard, the view it has in front, and the document that
 /// view is showing: `pane` for the tabs, `view` for the caret and what is on
@@ -1936,7 +1947,7 @@ enum
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_COPY, CMD_PASTE, CMD_GOTO,
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT,
     CMD_SKIP_NEXT, CMD_SKIP_PREV,
-    CMD_MARK, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
+    CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
     CMD_MINIMAP, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
 }
@@ -1963,6 +1974,7 @@ immutable Entry[] COMMANDS = [
     Entry("Skip Forward",     "Ctrl+Right",   CMD_SKIP_NEXT,    "run element next word"),
     Entry("Skip Back",        "Ctrl+Left",    CMD_SKIP_PREV,    "run element previous word"),
     Entry("Toggle Bookmark",  "Ctrl+B",       CMD_MARK,         "mark set flag"),
+    Entry("Name Bookmark...", "Ctrl+Shift+B", CMD_MARK_NAME,    "mark label rename annotate tag comment field"),
     Entry("Next Bookmark",    "]",            CMD_MARK_NEXT,    "mark forward"),
     Entry("Previous Bookmark","[",            CMD_MARK_PREV,    "mark back backward"),
     Entry("Bookmarks...",     "",             CMD_MARK_LIST,    "marks list show all"),
@@ -2013,6 +2025,7 @@ immutable Entry[] SHORTCUTS = [
     Entry("Find next / previous",         "Ctrl+N / Ctrl+Shift+N"),
     Entry("Inspect bytes at the caret",   "Alt+I"),
     Entry("Toggle bookmark",              "Ctrl+B"),
+    Entry("Name the bookmark at the caret", "Ctrl+Shift+B"),
     Entry("Next / previous bookmark",     "] / ["),
     Entry("Cut / copy / paste bytes",     "Ctrl+X / C / V"),
     Entry("Undo / redo",                  "Ctrl+Z / Ctrl+Y"),
@@ -2144,8 +2157,25 @@ const(OmniItem)[] ui_omni_items()
             if (mark.length > 1)
                 used += sformat(head[used .. $], " .. 0x%08x",
                     mark.at + mark.length - 1).length;
-            put(ui_row_text(head[0 .. used]), ui_bookmark_bytes(mark), cast(int) i);
+            string bytes = ui_bookmark_bytes(mark);
+            if (mark.name.length == 0)
+            {
+                put(ui_row_text(head[0 .. used]), bytes, cast(int) i);
+                continue;
+            }
+            // A named mark reads as its name, its address moving in beside the
+            // bytes and staying searchable: "@magic" and "@1f40" have to reach the
+            // same row.
+            char[128] detail = void;
+            put(mark.name,
+                ui_row_text(sformat(detail, "0x%08x  %s", mark.at, bytes)),
+                cast(int) i, false, false, ui_row_text(head[0 .. used]));
         }
+        break;
+    case OmniMode.prompt:
+        string plabel, pdetail;
+        ui_mark_name_preview(plabel, pdetail);
+        put(plabel, pdetail, 0, false, true);
         break;
     case OmniMode.help:
         // The prefixes first, then the chords: equal scores keep this order, so
@@ -2401,6 +2431,10 @@ void ui_omni_accept(OmniMode mode, int id)
             ui_mark_select(view, id);
         view.hex.takeFocus = true;
         break;
+    case OmniMode.prompt:
+        ui_mark_name_commit(omni_query(omni));
+        view.hex.takeFocus = true;
+        break;
     case OmniMode.help:
         view.hex.takeFocus = true; // nothing to run: the sheet is there to be read
         break;
@@ -2564,6 +2598,90 @@ public void ui_mark_toggle()
         ui_status(set ? "bookmark set at %#x" : "bookmark cleared at %#x", at);
 }
 
+/// Name the bookmark under the caret, marking the selection first when there is no
+/// bookmark there yet: naming a field is one thought, and asking for Ctrl+B before
+/// Ctrl+Shift+B would make it two.
+public void ui_mark_name()
+{
+    long at = cast(long) hex_sel_low(view.hex);
+    if (bookmark_has(doc.marks, at) == false)
+    {
+        long len = cast(long) hex_sel_high(view.hex) - at + 1;
+        bookmark_toggle(doc.marks, at, len);
+    }
+
+    ptrdiff_t index = bookmark_find(doc.marks, at);
+    if (index < 0)
+    {
+        ui_status("nothing to name at %#x", at);
+        return;
+    }
+
+    // The run holding the caret can start before it; the prompt is about the whole
+    // of it, so it is that start the answer is applied to.
+    markPrompt = MarkPrompt(&doc(), doc.marks[index].at);
+    omni_prompt(omni, doc.marks[index].name);
+}
+
+/// The naming prompt's one row: which run is being named, and what the text in the
+/// box would do to it.
+void ui_mark_name_preview(out string label, out string detail)
+{
+    Document* d = markPrompt.doc;
+    ptrdiff_t index = d !is null ? bookmark_find(d.marks, markPrompt.at) : -1;
+    if (index < 0)
+    {
+        label  = "the bookmark is gone";
+        detail = "Esc to close";
+        return;
+    }
+
+    const(Bookmark) mark = d.marks[index];
+    char[96] buf = void;
+    label = ui_row_text(sformat(buf, "Name 0x%08x, %d byte(s)", mark.at, mark.length));
+
+    const(char)[] typed = omni_query(omni);
+    if (typed.length == 0)
+        detail = mark.name.length ? "empty: clear the name" : "type a name, Enter to set";
+    else
+        detail = ui_row_text(sformat(buf, `set to "%s"`, ui_clip(cast(string) typed, 48)));
+}
+
+/// Take the answer the prompt came back with. An empty one takes the name off
+/// again, which is the only way back to a plain bookmark short of clearing it.
+void ui_mark_name_commit(const(char)[] typed)
+{
+    Document* d = markPrompt.doc;
+    if (d is null)
+        return;
+
+    string name = ui_mark_name_clean(typed);
+    if (bookmark_rename(d.marks, markPrompt.at, name) == false)
+    {
+        ui_status("the bookmark at %#x is gone", markPrompt.at);
+        return;
+    }
+    if (name.length)
+        ui_status(`bookmark at %#x named "%s"`, markPrompt.at, ui_clip(name, 48));
+    else
+        ui_status("bookmark at %#x unnamed", markPrompt.at);
+}
+
+/// A name as it goes into the list: the blanks either side dropped, and the tabs
+/// and newlines with them, since a name is one line of one column wherever it is
+/// shown or written out.
+string ui_mark_name_clean(const(char)[] typed)
+{
+    const(char)[] text = strip(typed);
+    if (text.length == 0)
+        return null;
+
+    char[] name = new char[text.length];
+    foreach (size_t i, char c; text)
+        name[i] = c == '\t' || c == '\n' || c == '\r' ? ' ' : c;
+    return cast(string) name;
+}
+
 /// Jump to the bookmark either side of the selection, wrapping at the ends, and
 /// select the whole of what was marked there.
 public void ui_mark_step(int dir)
@@ -2629,6 +2747,7 @@ void ui_omni_run(int id)
     case CMD_FIND:      ui_omni_open(OMNI_FIND);     return;
     case CMD_INSPECT:   ui_omni_open(OMNI_INSPECT);  return;
     case CMD_MARK_LIST: ui_omni_open(OMNI_BOOKMARK); return;
+    case CMD_MARK_NAME: ui_mark_name();              return;
     case CMD_KEYS:      ui_omni_open(OMNI_HELP);     return;
     case CMD_ABOUT:     about_open();          break;
     case CMD_QUIT:
@@ -2727,7 +2846,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         mu_layout_row(ctx, 1, srow.ptr, statusH);
         mu_Rect sr = mu_layout_next(ctx);
         mu_draw_rect(ctx, sr, mu_Color(30, 30, 40, 255));
-        char[160] statusbuf = void;
+        char[256] statusbuf = void;
         size_t selLen = hex_total(view.hex) ?
             hex_sel_high(view.hex) - hex_sel_low(view.hex) + 1 : 0;
         string mode  = view.hex.insertMode ? "INS" : "OVR";
@@ -2738,8 +2857,14 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         char[64] cmpbuf = void;
         const(char)[] cmp = other ?
             sformat(cmpbuf, "  vs %s", ui_clip(other.doc.title, 48)) : "";
-        char[] status = sformat(statusbuf, "%s%s  offset %08x  selected %u byte(s)%s",
-            mode, dirty, view.hex.cursor, selLen, cmp);
+        // The name of the run the caret is in: the wash says a byte is marked, and
+        // this is the only place that says what it was marked as.
+        ptrdiff_t mark = bookmark_find(doc.marks, cast(long) view.hex.cursor);
+        char[64] markbuf = void;
+        const(char)[] marked = mark >= 0 && doc.marks[mark].name.length ?
+            sformat(markbuf, "  [%s]", ui_clip(doc.marks[mark].name, 40)) : "";
+        char[] status = sformat(statusbuf, "%s%s  offset %08x  selected %u byte(s)%s%s",
+            mode, dirty, view.hex.cursor, selLen, marked, cmp);
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
         mu_draw_text(ctx, ctx.style.font, cast(string) status,
@@ -3356,6 +3481,7 @@ void ui_menubar(mu_Context* ctx)
     {
         ctx.style.padding = itemPadding;
         if (mu_menu_item_ex(ctx, "Toggle Bookmark",   "Ctrl+B", 0, 0)) ui_mark_toggle();
+        if (mu_menu_item_ex(ctx, "Name Bookmark...",  "Ctrl+Shift+B", 0, 0)) ui_mark_name();
         if (mu_menu_item_ex(ctx, "Next Bookmark",     "]",      0, 0)) ui_mark_step(1);
         if (mu_menu_item_ex(ctx, "Previous Bookmark", "[",      0, 0)) ui_mark_step(-1);
         mu_menu_separator(ctx);

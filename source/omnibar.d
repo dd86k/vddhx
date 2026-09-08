@@ -16,6 +16,10 @@
 /// row instead of a list: the query never filters it out, so the caller can keep
 /// rewriting it into a live preview of what taking it would do.
 ///
+/// One mode has no prefix to reach it by: omni_prompt raises the box on a question
+/// the caller asked (naming a bookmark), where the text is an answer rather than a
+/// search and every character of it is the user's, first one included.
+///
 /// The widget owns the box, the matching and the selection; the caller owns the
 /// rows, asking omni_mode what the box is after and rebuilding the candidates for
 /// that mode each frame. Those rows are matched against the query as it stood at
@@ -60,6 +64,7 @@ enum OmniMode
     inspect,  /// '=': the bytes at the caret, one row per type.
     bookmark, /// '@': the document's bookmarks.
     help,     /// '?': the shortcut sheet.
+    prompt,   /// No prefix, raised by omni_prompt: free text answering a question.
 }
 
 /// What the user did to the box this frame.
@@ -110,6 +115,8 @@ struct Omnibar
 
     // The container's open flag follows this every frame.
     bool shown;
+    // Raised by omni_prompt: the text is an answer, not a query.
+    bool prompting;
     // Set the frame the box is raised, so it takes the keyboard without a click.
     bool focusWanted;
     // The query, NUL-terminated, prefix character and all. ddui's textbox owns the
@@ -134,11 +141,27 @@ bool omni_shown(ref const(Omnibar) o)
 void omni_show(ref Omnibar o, char prefix = 0)
 {
     o.shown = true;
+    o.prompting = false;
     o.focusWanted = true;
     o.selected = 0;
     o.scroll = 0;
     o.text[0] = prefix;
     o.text[prefix ? 1 : 0] = 0;
+}
+
+/// Raise the box on a question of the caller's, with `seed` already typed into it
+/// (the name a bookmark carries, so renaming starts from it rather than from
+/// nothing). The caller recognises the mode as OmniMode.prompt, hands in the one
+/// pinned row that reads back what taking the answer would do, and reads the answer
+/// off omni_query when the row is accepted.
+void omni_prompt(ref Omnibar o, const(char)[] seed = null)
+{
+    omni_show(o);
+    o.prompting = true;
+
+    size_t n = seed.length < o.text.length ? seed.length : o.text.length - 1;
+    o.text[0 .. n] = seed[0 .. n];
+    o.text[n] = 0;
 }
 
 /// Put the box away, keeping nothing but the text (the next omni_show clears it).
@@ -158,10 +181,11 @@ void omni_toggle(ref Omnibar o, char prefix = 0)
         omni_show(o, prefix);
 }
 
-/// What the box is searching, from the character it starts with.
+/// What the box is searching, from the character it starts with - unless it was
+/// raised on a question, which no character of the answer can change.
 OmniMode omni_mode(ref const(Omnibar) o)
 {
-    return omni_prefix_mode(o.text[0]);
+    return o.prompting ? OmniMode.prompt : omni_prefix_mode(o.text[0]);
 }
 
 /// The text being searched for: everything past the mode's prefix character, with
@@ -173,9 +197,15 @@ OmniMode omni_mode(ref const(Omnibar) o)
 /// keystroke reaches it.
 const(char)[] omni_query(ref const(Omnibar) o)
 {
-    size_t at = omni_prefix_mode(o.text[0]) == OmniMode.switcher ? 0 : 1;
-    while (at < o.text.length && o.text[at] == ' ')
-        ++at;
+    // A prompt's text is taken whole: it is a name the user typed, and trimming it
+    // would be this box deciding what a name may start with.
+    size_t at;
+    if (o.prompting == false)
+    {
+        at = omni_prefix_mode(o.text[0]) == OmniMode.switcher ? 0 : 1;
+        while (at < o.text.length && o.text[at] == ' ')
+            ++at;
+    }
     size_t end = at;
     while (end < o.text.length && o.text[end])
         ++end;
@@ -257,7 +287,9 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
         o.scroll   = 0;
     }
 
-    if (o.text[0] == 0)
+    // The prefix sheet would be an answer to a question nobody asked while the box
+    // is holding a prompt; that row's own text says what is wanted there.
+    if (o.text[0] == 0 && o.prompting == false)
         mu_draw_text(ctx, font, HINT,
             mu_Vec2(box.x + pad + HINT_INSET, box.y + (box.h - th) / 2), OMNI_HINT);
 

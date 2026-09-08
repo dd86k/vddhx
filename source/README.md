@@ -15,7 +15,7 @@ this is the map and the handful of things that span modules.
 | `omnibar.d` | the omnibar and its modes |
 | `search.d` | pattern parsing and document scanning |
 | `address.d` | offset expression parsing |
-| `bookmarks.d` | bookmark list and edit shifting |
+| `bookmarks.d` | bookmark list, names, and edit shifting |
 | `menu.d` | menubar widgets (candidates for ddui itself) |
 | `render.d` | SDL3_ttf text engine and font faces |
 | `icon.d` | window icon lookup (BMP only: SDL3 core decodes nothing else) |
