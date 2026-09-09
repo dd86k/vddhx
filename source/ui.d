@@ -14,6 +14,9 @@ import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
 import bookmarks;
 import hexview;
+import layout;
+import layouts.png : PngLayout, png_detect;
+import theme : theme_edge, theme_role;
 import uitext : ui_elide;
 import omnibar;
 import search;
@@ -51,6 +54,14 @@ struct Document
     /// and redo do not: the editor reports only where a change landed, not how far
     /// it moved, so a mark can end up a few bytes off after a rolled-back insert.
     Bookmark[] marks;
+
+    /// Structure over the bytes, when the file's first bytes said what it is. Per
+    /// document for the same reason the marks are: a span is an offset into these
+    /// bytes, and two views of one file are looking at one structure.
+    ///
+    /// Unbound until sniffLayout finds a format it knows, and left that way when it
+    /// does not - the grid then colours bytes by class, as it always did.
+    LayoutCache layout;
 }
 
 /// One way of looking at a document: which document, plus everything about the
@@ -281,6 +292,24 @@ __gshared TabTip tip;
 /// How long the pointer rests on a tab before its path comes up. Long enough that
 /// crossing the strip on the way somewhere else puts nothing on screen.
 enum Duration TIP_DELAY = msecs(500);
+
+/// The hover behind the field tooltip: which view the pointer is in and the byte it is
+/// resting on.
+///
+/// No rect, unlike TabTip: a tab is a target with edges to hang a tip off, a byte is
+/// wherever the pointer happens to be, so the tip follows the pointer instead.
+///
+/// Found rather than reported. Each panel records the byte under the pointer as it
+/// draws (see HexView.hoverByte) and only one of them can hold it, so ui_panes asks
+/// the views afterwards rather than every pane racing to say so.
+struct SpanTip
+{
+    View* view;
+    long at = -1;
+    MonoTime since;
+}
+/// Ditto.
+__gshared SpanTip spanTip;
 
 /// The window's size this frame, for the few things placed against its edges from
 /// outside ddui's layout. See ui_tip.
@@ -1107,10 +1136,125 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
         ubyte other;
         if (diff_peer_byte(v, offset, other) && other != value)
             return DIFF_CHANGED;
-        return diff_dim(hex_classify(offset, value, null));
+        return diff_dim(byteColor(v, offset, value));
     }
 
-    return hex_classify(offset, value, null);
+    return byteColor(v, offset, value);
+}
+
+/// What a byte *is*: the role the document's layout gives it, or its class when no
+/// layout covers it. The two are one channel - both answer the same question - so a
+/// field's colour replaces the classifier's rather than competing with it.
+mu_Color byteColor(View* v, size_t offset, ubyte value)
+{
+    LayoutRole role = layout_role(v.doc.layout, cast(long) offset);
+    return role != LayoutRole.none
+        ? theme_role(role) : hex_classify(offset, value, null);
+}
+
+/// Structure hook for the grid: the span `level` levels in from the outermost one over
+/// `pos`, for the border the panel draws round it. `user` is the View in hex.spanUser.
+///
+/// The layout hangs off the document, so two views of one file outline the same fields
+/// and the parse behind them is done once.
+bool hexSpan(long pos, int level, ref HexSpan span, void* user)
+{
+    View* v = cast(View*) user;
+    if (v is null || v.doc is null)
+        return false;
+
+    LayoutSpan found;
+    if (layout_level(v.doc.layout, pos, level, found) == false)
+        return false;
+
+    span.start  = found.at;
+    span.length = found.length;
+    span.edge   = theme_edge(level);
+    return true;
+}
+
+/// Name the layout gives the byte at `at`, outermost first: "IDAT / length". Written
+/// into `buf` rather than built, this being asked once a frame.
+///
+/// Read the way the grid is: the record, then what in it. Containers carry no name of
+/// their own to skip, so a format that boxes without naming leaves only the field.
+/// Returns: The used slice of `buf`, empty when no layout covers the offset.
+const(char)[] layoutLabel(Document* d, long at, char[] buf)
+{
+    LayoutSpan inner;
+    if (layout_at(d.layout, at, inner) == false)
+        return null;
+
+    size_t n;
+    for (int level; level <= inner.depth; ++level)
+    {
+        LayoutSpan s;
+        if (layout_level(d.layout, at, level, s) == false || s.name.length == 0)
+            continue;
+
+        if (n && n + SEP.length <= buf.length)
+        {
+            buf[n .. n + SEP.length] = SEP;
+            n += SEP.length;
+        }
+
+        size_t take = s.name.length;
+        if (n + take > buf.length)
+            take = buf.length - n;
+        buf[n .. n + take] = s.name[0 .. take];
+        n += take;
+    }
+    return buf[0 .. n];
+}
+
+/// What sits between a record and the field inside it.
+immutable string SEP = " / ";
+
+/// Byte source a layout parses `d` through, swallowing a failed read as a short one:
+/// this runs inside a frame, where an exception would take the window down with it.
+LayoutReadFn documentReader(Document* d)
+{
+    return delegate(long at, ubyte[] buf)
+    {
+        try
+            return d.editor.view(at, buf);
+        catch (Exception e)
+            return buf[0 .. 0];
+    };
+}
+
+/// Give `d` a layout when its opening bytes say what it is, and nothing when they do
+/// not. Called once, on open: what a file *is* does not change under editing, even
+/// when the bytes saying so do.
+void detectLayout(Document* d)
+{
+    if (d.editor is null)
+        return;
+
+    ubyte[64] head = void;
+    ubyte[] got;
+    try
+        got = d.editor.view(0, head);
+    catch (Exception e)
+        return;
+
+    // NOTE: Eventually will probably be a loop with a table of functions
+    if (png_detect(got))
+    {
+        layout_bind(new PngLayout(), documentReader(d), d.editor.size());
+        return;
+    }
+}
+
+/// Drop the spans an edit at `pos` invalidated and tell the layout the new size.
+/// Cheap enough to call on every keystroke: the cache truncates rather than reparses,
+/// and the parse that follows is driven by what the next frame actually draws.
+void layoutEdited(Document* d, long pos)
+{
+    if (pos < 0)
+        pos = 0;
+    layout_resize(d.layout, d.editor.size());
+    layout_invalidate(d.layout, pos);
 }
 
 /// Background hook for the grid: a wash behind the bookmarked bytes, nothing behind
@@ -1123,8 +1267,7 @@ mu_Color hexBack(size_t offset, ubyte value, void* user)
     if (v is null)
         return mu_Color(0, 0, 0, 0);
 
-    return bookmark_has(v.doc.marks, cast(long) offset)
-        ? BOOKMARK_WASH : mu_Color(0, 0, 0, 0);
+    return bookmark_has(v.doc.marks, cast(long) offset) ? BOOKMARK_WASH : mu_Color(0, 0, 0, 0);
 }
 
 /// Ditto asked of a whole segment at a time: whether any byte in it is marked.
@@ -1191,7 +1334,10 @@ void hexReplace(long pos, ubyte value, void* user)
 {
     View* v = cast(View*) user;
     try
+    {
         v.doc.editor.replace(pos, &value, 1);
+        layoutEdited(v.doc, pos);
+    }
     catch (Exception e)
         logWarn("replace failed: %s", e.msg);
 }
@@ -1203,6 +1349,7 @@ void hexInsert(long pos, ubyte value, void* user)
     {
         v.doc.editor.insert(pos, &value, 1);
         bookmark_shift(v.doc.marks, pos, 1); // the bytes past it all moved up one
+        layoutEdited(v.doc, pos);
     }
     catch (Exception e)
         logWarn("insert failed: %s", e.msg);
@@ -1215,6 +1362,7 @@ void hexRemove(long pos, long len, void* user)
     {
         v.doc.editor.remove(pos, len);
         bookmark_shift(v.doc.marks, pos, -len);
+        layoutEdited(v.doc, pos);
     }
     catch (Exception e)
         logWarn("remove failed: %s", e.msg);
@@ -1234,6 +1382,7 @@ long hexUndo(void* user)
     catch (Exception e)
         logWarn("undo failed: %s", e.msg);
     v.hex.dataSize = v.doc.editor.size();
+    layoutEdited(v.doc, at);
     return at;
 }
 /// Ditto.
@@ -1246,6 +1395,7 @@ long hexRedo(void* user)
     catch (Exception e)
         logWarn("redo failed: %s", e.msg);
     v.hex.dataSize = v.doc.editor.size();
+    layoutEdited(v.doc, at);
     return at;
 }
 
@@ -1272,6 +1422,8 @@ void wireView(View* v)
     v.hex.backFn     = &hexBack;
     v.hex.backSpanFn = &hexBackSpan;
     v.hex.backUser   = cast(void*) v;
+    v.hex.spanFn     = &hexSpan;
+    v.hex.spanUser   = cast(void*) v;
     v.hex.data      = null;
     v.hex.dataSize  = ed ? ed.size() : 0;
 }
@@ -1612,6 +1764,7 @@ Document* ui_load(string path)
     d.editor = ed;
     d.path   = path; // in-place Save now has a target
     d.title  = baseName(path);
+    detectLayout(d);
     return d;
 }
 
@@ -3082,9 +3235,17 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         const(char)[] marked = mark >= 0 && doc.marks[mark].name.length ?
             sformat(markbuf, "  [%s]", ui_clip(doc.marks[mark].name, 40)) : "";
 
-        char[160] statusbuf = void;
-        char[] status = sformat(statusbuf, "offset %08x  %s  selected %u byte(s)%s",
-            view.hex.cursor, view.hex.insertMode ? "INS" : "OVR", selLen, marked);
+        // What the layout calls the byte under the caret. The border says a record is
+        // there and the colour says what kind of field it is; this is the only place
+        // either of them is named.
+        char[64] pathbuf = void;
+        const(char)[] path = layoutLabel(view.doc, cast(long) view.hex.cursor, pathbuf);
+        char[72] fieldbuf = void;
+        const(char)[] field = path.length ? sformat(fieldbuf, "  %s", path) : "";
+
+        char[256] statusbuf = void;
+        char[] status = sformat(statusbuf, "offset %08x  %s  selected %u byte(s)%s%s",
+            view.hex.cursor, view.hex.insertMode ? "INS" : "OVR", selLen, field, marked);
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
         mu_draw_text(ctx, ctx.style.font, cast(string) status,
@@ -3255,6 +3416,10 @@ void ui_panes(mu_Context* ctx, int statusH)
     tip.seen = false;
     ui_tip(ctx);
 
+    // Ditto for the byte under the pointer, except that the panels record it rather
+    // than report it, so this reads them instead of clearing a flag.
+    ui_span_tip(ctx);
+
     // Every pane has drawn, so where each is scrolled to is settled: carry that
     // across the comparisons before anything can rearrange the grid.
     ui_sync_diffs();
@@ -3406,7 +3571,10 @@ void ui_mark_pane(mu_Context* ctx, mu_Rect r)
 /// TIP_DELAY of frames per hover and nothing while one is on screen.
 public bool ui_tip_pending()
 {
-    return tip.pane !is null && MonoTime.currTime - tip.since < TIP_DELAY;
+    MonoTime now = MonoTime.currTime;
+    if (tip.pane !is null && now - tip.since < TIP_DELAY)
+        return true;
+    return spanTip.view !is null && now - spanTip.since < TIP_DELAY;
 }
 
 /// The tab tooltip: the full path of the document under the pointer, once it has
@@ -3447,6 +3615,71 @@ void ui_tip(mu_Context* ctx)
     mu_draw_rect(ctx, r, TIP_BACK);
     ui_outline(ctx, r, TIP_EDGE, 1);
     mu_draw_text(ctx, font, text, mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD), TIP_TEXT);
+}
+
+/// The field tooltip: what the layout calls the byte under the pointer, once it has
+/// rested on it long enough.
+///
+/// Found by asking the panels which of them has the pointer (see SpanTip), and only
+/// worth putting up where there is a layout to name anything: on a document with none
+/// this is a hover that never resolves, which is the same as no hover at all.
+///
+/// Moving to another byte restarts the wait rather than following the pointer live: a
+/// label that redraws under a moving pointer is a distraction, and the one the user
+/// wants is the one they stopped on.
+void ui_span_tip(mu_Context* ctx)
+{
+    // Only the view each pane is showing: a view behind a tab keeps whatever byte was
+    // under the pointer when it was last in front, having drawn no frame since to say
+    // otherwise, and would go on claiming the pointer from behind the tab it is under.
+    View* over;
+    foreach (Column* c; columns)
+        foreach (Pane* p; c.panes)
+        {
+            if (p.current >= p.views.length)
+                continue;
+            View* v = p.views[p.current];
+            if (v.hex.hoverByte >= 0)
+                over = v;
+        }
+
+    if (over is null)
+    {
+        spanTip = SpanTip.init;
+        return;
+    }
+
+    if (over !is spanTip.view || over.hex.hoverByte != spanTip.at)
+    {
+        spanTip.view  = over;
+        spanTip.at    = over.hex.hoverByte;
+        spanTip.since = MonoTime.currTime;
+        return;
+    }
+
+    if (MonoTime.currTime - spanTip.since < TIP_DELAY)
+        return;
+
+    char[64] pathbuf = void;
+    const(char)[] path = layoutLabel(over.doc, spanTip.at, pathbuf);
+    if (path.length == 0)
+        return;
+
+    mu_Font font = ctx.style.font;
+    int th = ctx.text_height(font);
+    int tw = ctx.text_width(font, path.ptr, cast(int) path.length);
+
+    // Below and right of the pointer, where a cursor arrow is not sitting on it.
+    mu_Rect r = mu_Rect(ctx.mouse_pos.x + TIP_DROP, ctx.mouse_pos.y + th,
+        tw + TIP_PAD * 2, th + TIP_PAD * 2);
+    r.x = mu_clamp(r.x, TIP_MARGIN, mu_max(TIP_MARGIN, winW - TIP_MARGIN - r.w));
+    if (r.y + r.h > winH - TIP_MARGIN)
+        r.y = ctx.mouse_pos.y - TIP_DROP - r.h;
+
+    mu_draw_rect(ctx, r, TIP_BACK);
+    ui_outline(ctx, r, TIP_EDGE, 1);
+    mu_draw_text(ctx, font, cast(string) path,
+        mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD), TIP_TEXT);
 }
 
 /// A rectangle's four edges, `w` pixels thick, drawn inside it.

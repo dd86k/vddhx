@@ -308,6 +308,33 @@ int screenshot_run(string[] args)
     frame();
     shot("rows.bmp");
 
+    // Scenario 0b (debug): a PNG, which the layout system recognises, so the shot
+    // carries the field colours and the borders round the signature and the first
+    // chunks. Closed again straight away: every scenario after this one counts tabs.
+    ui_open("assets/icon/vddhx-256.png");
+    frame();
+    shot("layout-png.bmp");
+
+    // The pointer resting on a byte names the field it is in, the same way a tab names
+    // its path. Real time has to pass, for the reason the tab tip scenario says.
+    {
+        import core.thread : Thread;
+        import core.time : msecs;
+        // Three settle frames, not the two a tab needs: the grid is a nested panel, so
+        // hover_root takes the extra one to reach it, and the delay only starts
+        // counting once the panel says the pointer is on a byte.
+        mu_input_mousemove(&ctx, 240, 87);
+        frame(); frame(); frame();
+        Thread.sleep(600.msecs);
+        frame();
+        shot("layout-tip.bmp");
+        mu_input_mousemove(&ctx, 0, 0);
+        frame();
+    }
+
+    ui_close_current_tab();
+    frame();
+
     // Scenario 1: fresh startup.
     frame();
     shot("startup.bmp");

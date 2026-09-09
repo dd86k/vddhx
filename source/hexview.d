@@ -54,6 +54,33 @@ alias HexBackFn = mu_Color function(size_t offset, ubyte value, void* user);
 /// which would step over a short mark. So it asks the span outright.
 alias HexBackSpanFn = mu_Color function(long at, long length, void* user);
 
+/// The extent of one structure span, and the colour its border is drawn in.
+struct HexSpan
+{
+    long start;
+    long length;
+    mu_Color edge;
+}
+
+/// Structure hook: the span covering `pos` at nesting level `level`, counted inwards
+/// from the outermost - 0 the record at the top, 1 whatever of it holds the byte - or
+/// false when nothing covers it. `user` is HexView.spanUser.
+///
+/// From the outside rather than from the byte, because that is the question a border
+/// grouping a record asks. A chunk's length field and a byte deep in its payload sit
+/// at different depths, so counting outwards from each would put them in different
+/// boxes; counted inwards they are both in the chunk, which is where they are.
+///
+/// It answers with an extent rather than a colour to join neighbouring cells by, which
+/// is what separates it from HexBackFn: two fields of one kind side by side are two
+/// fields, and joining them by what they look like would draw one box where the
+/// document has two. Cells join only when their spans begin in the same place.
+///
+/// It is asked by offset alone, never about a byte's value, so the panel can ask it
+/// about the rows above and below the one it is drawing - which is what lets a field
+/// spanning several rows come out as one region rather than as a box per row.
+alias HexSpanFn = bool function(long pos, int level, ref HexSpan span, void* user);
+
 /// On-demand byte source, for showing a slice of something too large to hold in
 /// memory. Fill `buf` from document offset `pos` and return the bytes actually
 /// read (a short slice at EOF is fine); `user` is HexView.readUser. With this set
@@ -91,6 +118,8 @@ private enum
     SCROLLBAR_WIDTH = 14,   // plain scroll strip width (minimap off)
     SCROLLBAR_THUMB_MIN = 24, // floor for the plain thumb so it stays grabbable
     WASH_EDGE_LIFT = 200, // how much brighter a wash's outline is, in percent
+    SPAN_PAD = 1, // gap a structure border keeps off its cells, so it reads as a box
+                  // round the bytes rather than as another gridline between them
 }
 
 /// Wash behind the selected bytes, in the grid and on the minimap ribbon. The
@@ -141,6 +170,15 @@ struct HexView
     /// Opaque pointer forwarded to both background hooks.
     void* backUser;
 
+    /// Optional structure hook, drawing a border round the record each byte belongs
+    /// to. See HexSpanFn.
+    HexSpanFn spanFn;
+    /// Opaque pointer forwarded to spanFn.
+    void* spanUser;
+    /// How many nesting levels get a border, outermost first; 0 draws none. One box
+    /// per record groups; a box per field as well only makes a grid out of a grid.
+    int spanDepth = 1;
+
     /// Optional on-demand byte source. When set, the panel reads only the
     /// visible rows through it and `data` is ignored; see HexReadFn.
     HexReadFn readFn;
@@ -174,6 +212,14 @@ struct HexView
     /// Insert vs overwrite entry. Overwrite (the default) edits the nibble under
     /// the caret in place; insert splices a fresh byte in and pushes the rest up.
     bool insertMode;
+
+    /// Byte the pointer is resting on this frame, or -1 for none. Written by hex_view
+    /// on every frame it draws, for a caller with something to say about the byte
+    /// under the pointer rather than the one under the caret.
+    ///
+    /// Only one panel can hold the pointer, so a caller with several of them can find
+    /// the hovered one by asking each rather than being told.
+    long hoverByte = -1;
 
     private:
 
@@ -825,8 +871,13 @@ unittest
 
 // Map a mouse position (screen space) to a byte index, or -1 if it misses a
 // cell. Both the hex pairs and the ASCII column are hittable.
+//
+// `snap` takes the gap after a hex pair as part of that pair. A click wants the
+// strict reading, landing the caret only where a byte was actually pointed at, but
+// anything tracking the pointer as it moves wants the forgiving one: a third of the
+// hex lane is gaps, and a hover that drops out in each of them never settles.
 long hex_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
-    int cols, size_t total, int mx, int my)
+    int cols, size_t total, int mx, int my, bool snap = false)
 {
     int localX = mx - body.x;
     int localY = my - body.y;
@@ -845,7 +896,7 @@ long hex_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
     for (int i; i < cols; ++i)
     {
         int start = hex_col_for(lay, i);
-        if (col == start || col == start + 1)
+        if (col == start || col == start + 1 || (snap && col == start + 2))
             return hex_index(row, cols, i, total);
     }
     return -1;
@@ -910,6 +961,10 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     // clip, so presses on the scrollbar or header do not land here, and the drag
     // arm asks whether the press landed in this grid rather than whether the panel
     // has focus. See HexView.dragSel.
+    v.hoverByte = mu_mouse_over(ctx, body) ?
+        hex_hit(lay, body, v.topRow, rowH, cols, total, ctx.mouse_pos.x, ctx.mouse_pos.y, true) :
+        -1;
+
     if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, body))
     {
         v.dragSel = true; // this panel owns the drag until the button comes up
@@ -1531,8 +1586,15 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     }
 
     if (backFn)
-        hex_wash_outline(ctx, v, lay, backFn, originX, y, rowStart, count, cols,
-            charW, rowH);
+        hex_wash_outline(ctx, v, lay, backFn, originX, y, rowStart, count, cols, charW, rowH);
+
+    // Structure borders, under the glyphs and drawn from the outside in, so a record
+    // groups its fields rather than every field carrying a box of its own. What tells
+    // the fields apart is their colour; what the border says is where a record begins
+    // and ends, which is the one thing colour cannot.
+    if (v.spanFn)
+        for (int level; level < v.spanDepth; ++level)
+            hex_span_outline(ctx, v, lay, originX, y, rowStart, count, cols, charW, rowH, level);
 
     // Each hex pair and its ASCII glyph share the byte's colour.
     char[2] cell = void;
@@ -1557,8 +1619,7 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     }
 
     if (v.active && v.cursor >= rowStart && v.cursor < rowStart + count)
-        hex_draw_caret(ctx, lay, originX, y, cast(int)(v.cursor - rowStart), charW, rowH,
-            hex_caret_nib(v));
+        hex_draw_caret(ctx, lay, originX, y, cast(int)(v.cursor - rowStart), charW, rowH, hex_caret_nib(v));
 }
 
 // Which nibble the caret boxes: -1 for the whole pair (a read-only view has no
@@ -1641,17 +1702,110 @@ void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
             int hx0 = originX + hex_col_for(lay, i) * charW;
             int hx1 = originX + charW *
                 (joinR ? hex_col_for(lay, i + 1) : hex_col_for(lay, i) + 2);
-            hex_draw_edges(ctx, hx0, hx1, y, rowH, top, bottom, onL, joinR == false, edge);
+            hex_draw_edges(ctx, hx0, hx1, y, rowH, top, bottom, onL, joinR == false,
+                1, 0, edge);
 
             // The ASCII lane has no gaps, so its cells are one character wide.
             int ax0 = originX + (lay.asciiStart + i) * charW;
             hex_draw_edges(ctx, ax0, ax0 + charW, y, rowH, top, bottom, onL,
-                joinR == false, edge);
+                joinR == false, 1, 0, edge);
         }
 
         left = here;
         here = right;
     }
+}
+
+// Outline the structure spans crossing this row at nesting level `up`, `weight` pixels
+// thick, in each span's own edge colour.
+//
+// Built the same way as hex_wash_outline - edges dropped wherever the neighbour across
+// them is in the same thing, so a span wrapping over several rows comes out as one
+// region - but joining on where a span starts rather than on what colour it is. See
+// HexSpanFn for why the difference matters.
+//
+// One hook call per cell per side. That is a few thousand a frame at a screenful of
+// bytes, each a lookup rather than a read; if it ever shows up, one row's answers are
+// the next row's neighbours above and could be carried instead of asked twice.
+void hex_span_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
+    int originX, int y, size_t rowStart, int count, int cols, int charW, int rowH,
+    int level)
+{
+    if (count <= 0)
+        return;
+
+    HexSpanFn fn = v.spanFn;
+    void* user = cast(void*) v.spanUser;
+
+    HexSpan left;
+    bool hasLeft;
+    HexSpan here;
+    bool has = fn(cast(long) rowStart, level, here, user);
+
+    for (int i; i < count; ++i)
+    {
+        // Nothing past the row's last cell, so a span carrying on is closed off here
+        // and opened again at column 0 of the next row, which is where it is.
+        HexSpan right;
+        bool hasRight;
+        if (i + 1 < count)
+            hasRight = fn(cast(long)(rowStart + i + 1), level, right, user);
+
+        if (has)
+        {
+            long idx = cast(long)(rowStart + i);
+
+            HexSpan above, below;
+            bool hasAbove = idx >= cols && fn(idx - cols, level, above, user);
+            bool hasBelow = fn(idx + cols, level, below, user);
+
+            bool joinR  = hex_span_joins(has, here, hasRight, right);
+            bool top    = hex_span_joins(has, here, hasAbove, above) == false;
+            bool bottom = hex_span_joins(has, here, hasBelow, below) == false;
+            bool onL    = hex_span_joins(has, here, hasLeft, left) == false;
+
+            // The hex lane's cell runs to where the next one starts when the two are
+            // joined, so the border covers the gap between the pairs.
+            int hx0 = originX + hex_col_for(lay, i) * charW;
+            int hx1 = originX + charW *
+                (joinR ? hex_col_for(lay, i + 1) : hex_col_for(lay, i) + 2);
+            hex_draw_edges(ctx, hx0, hx1, y, rowH, top, bottom, onL, joinR == false,
+                1, SPAN_PAD, here.edge);
+
+            int ax0 = originX + (lay.asciiStart + i) * charW;
+            hex_draw_edges(ctx, ax0, ax0 + charW, y, rowH, top, bottom, onL,
+                joinR == false, 1, SPAN_PAD, here.edge);
+        }
+
+        left    = here;
+        hasLeft = has;
+        here    = right;
+        has     = hasRight;
+    }
+}
+
+// Whether two cells belong to one span, and so have no border drawn between them.
+// Where a span begins, not what it looks like: see HexSpanFn.
+bool hex_span_joins(bool hasA, ref const(HexSpan) a, bool hasB, ref const(HexSpan) b)
+{
+    return hasA && hasB && a.start == b.start;
+}
+
+unittest
+{
+    HexSpan a = HexSpan(16, 4);
+    HexSpan b = HexSpan(16, 4);
+    HexSpan c = HexSpan(20, 4);
+
+    assert(hex_span_joins(true, a, true, b));
+
+    // Two fields of one shape back to back stay two fields, which colour alone would
+    // have merged.
+    assert(hex_span_joins(true, a, true, c) == false);
+
+    // A cell no span covers ends whatever the cell beside it was in.
+    assert(hex_span_joins(true, a, false, b) == false);
+    assert(hex_span_joins(false, a, true, b) == false);
 }
 
 // The same colour carried brighter, for a wash's outline. Scaled rather than
@@ -1675,14 +1829,36 @@ unittest
     assert(hex_coleq(hex_wash_lift(mu_Color(200, 0, 0, 128)), mu_Color(255, 0, 0, 255)));
 }
 
-// Draw the edges of one cell that its neighbours do not span, one pixel each.
+// Draw the edges of one cell that its neighbours do not span, `weight` pixels each,
+// held `pad` pixels off the cell's bounds.
+//
+// The padding is only taken off the sides actually drawn, so a run stays one unbroken
+// box: an edge dropped for a neighbour is an edge the box does not turn at, and pulling
+// the span in there would leave a notch mid-run. A cell too small to pad draws flush
+// rather than inside out.
 void hex_draw_edges(mu_Context* ctx, int x0, int x1, int y, int rowH,
-    bool top, bool bottom, bool left, bool right, mu_Color color)
+    bool top, bool bottom, bool left, bool right, int weight, int pad, mu_Color color)
 {
-    if (top)    mu_draw_rect(ctx, mu_Rect(x0, y, x1 - x0, 1), color);
-    if (bottom) mu_draw_rect(ctx, mu_Rect(x0, y + rowH - 1, x1 - x0, 1), color);
-    if (left)   mu_draw_rect(ctx, mu_Rect(x0, y, 1, rowH), color);
-    if (right)  mu_draw_rect(ctx, mu_Rect(x1 - 1, y, 1, rowH), color);
+    int iy = y + pad;
+    int ih = rowH - 2 * pad;
+    if (ih < 2 * weight)
+    {
+        iy = y;
+        ih = rowH;
+    }
+
+    int ix0 = x0 + (left ? pad : 0);
+    int ix1 = x1 - (right ? pad : 0);
+    if (ix1 - ix0 < 2 * weight)
+    {
+        ix0 = x0;
+        ix1 = x1;
+    }
+
+    if (top)    mu_draw_rect(ctx, mu_Rect(ix0, iy, ix1 - ix0, weight), color);
+    if (bottom) mu_draw_rect(ctx, mu_Rect(ix0, iy + ih - weight, ix1 - ix0, weight), color);
+    if (left)   mu_draw_rect(ctx, mu_Rect(ix0, iy, weight, ih), color);
+    if (right)  mu_draw_rect(ctx, mu_Rect(ix1 - weight, iy, weight, ih), color);
 }
 
 // Fill grid columns `lo` through `hi` of the row at `y`, in both lanes, since a
