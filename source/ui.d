@@ -664,14 +664,10 @@ void ui_close_tab_in(Pane* p, size_t index)
             return;
         }
 
-        // Out of tabs in the last pane: quit through SDL's own queue, so it meets
-        // the same route as the window close button. That lands next frame and the
-        // rest of this one still has a panel to draw, hence the scratch buffer -
-        // which has no edits, so it cannot hold the quit up.
+        // Out of tabs in the last pane: a fresh scratch buffer takes its place.
+        // Closing a tab is not asking to quit - that is the window close button
+        // and File > Quit, both of which go through ui_may_quit.
         ui_new_tab();
-        SDL_Event quit; // .init zeroes the union
-        quit.type = SDL_EVENT_QUIT;
-        SDL_PushEvent(&quit);
         return;
     }
 
