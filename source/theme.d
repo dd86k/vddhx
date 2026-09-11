@@ -17,7 +17,41 @@ import layout;
 
 /// Colour the glyphs of a byte covered by `role`. LayoutRole.none has no colour of its
 /// own: it means nothing claimed the byte, which is the caller's cue to classify it.
-mu_Color theme_role(LayoutRole role)
+///
+/// `shade` is the alternating bit off the span (see LayoutSpan.shade) and answers the
+/// same hue a step off, which is what tells IHDR's three scalars apart. A step rather
+/// than a colour of its own: a palette handed out per field runs dry on a format with
+/// more fields than colours, and says something where there is nothing to say.
+mu_Color theme_role(LayoutRole role, bool shade = false)
+{
+    mu_Color c = theme_base(role);
+    return shade && c.a ? theme_shade(c) : c;
+}
+
+/// The same colour a step off in luminance, away from whichever end it sits nearer.
+///
+/// Dark roles brighten and bright ones darken, so neither twin walks into the panel
+/// background or washes out; a fixed direction would sink `zero` and `reserved`, which
+/// start close to the background already.
+private mu_Color theme_shade(mu_Color c)
+{
+    enum STEP = 52; // ~20%, the least that reads as a different field at glyph size
+
+    int lum = (c.r * 30 + c.g * 59 + c.b * 11) / 100;
+    int d = lum >= 128 ? -STEP : STEP;
+    return mu_Color(
+        cast(ubyte) clamp8(c.r + d),
+        cast(ubyte) clamp8(c.g + d),
+        cast(ubyte) clamp8(c.b + d),
+        c.a);
+}
+
+private int clamp8(int v)
+{
+    return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+private mu_Color theme_base(LayoutRole role)
 {
     switch (role) with (LayoutRole) {
     case zero:       return mu_Color(90, 90, 100, 255);    // charcoal
@@ -74,4 +108,19 @@ unittest
         assert(theme_role(layout_classify(value)) == hex_classify(0, value, null));
 
     assert(theme_edge(0) != theme_edge(1));
+
+    // The shade is a different colour from the one it alternates with, keeps the alpha,
+    // and moves away from whichever end the role sits nearer.
+    foreach (LayoutRole role; LayoutRole.min .. cast(LayoutRole)(LayoutRole.max + 1))
+    {
+        if (role == LayoutRole.none)
+            continue;
+        mu_Color base = theme_role(role);
+        mu_Color alt  = theme_role(role, true);
+        assert(base != alt);
+        assert(base.a == alt.a);
+    }
+
+    assert(theme_role(LayoutRole.printable, true).r < theme_role(LayoutRole.printable).r);
+    assert(theme_role(LayoutRole.reserved, true).r > theme_role(LayoutRole.reserved).r);
 }

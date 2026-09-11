@@ -1156,17 +1156,25 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
 ///
 /// One answer behind both the colour the grid draws and the name the breadcrumb says,
 /// so the strip cannot call a byte something the colours disagree with.
-LayoutRole byteRole(View* v, size_t offset, ubyte value)
+/// `shade` comes back set on the odd fields of a run of touching same-role fields, for
+/// the theme to draw a step off; a byte left to the classifier is never shaded.
+LayoutRole byteRole(View* v, size_t offset, ubyte value, out bool shade)
 {
     // This provides a fallback if layout isn't answering at position
-    LayoutRole role = layout_role(v.doc.layout, cast(long) offset);
-    return role != LayoutRole.none ? role : layout_classify(value);
+    LayoutSpan span;
+    if (layout_at(v.doc.layout, cast(long) offset, span) && span.role != LayoutRole.none)
+    {
+        shade = span.shade;
+        return span.role;
+    }
+    return layout_classify(value);
 }
 
 /// Ditto, as the grid wants it.
 mu_Color byteColor(View* v, size_t offset, ubyte value)
 {
-    return theme_role(byteRole(v, offset, value));
+    bool shade;
+    return theme_role(byteRole(v, offset, value, shade), shade);
 }
 
 /// Structure hook for the grid: the span `level` levels in from the outermost one over

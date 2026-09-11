@@ -90,6 +90,10 @@ unittest
 /// One registered span. `parent` indexes the enclosing span in the same array, -1 at
 /// the top level; `depth` is how far down that chain it sits, which the border drawing
 /// wants without walking it.
+///
+/// `shade` alternates along a run of touching fields that share a role - IHDR's three
+/// scalars, its four flags - so the theme can draw the odd ones a shade off and the eye
+/// can tell where one ends. It says nothing about the field itself.
 struct LayoutSpan
 {
     long at;
@@ -98,6 +102,7 @@ struct LayoutSpan
     string name;
     int depth;
     int parent = -1;
+    bool shade;
 }
 
 /// Byte source a layout parses through. Fill `buf` from `at` and return what was
@@ -174,7 +179,14 @@ struct LayoutBuilder
     /// Register a leaf of `length` bytes at the cursor and step over it.
     void field(LayoutRole role, string name, long length)
     {
-        emit(role, name, length);
+        // Only leaves take part: a container sitting between two fields of one role -
+        // the last field of a chunk and the first of the next - must not break the run.
+        bool shade = role == lastRole && at == lastEnd && !lastShade;
+        emit(role, name, length, shade);
+
+        lastRole = role;
+        lastShade = shade;
+        lastEnd = at + length;
         at += length;
     }
 
@@ -223,10 +235,15 @@ struct LayoutBuilder
     int depth;
     int dropped; // opens refused past the depth cap, so close() can match them
 
-    size_t emit(LayoutRole role, string name, long length)
+    // The last leaf registered, for the alternating shade. See LayoutSpan.shade.
+    long lastEnd = long.min;
+    LayoutRole lastRole;
+    bool lastShade;
+
+    size_t emit(LayoutRole role, string name, long length, bool shade = false)
     {
         int parent = depth > 0 ? stack[depth - 1] : -1;
-        (*spans) ~= LayoutSpan(at, length, role, name, depth, parent);
+        (*spans) ~= LayoutSpan(at, length, role, name, depth, parent, shade);
         return spans.length > 0 ? spans.length - 1 : 0; // @suppress(dscanner.suspicious.length_subtraction)
     }
 }
@@ -340,6 +357,21 @@ void layout_invalidate(ref LayoutCache c, long from)
     c.builder.at = resume;
     c.builder.depth = 0;
     c.builder.dropped = 0;
+
+    // Pick the shade run back up from the leaf still standing at the resume point, so a
+    // field keeps the colour it had before the edit rather than flipping under the user.
+    c.builder.lastEnd = long.min;
+    c.builder.lastRole = LayoutRole.none;
+    c.builder.lastShade = false;
+    foreach_reverse (ref const(LayoutSpan) s; c.spans)
+        if (s.role != LayoutRole.none && s.at + s.length == resume)
+        {
+            c.builder.lastEnd = resume;
+            c.builder.lastRole = s.role;
+            c.builder.lastShade = s.shade;
+            break;
+        }
+
     c.exhausted = false;
     c.hint = 0;
 }
@@ -593,6 +625,74 @@ unittest
     assert(b.peek(4) == 0); // runs off the end
     assert(b.peek(0) == 0);
     assert(b.peek(9) == 0);
+}
+
+/// The alternating shade over a run of touching fields sharing a role.
+unittest
+{
+    LayoutSpan[] spans;
+    LayoutBuilder b;
+    b.spans = &spans;
+
+    b.field(LayoutRole.magic, "signature", 8);
+    b.open("IHDR");
+    b.field(LayoutRole.scalar, "width", 4);
+    b.field(LayoutRole.scalar, "height", 4);
+    b.field(LayoutRole.scalar, "bit depth", 1);
+    b.field(LayoutRole.flags, "colour type", 1);
+    b.field(LayoutRole.flags, "compression", 1);
+    b.close();
+
+    assert(spans[0].shade == false);          // nothing before it to alternate with
+    assert(spans[2].shade == false);          // width
+    assert(spans[3].shade);                   // height, the same role touching it
+    assert(spans[4].shade == false);          // bit depth, back again
+    assert(spans[5].shade == false);          // a new role restarts the run
+    assert(spans[6].shade);
+    assert(spans[1].shade == false);          // the container takes no part
+
+    // A container between two fields of one role does not break the run, and a gap does.
+    spans = null;
+    b = LayoutBuilder.init;
+    b.spans = &spans;
+    b.field(LayoutRole.data, "a", 4);
+    b.open("record");
+    b.field(LayoutRole.data, "b", 4);
+    b.close();
+    b.at += 4; // a hole nothing claims
+    b.field(LayoutRole.data, "c", 4);
+
+    assert(spans[0].shade == false);
+    assert(spans[2].shade);
+    assert(spans[3].shade == false);
+}
+
+/// A reparse picks the run up where it left off rather than flipping it.
+unittest
+{
+    // Four touching fields of one role, so the shade alternates all the way along.
+    static final class RunLayout : ILayout
+    {
+        string name() { return "run"; }
+        void forget() {}
+        bool parse(ref LayoutBuilder b, long until)
+        {
+            while (b.at < until && b.at + 4 <= b.size)
+                b.field(LayoutRole.scalar, "n", 4);
+            return b.at + 4 <= b.size;
+        }
+    }
+
+    LayoutCache c = layout_bind(new RunLayout(), zeroReader(), 16);
+    LayoutSpan s;
+    assert(layout_at(c, 12, s) && s.shade);
+    assert(layout_at(c, 4, s) && s.shade);
+    assert(layout_at(c, 8, s) && s.shade == false);
+
+    // Editing the third field reparses it and the fourth; both come back as they were.
+    layout_invalidate(c, 9);
+    assert(layout_at(c, 8, s) && s.shade == false);
+    assert(layout_at(c, 12, s) && s.shade);
 }
 
 /// Containers measured by close(), and the depth cap.
