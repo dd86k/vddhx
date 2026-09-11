@@ -9,7 +9,7 @@ import hexview;
 import icon : icon_apply;
 import loader;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
-    OMNI_KEY_UP, OMNI_KEY_DOWN;
+    OMNI_KEY_UP, OMNI_KEY_DOWN, OMNI_KEY_PAGEUP, OMNI_KEY_PAGEDOWN;
 import render;
 import ui;
 version (Screenshots) import screenshots;
@@ -451,6 +451,8 @@ private int omniKey(SDL_KeyCode key)
     case SDLK_A:                     return MU_KEY_SELECTALL; // ditto
     case SDLK_UP:                    return OMNI_KEY_UP;
     case SDLK_DOWN:                  return OMNI_KEY_DOWN;
+    case SDLK_PAGEUP:                return OMNI_KEY_PAGEUP;
+    case SDLK_PAGEDOWN:              return OMNI_KEY_PAGEDOWN;
     default:                         return 0;
     }
 }

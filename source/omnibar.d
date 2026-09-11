@@ -32,7 +32,8 @@ module omnibar;
 import ddui;
 import uitext : ui_elide;
 
-/// Extra ddui key bits for the omnibar's list, which main.d maps the arrows onto.
+/// Extra ddui key bits for the omnibar's list, which main.d maps the arrows and
+/// paging keys onto.
 /// ddui's own MU_KEY_* stop at (1 << 14) and the hex panel's carry on to
 /// (1 << 17), so these sit above both: the two never take keys in the same frame,
 /// but distinct bits mean a mapping mistake cannot quietly mean something else.
@@ -40,6 +41,8 @@ enum
 {
     OMNI_KEY_UP   = (1 << 18),
     OMNI_KEY_DOWN = (1 << 19),
+    OMNI_KEY_PAGEUP   = (1 << 20),
+    OMNI_KEY_PAGEDOWN = (1 << 21),
 }
 
 /// The character that opens each mode, typed as the first thing in the box.
@@ -312,6 +315,14 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     {
         int step = (ctx.key_pressed & OMNI_KEY_UP) ? count - 1 : 1;
         o.selected = (o.selected + step) % count;
+    }
+    // Paging clamps where the arrows wrap: a page is a distance rather than a
+    // step, and landing at the far end of the list from running off one edge
+    // reads as the list having jumped rather than moved.
+    if (count && ctx.key_pressed & (OMNI_KEY_PAGEUP | OMNI_KEY_PAGEDOWN))
+    {
+        int step = (ctx.key_pressed & OMNI_KEY_PAGEUP) ? -visible : visible;
+        o.selected = mu_clamp(o.selected + step, 0, count - 1);
     }
     // Scroll the least that brings the selection back into view.
     if (o.scroll > o.selected)
