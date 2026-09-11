@@ -2691,6 +2691,87 @@ const(OmniItem)[] ui_omni_items()
     return omniItems[0 .. n];
 }
 
+/// What the caret was doing before the '#' list started moving it, so a browse that
+/// is called off leaves the document where it was found.
+///
+/// One browse at a time, so one of these: the box holds the keyboard while it is up,
+/// and anything that could close the view under this dismisses it first.
+struct Preview
+{
+    View* view;
+    size_t cursor;
+    size_t anchor;
+    long topRow;
+
+    /// What the last previewed row left the caret on. A caret somewhere else by the
+    /// time the box goes is one the user put there - a click on the grid behind
+    /// dismisses the box, and that click is an instruction, not a browse to undo.
+    size_t setCursor;
+    size_t setAnchor;
+
+    bool active;
+}
+/// Ditto.
+__gshared Preview preview;
+
+/// Walk the caret along the '#' list as it is highlighted: a field's name says where
+/// it is, and only the bytes say what is in it. Enter then confirms rather than
+/// being the first thing that shows anything.
+///
+/// The row is centred under the box rather than revealed the usual way: the least
+/// scroll that brings it on screen would leave it behind the omnibar, which covers
+/// the top of the grid it is being read off.
+void ui_struct_preview(OmniMode mode)
+{
+    if (mode != OmniMode.structure || ui_omni_active() == false)
+    {
+        ui_preview_restore(); // the box moved to another mode, or went away
+        return;
+    }
+
+    if (preview.active == false)
+    {
+        View* v = focused.views[focused.current];
+        preview = Preview(v, v.hex.cursor, v.hex.anchor, hex_top(v.hex),
+            v.hex.cursor, v.hex.anchor, true);
+    }
+
+    int id = omni_current(omni);
+    bool whole;
+    const(LayoutSpan)[] spans = layout_spans(doc.layout, STRUCT_ROWS, whole);
+    if (id < 0 || id >= spans.length || spans[id].length <= 0)
+        return;
+
+    mu_Rect box = omni_rect(omni);
+    ui_select_range(view, cast(size_t) spans[id].at, cast(size_t) spans[id].length);
+    hex_center(view.hex, cast(size_t) spans[id].at, box.y + box.h);
+    preview.setCursor = view.hex.cursor;
+    preview.setAnchor = view.hex.anchor;
+}
+
+/// Put the caret back where the browse found it, unless something else has moved it
+/// since. Nothing to do when no browse is in hand.
+void ui_preview_restore()
+{
+    if (preview.active == false)
+        return;
+
+    View* v = preview.view;
+    if (v.hex.cursor == preview.setCursor && v.hex.anchor == preview.setAnchor)
+    {
+        v.hex.cursor = preview.cursor;
+        v.hex.anchor = preview.anchor;
+        hex_set_top(v.hex, preview.topRow);
+    }
+    preview = Preview.init;
+}
+
+/// Ditto, keeping where the browse got to: the row was taken.
+void ui_preview_drop()
+{
+    preview = Preview.init;
+}
+
 /// Where the omnibar's ':' mode is currently pointing: the offset its text spells
 /// out, resolved against the document in front. See the address module for what
 /// counts as an offset.
@@ -3439,10 +3520,15 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     const(OmniItem)[] rows = ui_omni_active() ? ui_omni_items() : null;
     final switch (omni_frame(ctx, omni, rows, width, height, chosen))
     {
-    case OmniAction.none:     break;
-    case OmniAction.accept:   ui_omni_accept(mode, chosen);       break;
-    case OmniAction.transfer: ui_omni_accept(mode, chosen, true);  break;
-    case OmniAction.dismiss:  view.hex.takeFocus = true;           break;
+    case OmniAction.none:     ui_struct_preview(mode);            break;
+    // A row taken is the preview made permanent: the caret is already on it, and
+    // ui_omni_accept puts it there again for the routes that never previewed.
+    case OmniAction.accept:   ui_preview_drop();
+                              ui_omni_accept(mode, chosen);       break;
+    case OmniAction.transfer: ui_preview_drop();
+                              ui_omni_accept(mode, chosen, true); break;
+    case OmniAction.dismiss:  ui_preview_restore();
+                              view.hex.takeFocus = true;          break;
     }
 }
 

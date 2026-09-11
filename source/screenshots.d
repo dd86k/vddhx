@@ -338,6 +338,24 @@ int screenshot_run(string[] args)
     ui_omni_toggle(OMNI_STRUCTURE);
     frame(); frame();
     shot("omni-struct.bmp");
+
+    // Walking the list takes the caret with it, the field centred in what the box is
+    // not covering rather than scrolled to just inside the panel - which would be
+    // behind the box. Esc puts the browse back where it started.
+    mu_input_text(&ctx, "idat");
+    frame(); frame();
+    foreach (i; 0 .. 4) // down to the chunk's crc, at the far end of its payload
+    {
+        tap(OMNI_KEY_DOWN);
+        frame(); frame();
+    }
+    shot("omni-struct-preview.bmp");
+    ui_omni_close();
+    frame(); frame();
+    shot("omni-struct-restored.bmp");
+
+    ui_omni_toggle(OMNI_STRUCTURE);
+    frame(); frame();
     mu_input_text(&ctx, "ihdr wid");
     frame(); frame();
     find("IHDR / width"); // the trail is what the query matched through

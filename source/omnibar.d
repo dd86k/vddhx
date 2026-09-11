@@ -143,6 +143,10 @@ struct Omnibar
     // steady list costs no allocation once it has been drawn once.
     OmniItem[] matches;
     int[] scores;
+    // The highlighted row's id as of the last draw, and where the box was drawn.
+    // See omni_current and omni_rect.
+    int current = -1;
+    mu_Rect rect;
 }
 
 /// Whether the box is up. main.d asks this to know who owns the keyboard.
@@ -182,6 +186,23 @@ void omni_prompt(ref Omnibar o, const(char)[] seed = null)
 void omni_hide(ref Omnibar o)
 {
     o.shown = false;
+    o.current = -1;
+}
+
+/// The id of the row the list is sitting on, for a mode that shows what taking a row
+/// would do rather than waiting to be asked - the '#' list moving the caret as it is
+/// walked. Read after omni_frame, which is what sets it.
+/// Returns: -1 while the box is down or its list is empty.
+int omni_current(ref const(Omnibar) o)
+{
+    return o.current;
+}
+
+/// Where the box was last drawn, for a caller working out what it covers. Empty
+/// while the box is down.
+mu_Rect omni_rect(ref const(Omnibar) o)
+{
+    return o.shown ? o.rect : mu_Rect.init;
 }
 
 /// Raise the box on `prefix`'s mode, or put it away when it is already showing
@@ -264,6 +285,7 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     // Placed every frame: the list grows and shrinks as the query narrows it, and
     // the window can be resized under it.
     cnt.rect = mu_Rect((width - w) / 2, o.top, w, h);
+    o.rect = cnt.rect;
     if (o.focusWanted)
         mu_bring_to_front(ctx, cnt);
 
@@ -330,6 +352,7 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     if (o.scroll < o.selected - visible + 1)
         o.scroll = o.selected - visible + 1;
     o.scroll = mu_clamp(o.scroll, 0, mu_max(0, count - visible));
+    o.current = count ? rows[o.selected].id : -1;
 
     mu_layout_row(ctx, 1, full.ptr, visible * rowH);
     mu_Rect list = mu_layout_next(ctx);

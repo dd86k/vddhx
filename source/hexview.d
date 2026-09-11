@@ -237,6 +237,11 @@ struct HexView
     // caret move driven from outside a frame (hex_set_caret) can scroll to it
     // without the caller knowing the panel's geometry.
     int visRows = 1;
+    // Where those rows start and how tall one is, measured alongside them. Ditto,
+    // for a caller that has to say how much of the panel something drawn over it
+    // covers, which it can only know in pixels.
+    int bodyY;
+    int rowHeight = 1;
 
     // Nibble sub-position within the caret byte: false means the next hex digit is
     // the byte's high nibble, true its low. Reset on any caret move. editByte holds
@@ -462,6 +467,78 @@ void hex_set_caret(ref HexView v, size_t pos)
     hex_reveal(v, pos, v.columns > 0 ? v.columns : 16, v.visRows);
 }
 
+/// Which row the panel is scrolled to, and how to put it back. For a caller holding
+/// a position to return to - the omnibar, restoring a browse it moved the caret for;
+/// where the panel sits is its own business the rest of the time, and the next draw
+/// clamps whatever is set here against the document.
+long hex_top(ref const(HexView) v)
+{
+    return v.topRow;
+}
+/// Ditto.
+void hex_set_top(ref HexView v, long row)
+{
+    v.topRow = row;
+}
+
+/// Scroll `pos`'s row to the middle of the panel, taking everything above `coversTo`
+/// - a window y, for a floating box drawn over the grid - as hidden.
+///
+/// What hex_set_caret's own reveal cannot do: that scrolls the least that brings a
+/// row inside the panel, so a caret moved from the omnibar lands wherever it was
+/// nearest - which is under the box, that being what moved it. Only the panel knows
+/// where its rows fall, so the caller says what covers them and this counts them.
+void hex_center(ref HexView v, size_t pos, int coversTo = 0)
+{
+    int hidden;
+    if (v.rowHeight > 0 && coversTo > v.bodyY)
+        hidden = (coversTo - v.bodyY + v.rowHeight - 1) / v.rowHeight;
+
+    int rows = v.visRows - hidden;
+    if (rows < 1) // covered but for a sliver: put the row in what is left of it
+        rows = 1;
+
+    int cols = v.columns > 0 ? v.columns : 16;
+    v.topRow = cast(long)(pos / cols) - hidden - rows / 2;
+    if (v.topRow < 0)
+        v.topRow = 0;
+}
+
+unittest
+{
+    HexView v;
+    v.columns = 16;
+    v.visRows = 20;
+    v.bodyY = 100;
+    v.rowHeight = 10; // so the panel runs from y=100 to y=300
+
+    // Nothing over it: row 50 sits ten rows down, the middle of twenty.
+    hex_center(v, 50 * 16);
+    assert(v.topRow == 40);
+    hex_center(v, 50 * 16, 90); // a box ending above the grid covers no row of it
+    assert(v.topRow == 40);
+
+    // Half of it covered, the row goes to the middle of the half that is left: ten
+    // rows hidden, then five of the ten below them.
+    hex_center(v, 50 * 16, 200);
+    assert(v.topRow == 35);
+
+    // A row is covered as soon as any of it is: one pixel further down and the row
+    // it clips counts as hidden.
+    hex_center(v, 50 * 16, 190);
+    assert(v.topRow == 36);
+    hex_center(v, 50 * 16, 191);
+    assert(v.topRow == 35);
+
+    // Near the top there is nothing to scroll back to.
+    hex_center(v, 3 * 16);
+    assert(v.topRow == 0);
+
+    // Covered whole, the row lands on the last sliver rather than nowhere.
+    hex_center(v, 50 * 16, 300);
+    assert(v.topRow == 30);
+}
+
 unittest
 {
     HexView v;
@@ -554,17 +631,19 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
     mu_begin_panel_ex(ctx, name, MU_OPT_NOSCROLL);
     {
         mu_Container* cnt = mu_get_current_container(ctx);
-        mu_Rect body = cnt.body_;
+        mu_Rect body_ = cnt.body_;
 
-        int visibleRows = body.h / rowH;
+        int visibleRows = body_.h / rowH;
         if (visibleRows < 1) visibleRows = 1;
         long maxTop = rows > visibleRows ? rows - visibleRows : 0;
         v.visRows = visibleRows; // for hex_set_caret, between frames
+        v.bodyY = body_.y;
+        v.rowHeight = rowH;
 
         // Carve the scroll strip off the right edge; the grid takes the rest.
         int stripW = v.minimap ? MINIMAP_WIDTH : SCROLLBAR_WIDTH;
-        mu_Rect strip = mu_Rect(body.x + body.w - stripW, body.y, stripW, body.h);
-        body.w -= stripW;
+        mu_Rect strip = mu_Rect(body_.x + body_.w - stripW, body_.y, stripW, body_.h);
+        body_.w -= stripW;
 
         // NOSCROLL means ddui no longer routes the wheel, so re-arm the target
         // while the mouse is over the panel. It still folds the notch delta into
@@ -585,11 +664,11 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
         v.topRow = mu_clamp(v.topRow, 0L, maxTop);
 
         // Input can move the caret and reveal it, nudging topRow; re-clamp after.
-        res = hex_input(ctx, name, v, lay, body, rowH, cols, visibleRows);
+        res = hex_input(ctx, name, v, lay, body_, rowH, cols, visibleRows);
         v.topRow = mu_clamp(v.topRow, 0L, maxTop);
 
-        hex_fill_window(v, body, v.topRow, rowH, cols);
-        hex_paint(ctx, v, lay, body, v.topRow, rowH, cols, font);
+        hex_fill_window(v, body_, v.topRow, rowH, cols);
+        hex_paint(ctx, v, lay, body_, v.topRow, rowH, cols, font);
 
         if (v.minimap)
             hex_minimap(ctx, v, strip, v.topRow, maxTop, rows, visibleRows);
