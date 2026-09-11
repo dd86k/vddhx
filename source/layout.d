@@ -46,6 +46,47 @@ enum LayoutRole
     data,
 }
 
+/// What a lone byte is where no layout claims it: the five buckets the grid has
+/// always coloured by, said as roles so the classifier and a parser answer in one
+/// vocabulary.
+LayoutRole layout_classify(ubyte value)
+{
+    if (value == 0)
+        return LayoutRole.zero;
+    if (value >= 0x20 && value < 0x7f)
+        return LayoutRole.printable;
+    if (value == '\t' || value == '\n' || value == '\r')
+        return LayoutRole.whitespace;
+    if (value < 0x20)
+        return LayoutRole.control;
+    return LayoutRole.high;
+}
+
+/// What to call a role in the interface, empty for `none`.
+///
+/// The enum member's own name, so a role added above cannot be one the interface has
+/// no word for. They are lowercase like the field names a parser registers, which is
+/// what lets the two sit in one trail without reading as different kinds of thing.
+string layout_role_name(LayoutRole role)
+{
+    import std.conv : to;
+    return role != LayoutRole.none ? role.to!string() : null;
+}
+
+unittest
+{
+    assert(layout_classify(0x00) == LayoutRole.zero);
+    assert(layout_classify('A')  == LayoutRole.printable);
+    assert(layout_classify('\n') == LayoutRole.whitespace);
+    assert(layout_classify(0x01) == LayoutRole.control);
+    assert(layout_classify(0x80) == LayoutRole.high);
+    assert(layout_classify(0x7f) == LayoutRole.high); // DEL, the way the grid has it
+
+    assert(layout_role_name(LayoutRole.printable) == "printable");
+    assert(layout_role_name(LayoutRole.length) == "length");
+    assert(layout_role_name(LayoutRole.none) is null);
+}
+
 /// One registered span. `parent` indexes the enclosing span in the same array, -1 at
 /// the top level; `depth` is how far down that chain it sits, which the border drawing
 /// wants without walking it.

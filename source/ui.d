@@ -13,6 +13,7 @@ import about : about_open, about_frame;
 import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
 import bookmarks;
+import crumbs;
 import hexview;
 import layout;
 import layouts.png : PngLayout, png_detect;
@@ -59,7 +60,7 @@ struct Document
     /// document for the same reason the marks are: a span is an offset into these
     /// bytes, and two views of one file are looking at one structure.
     ///
-    /// Unbound until sniffLayout finds a format it knows, and left that way when it
+    /// Unbound until detectLayout finds a format it knows, and left that way when it
     /// does not - the grid then colours bytes by class, as it always did.
     LayoutCache layout;
 }
@@ -105,6 +106,10 @@ struct View
     /// can tell whether the user moved it. Only the side that moved drives the
     /// other; see ui_sync_diffs.
     long topSeen;
+
+    /// What the panel header's breadcrumb is composed into. Handed to the panel as a
+    /// slice, so it has to outlive the frame that wrote it.
+    char[128] crumbs = void;
 
     /// Whether that position was put there by the counterpart rather than the user.
     /// What tells a scroll the panel could not honour in full - the shorter of two
@@ -504,8 +509,15 @@ void ui_status(Args...)(string fmt, Args args)
         statusLen = 0;
 }
 
+// TODO: minimapEnabled, crumbsEnabled, pendingCompare could all be bit flags
+
 /// Minimap toolbar toggle (int for mu_checkbox); pushed onto hex.minimap.
-__gshared int minimapOn = 1;
+__gshared int minimapEnabled = 1;
+
+/// Ditto, for the breadcrumb strip between a tab and its grid. A window setting
+/// rather than a per-view one: it is a row of chrome, and two panes disagreeing on
+/// whether they have it is a window that looks broken rather than configured.
+__gshared int crumbsEnabled = 1;
 
 /// Path the async Open dialog picked, waiting for the next frame to consume it.
 /// Written by the dialog callback (possibly off-thread), read on the main thread,
@@ -1140,12 +1152,21 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
 
 /// What a byte *is*: the role the document's layout gives it, or its class when no
 /// layout covers it. The two are one channel - both answer the same question - so a
-/// field's colour replaces the classifier's rather than competing with it.
+/// field's role replaces the classifier's rather than competing with it.
+///
+/// One answer behind both the colour the grid draws and the name the breadcrumb says,
+/// so the strip cannot call a byte something the colours disagree with.
+LayoutRole byteRole(View* v, size_t offset, ubyte value)
+{
+    // This provides a fallback if layout isn't answering at position
+    LayoutRole role = layout_role(v.doc.layout, cast(long) offset);
+    return role != LayoutRole.none ? role : layout_classify(value);
+}
+
+/// Ditto, as the grid wants it.
 mu_Color byteColor(View* v, size_t offset, ubyte value)
 {
-    LayoutRole role = layout_role(v.doc.layout, cast(long) offset);
-    return role != LayoutRole.none
-        ? theme_role(role) : hex_classify(offset, value, null);
+    return theme_role(byteRole(v, offset, value));
 }
 
 /// Structure hook for the grid: the span `level` levels in from the outermost one over
@@ -1206,6 +1227,54 @@ const(char)[] layoutLabel(Document* d, long at, char[] buf)
 /// What sits between a record and the field inside it.
 immutable string SEP = " / ";
 
+/// The trail the breadcrumb strip shows: the format, then what in it the caret is in
+/// - "PNG / IDAT / length".
+///
+/// Where no span covers the caret the last component is the byte's class instead -
+/// "PNG / control", or "control" alone on a document no layout was bound to - which is
+/// the same role the grid coloured it by. The format stays at the root wherever one is
+/// bound: dropping it between two chunks would read as the layout having been lost,
+/// and the strip is the one place saying a document was parsed at all.
+const(char)[] viewCrumbs(View* v)
+{
+    char[64] pathbuf = void;
+    const(char)[] path = layoutLabel(v.doc, cast(long) v.hex.cursor, pathbuf);
+
+    ubyte value;
+    if (path.length == 0 && viewByte(v, v.hex.cursor, value))
+        path = layout_role_name(layout_classify(value));
+
+    string format = layout_name(v.doc.layout);
+    if (format.length == 0)
+        return path.length ? sformat(v.crumbs, "%s", path) : null;
+    return path.length ?
+        // With layout loaded
+        sformat(v.crumbs, "%s%s%s", format, SEP, path) :
+        // Without layout loaded
+        sformat(v.crumbs, "%s", format);
+}
+
+/// The byte at `at`, for a caller with one offset to ask about rather than a row.
+/// A failed read is swallowed as a miss: this runs inside a frame, where an exception
+/// would take the window down with it.
+/// Returns: false past the end of the document, and on an empty one.
+bool viewByte(View* v, size_t at, out ubyte value)
+{
+    if (v.doc.editor is null || cast(long) at >= v.doc.editor.size())
+        return false;
+
+    ubyte[1] one = void;
+    ubyte[] got;
+    try got = v.doc.editor.view(cast(long) at, one);
+    catch (Exception e)
+        return false;
+
+    if (got.length == 0)
+        return false;
+    value = got[0];
+    return true;
+}
+
 /// Byte source a layout parses `d` through, swallowing a failed read as a short one:
 /// this runs inside a frame, where an exception would take the window down with it.
 LayoutReadFn documentReader(Document* d)
@@ -1237,7 +1306,7 @@ void detectLayout(Document* d)
     // NOTE: Eventually will probably be a loop with a table of functions
     if (png_detect(got))
     {
-        layout_bind(new PngLayout(), documentReader(d), d.editor.size());
+        d.layout = layout_bind(new PngLayout(), documentReader(d), d.editor.size());
         return;
     }
 }
@@ -2277,7 +2346,7 @@ enum
     CMD_SKIP_NEXT, CMD_SKIP_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
-    CMD_MINIMAP, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
+    CMD_MINIMAP, CMD_CRUMBS, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
 }
 
 /// Ditto.
@@ -2313,7 +2382,8 @@ immutable Entry[] COMMANDS = [
     Entry("Next Pane",        "",             CMD_PANE_NEXT,    "forward switch go"),
     Entry("Previous Pane",    "",             CMD_PANE_PREV,    "back backward switch go"),
     Entry("Toggle Minimap",   "",             CMD_MINIMAP,      "ribbon overview scrollbar sidebar"),
-    Entry("Keyboard Shortcuts...", "",       CMD_KEYS,          "keys chords bindings help cheat sheet"),
+    Entry("Toggle Breadcrumbs","",            CMD_CRUMBS,       "crumbs path field structure format layout trail"),
+    Entry("Keyboard Shortcuts...", "",        CMD_KEYS,          "keys chords bindings help cheat sheet"),
     Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
 ];
@@ -3076,8 +3146,7 @@ void ui_mark_select(ref View v, ptrdiff_t index)
 /// menubar already calls, so a command and its menu item cannot drift apart.
 void ui_omni_run(int id)
 {
-    switch (id)
-    {
+    switch (id) {
     case CMD_NEW_TAB:   ui_new_tab();          break;
     case CMD_OPEN:      ui_open_dialog();      break;
     case CMD_COMPARE:   ui_compare_dialog();   break;
@@ -3090,7 +3159,10 @@ void ui_omni_run(int id)
     case CMD_CUT:       ui_cut();              break;
     case CMD_COPY:      ui_copy();             break;
     case CMD_PASTE:     ui_paste();            break;
-    case CMD_MINIMAP:   minimapOn = minimapOn ? 0 : 1; break;
+    case CMD_MINIMAP:   minimapEnabled = minimapEnabled ? 0 : 1; break;
+    case CMD_CRUMBS:    crumbsEnabled
+  = crumbsEnabled
+  ? 0 : 1; break;
     case CMD_FIND_NEXT: ui_find_repeat(false); break;
     case CMD_FIND_PREV: ui_find_repeat(true);  break;
     case CMD_SKIP_NEXT: ui_skip_element(false); break;
@@ -3209,8 +3281,9 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         // What is under the caret and what typing into it would do, in the strip
         // ui_panes kept free above. Only what nothing else on screen says: which
         // document and whether it is dirty are the window title and the tab, which
-        // pane is the number on its strip, which tab is the strip itself. Anything
-        // tempted in here belongs on whichever of those owns it - with a comparison
+        // pane is the number on its strip, which tab is the strip itself, and what
+        // the caret is standing in is the breadcrumb in its own panel's header.
+        // Anything tempted in here belongs on whichever of those owns it. A comparison
         // up and a bookmark under the caret this line used to run off the window,
         // which is the one state where a status bar has to stay readable.
         //
@@ -3231,17 +3304,9 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         const(char)[] marked = mark >= 0 && doc.marks[mark].name.length ?
             sformat(markbuf, "  [%s]", ui_clip(doc.marks[mark].name, 40)) : "";
 
-        // What the layout calls the byte under the caret. The border says a record is
-        // there and the colour says what kind of field it is; this is the only place
-        // either of them is named.
-        char[64] pathbuf = void;
-        const(char)[] path = layoutLabel(view.doc, cast(long) view.hex.cursor, pathbuf);
-        char[72] fieldbuf = void;
-        const(char)[] field = path.length ? sformat(fieldbuf, "  %s", path) : "";
-
         char[256] statusbuf = void;
-        char[] status = sformat(statusbuf, "offset %08x  %s  selected %u byte(s)%s%s",
-            view.hex.cursor, view.hex.insertMode ? "INS" : "OVR", selLen, field, marked);
+        char[] status = sformat(statusbuf, "offset %08x  %s  selected %u byte(s)%s",
+            view.hex.cursor, view.hex.insertMode ? "INS" : "OVR", selLen, marked);
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
         mu_draw_text(ctx, ctx.style.font, cast(string) status,
@@ -3735,7 +3800,16 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     }
 
     View* v = p.views[p.current];
-    v.hex.minimap = minimapOn != 0;
+    v.hex.minimap = minimapEnabled != 0;
+
+    // Under the tab and over the grid, where VS Code puts it: the trail belongs to
+    // the view, so it goes inside the pane rather than on any window-wide bar, and
+    // it reads as a caption to the bytes under it. Drawn on every document, parsed
+    // or not - the classifier always has a word for the byte under the caret, and a
+    // strip that came and went with the format would move the grid under the user.
+    if (crumbsEnabled
+)
+        crumb_bar(ctx, cast(string) viewCrumbs(v), CANVAS);
 
     // The panel keeps its copy of the size live within a frame; this keeps it
     // authoritative across them, and across panes, where an edit made in one is a
@@ -4041,8 +4115,13 @@ void ui_menubar(mu_Context* ctx)
         mu_menu_separator(ctx);
         // No native checkmark on a ddui menu item, so the on/off state rides in the
         // shortcut column instead.
-        if (mu_menu_item_ex(ctx, "Minimap", minimapOn ? "On" : "Off", 0, 0))
-            minimapOn = minimapOn ? 0 : 1;
+        if (mu_menu_item_ex(ctx, "Minimap", minimapEnabled ? "On" : "Off", 0, 0))
+            minimapEnabled = minimapEnabled ? 0 : 1;
+        if (mu_menu_item_ex(ctx, "Breadcrumbs", crumbsEnabled
+     ? "On" : "Off", 0, 0))
+            crumbsEnabled
+         = crumbsEnabled
+         ? 0 : 1;
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }

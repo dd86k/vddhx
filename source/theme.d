@@ -66,9 +66,12 @@ unittest
         assert((role == LayoutRole.none) == (c.a == 0));
     }
 
-    // The classifier roles keep the colours the grid has always drawn them in.
-    assert(theme_role(LayoutRole.printable) == mu_Color(220, 220, 220, 255));
-    assert(theme_role(LayoutRole.zero) == mu_Color(90, 90, 100, 255));
+    // The classifier roles keep the colours the grid has always drawn them in: the
+    // panel's own hex_classify is what an uncoloured view uses, and a byte no layout
+    // covers must not change colour for having been named through here instead.
+    import hexview : hex_classify;
+    foreach (ubyte value; [0x00, 'A', '\n', 0x01, 0x7f, 0x80, 0xff])
+        assert(theme_role(layout_classify(value)) == hex_classify(0, value, null));
 
     assert(theme_edge(0) != theme_edge(1));
 }
