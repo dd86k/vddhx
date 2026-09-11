@@ -120,6 +120,9 @@ private enum
     WASH_EDGE_LIFT = 200, // how much brighter a wash's outline is, in percent
     SPAN_PAD = 1, // gap a structure border keeps off its cells, so it reads as a box
                   // round the bytes rather than as another gridline between them
+    MARGIN_HEX  = 2,    // px marging (bleed) for hex cells
+    MARGIN_TEXT = 1,    // px marging (bleed) for text characters
+                        // making this 2 makes overlapping lines visible due to a created gap
 }
 
 /// Wash behind the selected bytes, in the grid and on the minimap ribbon. The
@@ -1703,12 +1706,12 @@ void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
             int hx1 = originX + charW *
                 (joinR ? hex_col_for(lay, i + 1) : hex_col_for(lay, i) + 2);
             hex_draw_edges(ctx, hx0, hx1, y, rowH, top, bottom, onL, joinR == false,
-                1, 0, edge);
+                1, 0, 0, edge);
 
             // The ASCII lane has no gaps, so its cells are one character wide.
             int ax0 = originX + (lay.asciiStart + i) * charW;
             hex_draw_edges(ctx, ax0, ax0 + charW, y, rowH, top, bottom, onL,
-                joinR == false, 1, 0, edge);
+                joinR == false, 1, 0, 0, edge);
         }
 
         left = here;
@@ -1770,11 +1773,11 @@ void hex_span_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
             int hx1 = originX + charW *
                 (joinR ? hex_col_for(lay, i + 1) : hex_col_for(lay, i) + 2);
             hex_draw_edges(ctx, hx0, hx1, y, rowH, top, bottom, onL, joinR == false,
-                1, SPAN_PAD, here.edge);
+                1, -MARGIN_HEX, SPAN_PAD, here.edge);
 
             int ax0 = originX + (lay.asciiStart + i) * charW;
             hex_draw_edges(ctx, ax0, ax0 + charW, y, rowH, top, bottom, onL,
-                joinR == false, 1, SPAN_PAD, here.edge);
+                joinR == false, 1, -MARGIN_TEXT, SPAN_PAD, here.edge);
         }
 
         left    = here;
@@ -1830,25 +1833,27 @@ unittest
 }
 
 // Draw the edges of one cell that its neighbours do not span, `weight` pixels each,
-// held `pad` pixels off the cell's bounds.
+// held `padX` / `padY` pixels off the cell's bounds. A negative pad pushes that side
+// outwards instead, for a lane whose glyphs leave no room inside.
 //
 // The padding is only taken off the sides actually drawn, so a run stays one unbroken
 // box: an edge dropped for a neighbour is an edge the box does not turn at, and pulling
 // the span in there would leave a notch mid-run. A cell too small to pad draws flush
 // rather than inside out.
 void hex_draw_edges(mu_Context* ctx, int x0, int x1, int y, int rowH,
-    bool top, bool bottom, bool left, bool right, int weight, int pad, mu_Color color)
+    bool top, bool bottom, bool left, bool right, int weight, int padX, int padY,
+    mu_Color color)
 {
-    int iy = y + pad;
-    int ih = rowH - 2 * pad;
+    int iy = y + padY;
+    int ih = rowH - 2 * padY;
     if (ih < 2 * weight)
     {
         iy = y;
         ih = rowH;
     }
 
-    int ix0 = x0 + (left ? pad : 0);
-    int ix1 = x1 - (right ? pad : 0);
+    int ix0 = x0 + (left ? padX : 0);
+    int ix1 = x1 - (right ? padX : 0);
     if (ix1 - ix0 < 2 * weight)
     {
         ix0 = x0;
