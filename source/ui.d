@@ -1235,6 +1235,44 @@ const(char)[] layoutLabel(Document* d, long at, char[] buf)
 /// What sits between a record and the field inside it.
 immutable string SEP = " / ";
 
+/// How many of the layout's fields the '#' list holds. A flat list of a whole
+/// document is the one thing that asks a layout to be walked eagerly, so it is asked
+/// for a listful and no more: a container format big enough to matter would otherwise
+/// be parsed end to end to fill a box showing ten rows.
+enum size_t STRUCT_ROWS = 2048;
+
+/// Name of `spans[i]` with the records holding it in front - "IDAT / length". What
+/// layoutLabel says about the caret, said about a span already in hand: the parent
+/// links are right there, so nothing has to be looked up by offset.
+const(char)[] spanLabel(const(LayoutSpan)[] spans, size_t i, char[] buf)
+{
+    ptrdiff_t[16] chain = void; // deeper than a layout may nest; see LAYOUT_MAX_DEPTH
+    size_t depth;
+    for (ptrdiff_t at = i; at >= 0 && depth < chain.length; at = spans[at].parent)
+        chain[depth++] = at;
+
+    size_t n;
+    foreach_reverse (ptrdiff_t at; chain[0 .. depth])
+    {
+        string name = spans[at].name;
+        if (name.length == 0)
+            continue;
+
+        if (n && n + SEP.length <= buf.length)
+        {
+            buf[n .. n + SEP.length] = SEP;
+            n += SEP.length;
+        }
+
+        size_t take = name.length;
+        if (n + take > buf.length)
+            take = buf.length - n;
+        buf[n .. n + take] = name[0 .. take];
+        n += take;
+    }
+    return buf[0 .. n];
+}
+
 /// The trail the breadcrumb strip shows: the format, then what in it the caret is in
 /// - "PNG / IDAT / length".
 ///
@@ -2350,7 +2388,7 @@ enum
 {
     CMD_NEW_TAB, CMD_OPEN, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_COPY, CMD_PASTE, CMD_GOTO,
-    CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT,
+    CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT, CMD_STRUCTURE,
     CMD_SKIP_NEXT, CMD_SKIP_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
@@ -2376,6 +2414,7 @@ immutable Entry[] COMMANDS = [
     Entry("Find Next",        "Ctrl+N",       CMD_FIND_NEXT,    "search again forward"),
     Entry("Find Previous",    "Ctrl+Shift+N", CMD_FIND_PREV,    "search back backward"),
     Entry("Inspect Bytes...", "Alt+I",        CMD_INSPECT,      "data types decode value integer float"),
+    Entry("Go to Field...",   "",             CMD_STRUCTURE,    "structure layout chunk record section symbol header"),
     Entry("Skip Forward",     "Ctrl+Right",   CMD_SKIP_NEXT,    "run element next word"),
     Entry("Skip Back",        "Ctrl+Left",    CMD_SKIP_PREV,    "run element previous word"),
     Entry("Toggle Bookmark",  "Ctrl+B",       CMD_MARK,         "mark set flag"),
@@ -2407,6 +2446,7 @@ immutable Entry[] PREFIXES = [
     Entry("Omnibar: find a pattern",         "" ~ OMNI_FIND),
     Entry("Omnibar: inspect bytes at caret", "" ~ OMNI_INSPECT),
     Entry("Omnibar: list bookmarks",         "" ~ OMNI_BOOKMARK),
+    Entry("Omnibar: go to a field",          "" ~ OMNI_STRUCTURE),
     Entry("Omnibar: this sheet",             "" ~ OMNI_HELP),
 ];
 
@@ -2599,6 +2639,39 @@ const(OmniItem)[] ui_omni_items()
             put(mark.name,
                 ui_row_text(sformat(detail, "0x%08x  %s", mark.at, bytes)),
                 cast(int) i, false, false, ui_row_text(head[0 .. used]));
+        }
+        break;
+    case OmniMode.structure:
+        bool whole;
+        const(LayoutSpan)[] spans = layout_spans(doc.layout, STRUCT_ROWS, whole);
+        if (spans.length == 0)
+        {
+            put(layout_name(doc.layout).length ?
+                    "nothing parsed in this document" : "no layout for this document",
+                "PNG is the only format read so far", -1, false, true);
+            break;
+        }
+        // The role goes in as a keyword rather than on screen: the colour under the
+        // caret already says it, and it is what lets "#checksum" find a field the
+        // format calls CRC.
+        foreach (size_t i, ref const(LayoutSpan) s; spans)
+        {
+            char[128] path = void;
+            char[64] where = void;
+            put(ui_row_text(spanLabel(spans, i, path)),
+                ui_row_text(sformat(where, "0x%08x  %d byte%s", s.at, s.length,
+                    s.length == 1 ? "" : "s")),
+                cast(int) i, false, false, layout_role_name(s.role));
+        }
+        // A cut list has to say so, or a missing field reads as one the format does
+        // not have. Not pinned, so typing a query puts the notice away with the rows
+        // it was about; unfiltered it sorts last, where the list runs out.
+        if (whole == false)
+        {
+            const(LayoutSpan) last = spans[$ - 1];
+            char[64] far = void;
+            put(ui_row_text(sformat(far, "%d fields, and more past 0x%08x",
+                    spans.length, last.at + last.length)), null, -1);
         }
         break;
     case OmniMode.prompt:
@@ -2870,6 +2943,20 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
     case OmniMode.bookmark:
         if (id >= 0 && id < doc.marks.length)
             ui_mark_select(view, id);
+        view.hex.takeFocus = true;
+        break;
+    case OmniMode.structure:
+        // The id indexes the list the rows were built from, which is the cache's own
+        // array: nothing has edited the document between building it and this.
+        bool whole;
+        const(LayoutSpan)[] spans = layout_spans(doc.layout, STRUCT_ROWS, whole);
+        if (id >= 0 && id < spans.length && spans[id].length > 0)
+        {
+            // Selected rather than jumped to: a field is a run of bytes, and the
+            // status bar then says how long it is.
+            ui_select_range(view, cast(size_t) spans[id].at, cast(size_t) spans[id].length);
+            logInfo("went to %s at %#x", spans[id].name, spans[id].at);
+        }
         view.hex.takeFocus = true;
         break;
     case OmniMode.prompt:
@@ -3190,6 +3277,7 @@ void ui_omni_run(int id)
     case CMD_FIND:      ui_omni_open(OMNI_FIND);     return;
     case CMD_INSPECT:   ui_omni_open(OMNI_INSPECT);  return;
     case CMD_MARK_LIST: ui_omni_open(OMNI_BOOKMARK); return;
+    case CMD_STRUCTURE: ui_omni_open(OMNI_STRUCTURE); return;
     case CMD_MARK_NAME: ui_mark_name();              return;
     case CMD_KEYS:      ui_omni_open(OMNI_HELP);     return;
     case CMD_ABOUT:     about_open();          break;
@@ -4094,6 +4182,7 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Find Previous", "Ctrl+Shift+N", 0, 0)) ui_find_repeat(true);
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Go to Offset...", "Ctrl+G",     0, 0)) ui_omni_open(OMNI_ADDRESS);
+        if (mu_menu_item_ex(ctx, "Go to Field...",  "",           0, 0)) ui_omni_open(OMNI_STRUCTURE);
         mu_menu_separator(ctx);
         // Not a search of the document, but the same walk over it by another name.
         if (mu_menu_item_ex(ctx, "Skip Forward",  "Ctrl+Right",   0, 0)) ui_skip_element(false);

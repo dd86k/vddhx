@@ -27,7 +27,7 @@ import ddui;
 import hexview : HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
-    OMNI_BOOKMARK, OMNI_HELP, OMNI_KEY_DOWN;
+    OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
 import ui;
 
@@ -331,6 +331,20 @@ int screenshot_run(string[] args)
         mu_input_mousemove(&ctx, 0, 0);
         frame();
     }
+
+    // The '#' list over the same document: what the layout found, flat, with the
+    // trail in the label so a field reads as the chunk it belongs to. Enter selects
+    // the whole span rather than dropping the caret on its head.
+    ui_omni_toggle(OMNI_STRUCTURE);
+    frame(); frame();
+    shot("omni-struct.bmp");
+    mu_input_text(&ctx, "ihdr wid");
+    frame(); frame();
+    find("IHDR / width"); // the trail is what the query matched through
+    shot("omni-struct-filter.bmp");
+    tap(MU_KEY_RETURN);
+    frame();
+    shot("omni-struct-jump.bmp");
 
     ui_close_current_tab();
     frame();

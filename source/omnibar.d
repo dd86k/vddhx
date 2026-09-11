@@ -10,6 +10,7 @@
 ///   /          a pattern to find in the document
 ///   =          the bytes at the caret, read as every type they could be
 ///   @          the document's bookmarks
+///   #          the fields the layout found, to go to one
 ///   ?          the shortcut sheet, there to be read rather than run
 ///
 /// A mode whose answer is computed rather than picked hands in a single pinned
@@ -52,6 +53,8 @@ enum char OMNI_INSPECT = '=';
 /// Ditto.
 enum char OMNI_BOOKMARK = '@';
 /// Ditto.
+enum char OMNI_STRUCTURE = '#';
+/// Ditto.
 enum char OMNI_HELP    = '?';
 
 /// What the box is currently searching, as told by its first character.
@@ -63,6 +66,10 @@ enum OmniMode
     find,     /// '/': a byte pattern, likewise read out of the query.
     inspect,  /// '=': the bytes at the caret, one row per type.
     bookmark, /// '@': the document's bookmarks.
+    /// '#': the layout's fields. Apart from the bookmarks for the same reason the
+    /// spans are dropped on an edit and the marks are not: one is what the user said
+    /// about those bytes, the other what a parser concluded from them.
+    structure,
     help,     /// '?': the shortcut sheet.
     prompt,   /// No prefix, raised by omni_prompt: free text answering a question.
 }
@@ -432,6 +439,7 @@ OmniMode omni_prefix_mode(char prefix)
     case OMNI_FIND:    return OmniMode.find;
     case OMNI_INSPECT: return OmniMode.inspect;
     case OMNI_BOOKMARK: return OmniMode.bookmark;
+    case OMNI_STRUCTURE: return OmniMode.structure;
     case OMNI_HELP:    return OmniMode.help;
     default:           return OmniMode.switcher;
     }

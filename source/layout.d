@@ -332,6 +332,30 @@ LayoutRole layout_role(ref LayoutCache c, long at)
     return layout_at(c, at, span) ? span.role : LayoutRole.none;
 }
 
+/// Every span the layout has, driving it forward for up to `budget` of them.
+///
+/// The one question asked of the whole document rather than of an offset in it: the
+/// flat list a field is picked out of. The budget is what keeps that from walking a
+/// container the size of a disk - `whole` comes back false where it cut the walk
+/// short, so a caller can say the list is partial rather than imply it is all there
+/// is. Asking again costs nothing: the spans are kept.
+const(LayoutSpan)[] layout_spans(ref LayoutCache c, size_t budget, out bool whole)
+{
+    c.builder.spans = &c.spans; // see layout_ensure, for a cache that was copied
+
+    // A byte past the frontier each time rather than one big reach, so the budget is
+    // counted against what came back instead of against how far it got.
+    while (c.impl && c.exhausted == false && c.spans.length < budget)
+    {
+        long was = c.builder.at;
+        if (c.impl.parse(c.builder, was + 1) == false || c.builder.at <= was)
+            c.exhausted = true;
+    }
+
+    whole = c.exhausted && c.spans.length <= budget;
+    return c.spans.length > budget ? c.spans[0 .. budget] : c.spans;
+}
+
 /// Forget everything covering `from` onwards and arrange to parse it again.
 ///
 /// The outermost span covering the edit decides where parsing resumes, since its own
@@ -568,6 +592,35 @@ unittest
         else
             assert(s.role == ((at - 4) % 8 < 4 ? LayoutRole.length : LayoutRole.data));
     }
+}
+
+/// The flat list, and the budget that bounds it.
+unittest
+{
+    LayoutCache c = layout_bind(new RecordLayout(), zeroReader(), 4 + 8 * 4);
+
+    // Cut short: the walk stops with the budget filled and says the list is partial.
+    bool whole;
+    const(LayoutSpan)[] some = layout_spans(c, 4, whole);
+    assert(some.length == 4);
+    assert(whole == false);
+    assert(some[0].name == "magic");
+    assert(some[1].name == "record");
+
+    // Room for all of it: the magic and four records of two fields each.
+    const(LayoutSpan)[] all = layout_spans(c, 64, whole);
+    assert(all.length == 1 + 4 * 3);
+    assert(whole);
+    assert(all[$ - 1].name == "payload");
+
+    // In registration order, so a parent always precedes what it holds.
+    foreach (ref const(LayoutSpan) s; all)
+        assert(s.parent < 0 || all[s.parent].at <= s.at);
+
+    // An empty cache has nothing to walk and is done saying so.
+    LayoutCache none;
+    assert(layout_spans(none, 16, whole).length == 0);
+    assert(whole == false); // nothing parsed it, rather than nothing in it
 }
 
 /// Invalidation resumes from the outermost span over the edit, not from the edit.
