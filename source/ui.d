@@ -2954,20 +2954,12 @@ enum size_t INSPECT_SINGLES = 2;
 enum size_t INSPECT_ORDERED = (INSPECT.length - INSPECT_SINGLES) / 2;
 static assert(INSPECT.length == INSPECT_SINGLES + 2 * INSPECT_ORDERED);
 
-/// Turn the document over to the other byte order. Nothing on screen says which
-/// one is in force on its own: the inspector's rows are in it and a find pattern's
-/// preview spells its scalars out in it, which is where the answer is read off.
+/// Turn the document over to the other byte order. No message: the status bar
+/// carries the order, so the keystroke's result is already on screen.
 public void ui_endian_toggle()
 {
     doc.endian = doc.endian == Endian.littleEndian
         ? Endian.bigEndian : Endian.littleEndian;
-    ui_status("byte order: %s-endian", ui_endian_name(doc.endian));
-}
-
-/// Ditto, for a label.
-string ui_endian_name(Endian endian)
-{
-    return endian == Endian.bigEndian ? "big" : "little";
 }
 
 /// The row shown at `index`, the document's order coming first.
@@ -3515,9 +3507,12 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         // up and a bookmark under the caret this line used to run off the window,
         // which is the one state where a status bar has to stay readable.
         //
-        // The offset and the mode come first because they are there in every frame
-        // and a fixed width: leading with them keeps both at a column the eye can go
-        // straight to, whatever the two variable fields behind them are doing.
+        // The offset, the entry mode and the byte order come first because they are
+        // there in every frame and a fixed width: leading with them keeps all three
+        // at a column the eye can go straight to, whatever the two variable fields
+        // behind them are doing. The order sits by the entry mode, both of them
+        // being how the bytes under the caret are read and written rather than
+        // where they are.
         static immutable int[1] srow = [ -1 ];
         mu_layout_row(ctx, 1, srow.ptr, statusH);
         mu_Rect sr = mu_layout_next(ctx);
@@ -3533,8 +3528,9 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             sformat(markbuf, "  [%s]", ui_clip(doc.marks[mark].name, 40)) : "";
 
         char[256] statusbuf = void;
-        char[] status = sformat(statusbuf, "offset %08x  %s  selected %u byte(s)%s",
-            view.hex.cursor, view.hex.insertMode ? "INS" : "OVR", selLen, marked);
+        char[] status = sformat(statusbuf, "offset %08x  %s  %s  selected %u byte(s)%s",
+            view.hex.cursor, view.hex.insertMode ? "INS" : "OVR",
+            doc.endian == Endian.bigEndian ? "BE" : "LE", selLen, marked);
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
         mu_draw_text(ctx, ctx.style.font, cast(string) status,
