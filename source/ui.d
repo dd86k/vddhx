@@ -488,9 +488,14 @@ public void ui_style(mu_Context* ctx)
     ctx.style.colors[MU_COLOR_PANELBG] = CANVAS;
 }
 
-/// Last thing the application had to say, shown at the right of the status bar
-/// until something replaces it: a find that came up empty, a bookmark set, a
-/// copied inspector reading - keystrokes whose result would otherwise be invisible.
+/// Last thing the application had to say, taking the whole status bar until the
+/// next keystroke: a find that came up empty, a bookmark set, a copied inspector
+/// reading - keystrokes whose result would otherwise be invisible.
+///
+/// It covers the readout rather than sharing the row with it. The window is often
+/// narrow, and the moment a message fires is the moment the offset and the entry
+/// mode matter least: the user just acted and wants the answer, and the readout is
+/// one keystroke away from being back.
 __gshared char[96] statusText;
 /// Ditto.
 __gshared size_t statusLen;
@@ -517,6 +522,16 @@ void ui_status(Args...)(string fmt, Args args)
         formattedWrite(sink, fmt, args);
     catch (Exception e)
         statusLen = 0;
+}
+
+/// Put the message away. The event loop calls this on every key and button press,
+/// so a message answers the keystroke that raised it and lives until the next one:
+/// pressing anything is the acknowledgement, which leaves no timer to guess how
+/// long a reading takes. Called before the press is dispatched, so a key that
+/// raises a message of its own still leaves it up.
+public void ui_status_dismiss()
+{
+    statusLen = 0;
 }
 
 // TODO: minimapEnabled, crumbsEnabled, pendingCompare could all be bit flags
@@ -3518,32 +3533,38 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         mu_Rect sr = mu_layout_next(ctx);
         mu_draw_rect(ctx, sr, mu_Color(30, 30, 40, 255));
 
-        size_t selLen = hex_total(view.hex) ?
-            hex_sel_high(view.hex) - hex_sel_low(view.hex) + 1 : 0;
-        // The name of the run the caret is in: the wash says a byte is marked, and
-        // this is the only place that says what it was marked as.
-        ptrdiff_t mark = bookmark_find(doc.marks, cast(long) view.hex.cursor);
-        char[64] markbuf = void;
-        const(char)[] marked = mark >= 0 && doc.marks[mark].name.length ?
-            sformat(markbuf, "  [%s]", ui_clip(doc.marks[mark].name, 40)) : "";
-
-        char[256] statusbuf = void;
-        char[] status = sformat(statusbuf, "offset %08x  %s  %s  selected %u byte(s)%s",
-            view.hex.cursor, view.hex.insertMode ? "INS" : "OVR",
-            doc.endian == Endian.bigEndian ? "BE" : "LE", selLen, marked);
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
-        mu_draw_text(ctx, ctx.style.font, cast(string) status,
-            mu_Vec2(sr.x + 4, ty), mu_Color(170, 170, 185, 255));
 
-        // The last message, against the right edge so it never collides with the
-        // fixed readout on the left.
         if (statusLen)
         {
-            string message = cast(string) statusText[0 .. statusLen];
-            int mw = ctx.text_width(ctx.style.font, message.ptr, cast(int) message.length);
-            mu_draw_text(ctx, ctx.style.font, message,
-                mu_Vec2(sr.x + sr.w - 4 - mw, ty), mu_Color(200, 200, 150, 255));
+            mu_draw_text(ctx, ctx.style.font, cast(string) statusText[0 .. statusLen],
+                mu_Vec2(sr.x + 4, ty), mu_Color(200, 200, 150, 255));
+        }
+        else
+        {
+            size_t selLen = hex_total(view.hex) ?
+                hex_sel_high(view.hex) - hex_sel_low(view.hex) + 1 : 0;
+            // The name of the run the caret is in: the wash says a byte is marked,
+            // and this is the only place that says what it was marked as.
+            ptrdiff_t mark = bookmark_find(doc.marks, cast(long) view.hex.cursor);
+            char[64] markbuf = void;
+            const(char)[] marked = mark >= 0 && doc.marks[mark].name.length ?
+                sformat(markbuf, "  [%s]", ui_clip(doc.marks[mark].name, 40)) : "";
+
+            // A bare caret selects the byte under it, so a cell that counted one
+            // was in nearly every frame saying nothing; above one it is the only
+            // place the length shows.
+            char[32] selbuf = void;
+            const(char)[] selected = selLen > 1 ?
+                sformat(selbuf, "  (%u selected)", selLen) : "";
+
+            char[256] statusbuf = void;
+            char[] status = sformat(statusbuf, "offset %08x  %s  %s%s%s",
+                view.hex.cursor, view.hex.insertMode ? "INS" : "OVR",
+                doc.endian == Endian.bigEndian ? "BE" : "LE", selected, marked);
+            mu_draw_text(ctx, ctx.style.font, cast(string) status,
+                mu_Vec2(sr.x + 4, ty), mu_Color(170, 170, 185, 255));
         }
 
         // Last, so the title agrees with the status bar above rather than trailing

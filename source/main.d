@@ -140,6 +140,15 @@ int main(string[] args)
         while (SDL_PollEvent(&event))
         {
             frames = FRAMES_PER_INPUT;
+
+            // Before the dispatch below, so an event that has something to say
+            // still leaves its own message up. Modifiers alone are not an
+            // acknowledgement: the Ctrl of a Ctrl+F is the user acting on the
+            // message rather than dismissing it unread.
+            if ((event.type == SDL_EVENT_KEY_DOWN && modifierKey(event.key.key) == false) ||
+                event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+                ui_status_dismiss();
+
             switch (event.type)
             {
             case SDL_EVENT_QUIT:
@@ -431,6 +440,24 @@ int main(string[] args)
 ///
 /// Copy / cut / paste / select-all are mapped from the bare letters, ddui only
 /// honouring those bits while Ctrl is held.
+/// Keys that cannot be a keystroke on their own, either half of a chord or a mode
+/// the keyboard latches. Only used to decide what dismisses a status message.
+private bool modifierKey(SDL_KeyCode key)
+{
+    switch (key)
+    {
+    case SDLK_LSHIFT, SDLK_RSHIFT,
+         SDLK_LCTRL, SDLK_RCTRL,
+         SDLK_LALT, SDLK_RALT,
+         SDLK_LGUI, SDLK_RGUI,
+         SDLK_CAPSLOCK, SDLK_NUMLOCKCLEAR, SDLK_SCROLLLOCK,
+         SDLK_MODE:
+        return true;
+    default:
+        return false;
+    }
+}
+
 private int omniKey(SDL_KeyCode key)
 {
     switch (key)
