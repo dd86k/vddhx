@@ -20,9 +20,9 @@
 ///   0xde ? 0xef     '?' stands for one byte, whatever it is
 ///   0xde * 0xef     '*' for a run of them, however long
 ///
-/// Scalars are encoded little-endian. ddhx follows a setting there; vddhx has
-/// none to follow, its inspector listing both orders as readings of their own
-/// instead, so write the bytes out with `x:` when the other order is wanted.
+/// Scalars are encoded in the byte order the caller passes in - the document's
+/// own setting, as ddhx has one for the same job. Byte strings (`x:`, text) have
+/// no order to follow and ignore it.
 /// Authors: dd86k <dd@dax.moe>
 module search;
 
@@ -63,9 +63,11 @@ struct Needle
 /// from document offset `pos` and return what was actually read.
 alias SearchReadFn = ubyte[] function(long pos, ubyte[] buf, void* user);
 
-/// Read a pattern out of `text`. See the module header for the syntax.
+/// Read a pattern out of `text`, `endian` being the order its scalars are
+/// encoded in. See the module header for the syntax.
 /// Returns: false when the text is not a pattern (yet), leaving `needle` empty.
-bool search_parse(const(char)[] text, out Needle needle)
+bool search_parse(const(char)[] text, out Needle needle,
+    Endian endian = Endian.littleEndian)
 {
     text = search_strip(text);
     if (text.length == 0)
@@ -97,7 +99,7 @@ bool search_parse(const(char)[] text, out Needle needle)
             args.length == 1 ? cast(const(char)[]) args[0].data : text);
 
     Pattern pat;
-    try pat = pattern(Endian.littleEndian, args);
+    try pat = pattern(endian, args);
     catch (Exception)
         return false; // not a pattern, or not one yet: it is still being typed
 
@@ -534,10 +536,10 @@ long search_range(ref const(Needle) needle, long lo, long hi, long size,
 
 unittest
 {
-    static Needle parse(string text)
+    static Needle parse(string text, Endian endian = Endian.littleEndian)
     {
         Needle n;
-        search_parse(text, n);
+        search_parse(text, n, endian);
         return n;
     }
     static const(ushort)[] elems(ref Needle n) { return n.data[0 .. n.length]; }
@@ -579,6 +581,17 @@ unittest
     assert(elems(n) == [ 0x00, 0x00, 0x80, 0x3f ]);
     n = parse(`0xde utf8:ab`); // bases and text in one pattern
     assert(elems(n) == [ 0xde, 'a', 'b' ]);
+
+    // Big-endian: a scalar is written the other way round, while bytes written
+    // out as bytes - and text - stay in the order they were typed.
+    n = parse("u16:255", Endian.bigEndian);
+    assert(elems(n) == [ 0x00, 0xff ]);
+    n = parse("f32:1.0", Endian.bigEndian);
+    assert(elems(n) == [ 0x3f, 0x80, 0x00, 0x00 ]);
+    n = parse("x:de ad", Endian.bigEndian);
+    assert(elems(n) == [ 0xde, 0xad ]);
+    n = parse("utf16:hi", Endian.bigEndian);
+    assert(elems(n) == [ 0, 'h', 0, 'i' ]);
 
     // Wildcards, and the flag that says one is in there.
     n = parse("0xde ? 0xef");

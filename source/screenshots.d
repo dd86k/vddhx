@@ -804,6 +804,16 @@ int screenshot_run(string[] args)
     ui_omni_close();
     frame();
 
+    // The document's byte order brings its half of the list to the front; both
+    // orders stay on it either way.
+    ui_endian_toggle();
+    ui_omni_toggle(OMNI_INSPECT);
+    frame(); frame();
+    shot("omni-inspect-big.bmp");
+    ui_omni_close();
+    ui_endian_toggle();
+    frame();
+
     // Scenario 15: bookmarks, a single byte and then a four-byte run; the panel
     // washes every byte of both, grid and minimap. A marked run is drawn under the
     // selection that set it, so shot-mark-range shows it only after the caret moves.

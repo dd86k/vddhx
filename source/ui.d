@@ -63,6 +63,16 @@ struct Document
     /// Unbound until detectLayout finds a format it knows, and left that way when it
     /// does not - the grid then colours bytes by class, as it always did.
     LayoutCache layout;
+
+    /// Byte order multi-byte values are read and written in: the inspector's rows
+    /// and the scalars of a find pattern (`u16:`, `f32:`, `utf16:`). Per document,
+    /// because the order is a property of the format on disk - a big-endian file
+    /// stays big-endian while the little-endian one in the next tab stays little -
+    /// and views of one file are looking at one format.
+    ///
+    /// A layout names the order of its own fields and ignores this, formats being
+    /// free to mix the two internally.
+    Endian endian = Endian.littleEndian;
 }
 
 /// One way of looking at a document: which document, plus everything about the
@@ -2392,7 +2402,7 @@ enum
     CMD_SKIP_NEXT, CMD_SKIP_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
-    CMD_MINIMAP, CMD_CRUMBS, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
+    CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
 }
 
 /// Ditto.
@@ -2430,6 +2440,7 @@ immutable Entry[] COMMANDS = [
     Entry("Previous Pane",    "",             CMD_PANE_PREV,    "back backward switch go"),
     Entry("Toggle Minimap",   "",             CMD_MINIMAP,      "ribbon overview scrollbar sidebar"),
     Entry("Toggle Breadcrumbs","",            CMD_CRUMBS,       "crumbs path field structure format layout trail"),
+    Entry("Toggle Byte Order","",             CMD_ENDIAN,       "endian endianness little big le be swap order inspector pattern"),
     Entry("Keyboard Shortcuts...", "",        CMD_KEYS,          "keys chords bindings help cheat sheet"),
     Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
@@ -2606,9 +2617,9 @@ const(OmniItem)[] ui_omni_items()
         ubyte[8] raw = void;
         ubyte[] bytes = ui_inspect_bytes(raw);
         char[64] value = void;
-        foreach (size_t i, ref immutable Inspect row; INSPECT)
-            put(row.label, ui_row_text(ui_inspect_value(cast(int) i, bytes, value)),
-                cast(int) i);
+        foreach (int i; 0 .. cast(int) INSPECT.length)
+            put(ui_inspect_row(i).label,
+                ui_row_text(ui_inspect_value(i, bytes, value)), i);
         break;
     case OmniMode.bookmark:
         if (doc.marks.length == 0)
@@ -2839,14 +2850,18 @@ bool ui_find_needle(out Needle needle)
     if (query.length > findText.length) // too long to remember: read it every time
     {
         findTextLen = size_t.max;
-        return search_parse(query, needle);
+        return search_parse(query, needle, doc.endian);
     }
 
-    if (findTextLen != query.length || findText[0 .. findTextLen] != query)
+    // The byte order is part of what the text came to, so a document read the
+    // other way round - or a switch to one - re-reads it.
+    if (findTextLen != query.length || findEndian != doc.endian
+        || findText[0 .. findTextLen] != query)
     {
         findTextLen = query.length;
+        findEndian  = doc.endian;
         findText[0 .. findTextLen] = query;
-        findHave = search_parse(query, findNeedle);
+        findHave = search_parse(query, findNeedle, findEndian);
     }
     needle = findNeedle;
     return findHave;
@@ -2906,9 +2921,11 @@ struct Inspect
     Endian endian;
 }
 
-/// The readings the '=' mode offers, little-endian first so the common ones are
-/// on screen without scrolling, then the same types the other way round. Single
-/// bytes have no byte order to argue about, so they appear once.
+/// The readings the '=' mode offers: the single bytes, which have no byte order
+/// to argue about and so appear once, then every other type in both orders. Both
+/// stay on the list whatever the document's setting is - the reading that was not
+/// asked for is as often as not the one that turns out to make sense - and the
+/// setting only says which half comes first, `ui_inspect_row` swapping them.
 immutable Inspect[] INSPECT = [
     Inspect("u8",     InspectorType.u8,  Endian.littleEndian),
     Inspect("i8",     InspectorType.i8,  Endian.littleEndian),
@@ -2930,6 +2947,38 @@ immutable Inspect[] INSPECT = [
     Inspect("f64 BE", InspectorType.f64, Endian.bigEndian),
 ];
 
+/// Rows the byte order says nothing about, at the head of INSPECT, and the rows
+/// of one order behind them; the table is those three blocks and nothing else,
+/// which is what lets a half be brought forward by index.
+enum size_t INSPECT_SINGLES = 2;
+enum size_t INSPECT_ORDERED = (INSPECT.length - INSPECT_SINGLES) / 2;
+static assert(INSPECT.length == INSPECT_SINGLES + 2 * INSPECT_ORDERED);
+
+/// Turn the document over to the other byte order. Nothing on screen says which
+/// one is in force on its own: the inspector's rows are in it and a find pattern's
+/// preview spells its scalars out in it, which is where the answer is read off.
+public void ui_endian_toggle()
+{
+    doc.endian = doc.endian == Endian.littleEndian
+        ? Endian.bigEndian : Endian.littleEndian;
+    ui_status("byte order: %s-endian", ui_endian_name(doc.endian));
+}
+
+/// Ditto, for a label.
+string ui_endian_name(Endian endian)
+{
+    return endian == Endian.bigEndian ? "big" : "little";
+}
+
+/// The row shown at `index`, the document's order coming first.
+ref immutable(Inspect) ui_inspect_row(int index)
+{
+    size_t at = index;
+    if (doc.endian == Endian.bigEndian && at >= INSPECT_SINGLES)
+        at = at < INSPECT_SINGLES + INSPECT_ORDERED ? at + INSPECT_ORDERED : at - INSPECT_ORDERED;
+    return INSPECT[at];
+}
+
 /// Read the bytes the inspector works from: as many as its widest type needs, from
 /// where the selection starts - the caret itself when there is no selection. A
 /// short read near EOF is fine, formatInspector saying "N/A" for what no longer
@@ -2950,7 +2999,8 @@ const(char)[] ui_inspect_value(int index, ubyte[] bytes, char[] buf)
 {
     if (index < 0 || index >= INSPECT.length)
         return null;
-    return formatInspector(buf, INSPECT[index].type, bytes, INSPECT[index].endian);
+    immutable(Inspect) row = ui_inspect_row(index);
+    return formatInspector(buf, row.type, bytes, row.endian);
 }
 
 /// Act on the row the omnibar took, in the mode it was showing when the list was
@@ -3015,7 +3065,7 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             char[80] clip = void;
             size_t n = sformat(clip, "%s\0", value).length;
             if (SDL_SetClipboardText(clip.ptr))
-                ui_status("copied %s", INSPECT[id].label);
+                ui_status("copied %s", ui_inspect_row(id).label);
             else
                 logWarn("copy failed: %s", SDL_GetError().fromStringz);
         }
@@ -3092,6 +3142,8 @@ __gshared bool findHave;
 __gshared size_t findTextLen = size_t.max;
 /// Ditto. As long as the omnibar's own buffer, so a query it holds fits here.
 __gshared char[192] findText;
+/// Ditto, the byte order it was read in.
+__gshared Endian findEndian;
 
 /// Look through `v`'s document for the last pattern from `from`, in whichever
 /// direction, and put that view's selection on what turns up. Reports through the
@@ -3336,9 +3388,8 @@ void ui_omni_run(int id)
     case CMD_COPY:      ui_copy();             break;
     case CMD_PASTE:     ui_paste();            break;
     case CMD_MINIMAP:   minimapEnabled = minimapEnabled ? 0 : 1; break;
-    case CMD_CRUMBS:    crumbsEnabled
-  = crumbsEnabled
-  ? 0 : 1; break;
+    case CMD_CRUMBS:    crumbsEnabled = crumbsEnabled ? 0 : 1; break;
+    case CMD_ENDIAN:    ui_endian_toggle();    break;
     case CMD_FIND_NEXT: ui_find_repeat(false); break;
     case CMD_FIND_PREV: ui_find_repeat(true);  break;
     case CMD_SKIP_NEXT: ui_skip_element(false); break;
@@ -4295,6 +4346,10 @@ void ui_menubar(mu_Context* ctx)
     {
         ctx.style.padding = itemPadding;
         if (mu_menu_item_ex(ctx, "Inspect Bytes...", "Alt+I", 0, 0)) ui_omni_open(OMNI_INSPECT);
+        // Which order the document is read in rides in the same column as the
+        // on/off states below it, being the same kind of fact about this tab.
+        if (mu_menu_item_ex(ctx, "Byte Order", doc.endian == Endian.bigEndian ? "Big" : "Little", 0, 0))
+            ui_endian_toggle();
         mu_menu_separator(ctx);
         // No native checkmark on a ddui menu item, so the on/off state rides in the
         // shortcut column instead.
