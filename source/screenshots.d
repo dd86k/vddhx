@@ -416,6 +416,10 @@ int screenshot_run(string[] args)
     mu_input_keyup(&ctx, MU_KEY_SHIFT);
     frame();
     shot("clip-sel.bmp");
+    // The same four as the text lane draws them, non-printable bytes becoming dots.
+    ui_copy_text();
+    frame();
+    shot("clip-text.bmp");
     ui_copy();
     chord(MU_KEY_CTRL, HEX_KEY_END);
     ui_paste();

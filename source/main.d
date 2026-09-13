@@ -356,9 +356,15 @@ int main(string[] args)
                         ui_cut();
                         break;
                     }
+                    // Shift copies the text lane instead of the hex one. Caught
+                    // here because Shift leaves the keycode alone: left to muiKey
+                    // both chords would arrive as MU_KEY_COPY.
                     if (event.key.key == SDLK_C)
                     {
-                        ui_copy();
+                        if (event.key.mod & SDL_KMOD_SHIFT)
+                            ui_copy_text();
+                        else
+                            ui_copy();
                         break;
                     }
                     if (event.key.key == SDLK_V)

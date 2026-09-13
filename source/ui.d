@@ -2076,6 +2076,27 @@ bool ui_selection(ref View v, out size_t low, out size_t high)
 ///          it managed to copy.
 public bool ui_copy()
 {
+    return copySelection(false);
+}
+
+/// Copy the selected bytes to the clipboard as the text lane renders them:
+/// printable ASCII as itself, everything else as a dot, exactly the substitution
+/// hex_draw_row makes, so what lands on the clipboard is what the panel shows.
+///
+/// Unwrapped, whatever the column count. The hex copy breaks rows because a dump
+/// is read as rows; a string that happened to straddle the grid is still one
+/// string, and a newline every sixteen characters would only have to be taken back
+/// out. Lossy by design - the dots do not carry the bytes they stand for - so this
+/// is a one-way trip and ui_paste stays on hex.
+public bool ui_copy_text()
+{
+    return copySelection(true);
+}
+
+/// Ditto. `asText` picks between the two renderings; everything else - the range,
+/// the size cap, the chunked read - is common to both.
+bool copySelection(bool asText)
+{
     size_t low, high;
     if (ui_selection(view, low, high) == false)
         return false;
@@ -2090,7 +2111,7 @@ public bool ui_copy()
     static immutable string digits = "0123456789abcdef";
     int cols = view.hex.columns > 0 ? view.hex.columns : 16;
     Appender!(char[]) text = appender!(char[]);
-    text.reserve(len * 3 + 1); // two digits and a separator each, plus the terminator
+    text.reserve(len * (asText ? 1 : 3) + 1); // plus the terminator
 
     // A chunk at a time: the selection can be large, and only the bytes being
     // formatted need holding.
@@ -2105,6 +2126,11 @@ public bool ui_copy()
             break; // nothing more readable; avoid spinning
         foreach (i, ubyte b; chunk)
         {
+            if (asText)
+            {
+                text.put(b >= 0x20 && b < 0x7f ? cast(char) b : '.');
+                continue;
+            }
             size_t at = done + i;
             if (at)
                 text.put(at % cols == 0 ? '\n' : ' '); // break rows like the panel does
@@ -2120,7 +2146,12 @@ public bool ui_copy()
         logWarn("copy failed: %s", SDL_GetError().fromStringz);
         return false;
     }
-    logInfo("copied %s byte(s) from %#x", done, low);
+    logInfo("copied %s byte(s) from %#x%s", done, low, asText ? " as text" : "");
+    // Characters, not bytes: one lane character per byte is the whole promise, and
+    // the count is what says the copy took at all - the clipboard looks the same
+    // from here either way.
+    if (asText)
+        ui_status("Copied %s character%s", done, done == 1 ? "" : "s");
     return true;
 }
 
@@ -2412,7 +2443,7 @@ struct Entry
 enum
 {
     CMD_NEW_TAB, CMD_OPEN, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
-    CMD_UNDO, CMD_REDO, CMD_CUT, CMD_COPY, CMD_PASTE, CMD_GOTO,
+    CMD_UNDO, CMD_REDO, CMD_CUT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE, CMD_GOTO,
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT, CMD_STRUCTURE,
     CMD_SKIP_NEXT, CMD_SKIP_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
@@ -2432,7 +2463,8 @@ immutable Entry[] COMMANDS = [
     Entry("Undo",             "Ctrl+Z",       CMD_UNDO,         "back revert history step"),
     Entry("Redo",             "Ctrl+Y",       CMD_REDO,         "forward again history step"),
     Entry("Cut",              "Ctrl+X",       CMD_CUT,          "clipboard remove delete"),
-    Entry("Copy",             "Ctrl+C",       CMD_COPY,         "clipboard yank"),
+    Entry("Copy",             "Ctrl+C",       CMD_COPY,         "clipboard yank hex"),
+    Entry("Copy as Text",     "Ctrl+Shift+C", CMD_COPY_TEXT,    "clipboard yank ascii string chars characters column lane"),
     Entry("Paste",            "Ctrl+V",       CMD_PASTE,        "clipboard insert put"),
     Entry("Go to Offset...",  "Ctrl+G",       CMD_GOTO,         "goto jump seek address position"),
     Entry("Find...",          "Ctrl+F",       CMD_FIND,         "search grep pattern bytes string"),
@@ -2502,6 +2534,7 @@ immutable Entry[] SHORTCUTS = [
     Entry("Name the bookmark at the caret", "Ctrl+Shift+B"),
     Entry("Next / previous bookmark",     "] / ["),
     Entry("Cut / copy / paste bytes",     "Ctrl+X / C / V"),
+    Entry("Copy the selection as text",   "Ctrl+Shift+C"),
     Entry("Undo / redo",                  "Ctrl+Z / Ctrl+Y"),
     Entry("Move the caret",               "Arrows"),
     Entry("Skip the run under the caret", "Ctrl+Left / Ctrl+Right"),
@@ -3386,13 +3419,14 @@ void ui_omni_run(int id)
     case CMD_OPEN:      ui_open_dialog();      break;
     case CMD_COMPARE:   ui_compare_dialog();   break;
     case CMD_COMPARE_STOP: ui_compare_stop();  break;
-    case CMD_SAVE:      ui_save();             break;
+    case CMD_SAVE:      cast(void)ui_save();             break;
     case CMD_SAVE_AS:   ui_save_as();          break;
     case CMD_CLOSE_TAB: ui_close_current_tab(); break;
     case CMD_UNDO:      ui_undo(false);        break;
     case CMD_REDO:      ui_undo(true);         break;
     case CMD_CUT:       ui_cut();              break;
-    case CMD_COPY:      ui_copy();             break;
+    case CMD_COPY:      cast(void)ui_copy();             break;
+    case CMD_COPY_TEXT: cast(void)ui_copy_text();        break;
     case CMD_PASTE:     ui_paste();            break;
     case CMD_MINIMAP:   minimapEnabled = minimapEnabled ? 0 : 1; break;
     case CMD_CRUMBS:    crumbsEnabled = crumbsEnabled ? 0 : 1; break;
@@ -4297,7 +4331,7 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Compare With...", "",        0, 0)) ui_compare_dialog();
         if (mu_menu_item_ex(ctx, "Stop Comparing",  "",        0, 0)) ui_compare_stop();
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Save",       "Ctrl+S",       0, 0)) ui_save();
+        if (mu_menu_item_ex(ctx, "Save",       "Ctrl+S",       0, 0)) cast(void)ui_save();
         if (mu_menu_item_ex(ctx, "Save As...", "Ctrl+Shift+S", 0, 0)) ui_save_as();
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Close Tab",  "Ctrl+W",       0, 0)) ui_close_current_tab();
@@ -4319,7 +4353,8 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Redo",  "Ctrl+Y", 0, 0)) ui_undo(true);
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Cut",   "Ctrl+X", 0, 0)) ui_cut();
-        if (mu_menu_item_ex(ctx, "Copy",  "Ctrl+C", 0, 0)) ui_copy();
+        if (mu_menu_item_ex(ctx, "Copy",  "Ctrl+C", 0, 0)) cast(void)ui_copy();
+        if (mu_menu_item_ex(ctx, "Copy as Text", "Ctrl+Shift+C", 0, 0)) cast(void)ui_copy_text();
         if (mu_menu_item_ex(ctx, "Paste", "Ctrl+V", 0, 0)) ui_paste();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
