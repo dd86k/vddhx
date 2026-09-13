@@ -1085,6 +1085,16 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         int page = mu_max(1, (visibleRows - 1) * cols);
         bool ctrl = (ctx.key_down & MU_KEY_CTRL) != 0;
 
+        // Ctrl+Up/Down scrolls the grid and leaves the caret alone, so the caret can
+        // end up off screen; hex_paint only draws the rows in view, so it vanishes
+        // until it is scrolled back to. The caller re-clamps topRow after this.
+        if (ctrl && (keys & (HEX_KEY_UP | HEX_KEY_DOWN)))
+        {
+            if (keys & HEX_KEY_UP)   v.topRow -= 1;
+            if (keys & HEX_KEY_DOWN) v.topRow += 1;
+            keys &= ~(HEX_KEY_UP | HEX_KEY_DOWN);
+        }
+
         // Vertical and paging moves land on a fresh byte, so they restart nibble
         // entry on the high nibble.
         bool byteMove = (keys & (HEX_KEY_UP | HEX_KEY_DOWN | HEX_KEY_PGUP |
