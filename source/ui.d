@@ -3,6 +3,7 @@ module ui;
 
 import core.atomic : atomicLoad, atomicStore;
 import core.time : Duration, MonoTime, msecs;
+import std.ascii : toLower;
 import std.string : fromStringz, toStringz, strip;
 import bindbc.sdl;
 import ddlogger;
@@ -2524,6 +2525,7 @@ immutable Entry[] PREFIXES = [
     Entry("Omnibar: list bookmarks",         "" ~ OMNI_BOOKMARK),
     Entry("Omnibar: go to a field",          "" ~ OMNI_STRUCTURE),
     Entry("Omnibar: this sheet",             "" ~ OMNI_HELP),
+    Entry("Omnibar: fill in the row's word", "Tab"),
 ];
 
 /// The rest of the '?' sheet: every key the application answers to, in the order
@@ -2677,8 +2679,30 @@ const(OmniItem)[] ui_omni_items()
         // Likewise a readout, of the bytes the pattern comes to. What it would find
         // is deliberately not looked up: this runs every frame.
         string flabel, fdetail;
-        ui_find_preview(flabel, fdetail);
-        put(flabel, fdetail, 0, false, true);
+        if (ui_find_preview(flabel, fdetail))
+        {
+            put(flabel, fdetail, FIND_RUN, false, true);
+            break;
+        }
+        // No pattern yet. Where the first token does not name one, the list turns
+        // into the vocabulary itself, narrowing as the word is typed: a graphical
+        // find box would spend a row of tick boxes saying this, and the box has no
+        // room for one. Past a prefix there is nothing left to offer, so the
+        // readout's own "not yet" row stands instead.
+        const(char)[] word = ui_find_word();
+        if (search_prefixed(word))
+        {
+            put(flabel, fdetail, FIND_RUN, false, true);
+            break;
+        }
+        // Pinned, every one of them: the matching here is by what the word opens,
+        // where the box's own would rank "f32:" under any row merely mentioning an
+        // f. Nothing is filtered twice.
+        foreach (int i; 0 .. cast(int) SEARCH_PREFIXES.length)
+            if (ui_find_offers(SEARCH_PREFIXES[i].text, word))
+                put(SEARCH_PREFIXES[i].text, SEARCH_PREFIXES[i].what, i, false, true);
+        if (n == 0)
+            put("no prefix starts with that", "Esc to give up on it", FIND_RUN, false, true);
         break;
     case OmniMode.inspect:
         ubyte[8] raw = void;
@@ -2934,17 +2958,51 @@ bool ui_find_needle(out Needle needle)
     return findHave;
 }
 
-/// Text for the '/' mode's one row: the bytes the pattern comes to, so what is
+/// The id standing for "this row runs the search" - the readout, and the notices
+/// that take its place. Every other id in the '/' list is a place in
+/// SEARCH_PREFIXES, so the two must not overlap.
+enum int FIND_RUN = -1;
+
+/// The word the vocabulary is offered against: the first token of the query, which
+/// is the one that has to carry a prefix.
+const(char)[] ui_find_word()
+{
+    const(char)[] query = omni_query(omni);
+    size_t end;
+    while (end < query.length && query[end] != ' ' && query[end] != '\t')
+        ++end;
+    return query[0 .. end];
+}
+
+/// Whether the vocabulary word `text` is one the half-typed `word` is still on the
+/// way to. Case-folded, so a prefix typed in capitals still finds its row - ddhx
+/// itself takes only the lowercase form, which is what the row then writes in.
+bool ui_find_offers(const(char)[] text, const(char)[] word)
+{
+    if (word.length > text.length)
+        return false;
+    foreach (size_t i, char c; word)
+        if (toLower(c) != text[i])
+            return false;
+    return true;
+}
+
+/// Text for the '/' mode's readout row: the bytes the pattern comes to, so what is
 /// about to be searched for is never a guess.
-void ui_find_preview(out string label, out string detail)
+/// Returns: false when there is no pattern yet, `label` and `detail` then being the
+///          notice that says so.
+bool ui_find_preview(out string label, out string detail)
 {
     Needle needle;
     if (ui_find_needle(needle) == false)
     {
-        label  = `pattern: text, "quoted text", utf8:text, 0xdeadbeef, x:de ad, ` ~
-            `u16:255, i8:-1, f32:1.0, ?, *`;
-        detail = "waiting for a pattern";
-        return;
+        // Naming the word being typed is the whole of what can be said about a
+        // pattern that does not parse: ddhx's parser reports "no" without saying
+        // where it stopped.
+        immutable(SearchPrefix)* pfx = search_prefix_of(ui_find_word());
+        label  = "not a pattern yet";
+        detail = pfx ? pfx.what : "a pattern opens with what it is";
+        return false;
     }
 
     // The elements as bytes, with '??' for a one-byte wildcard and '**' for a run.
@@ -2978,6 +3036,7 @@ void ui_find_preview(out string label, out string detail)
     detail = ui_row_text(sformat(count, least == needle.length
         ? "%u byte(s), from the caret" : "%u byte(s) or more, from the caret",
         least));
+    return true;
 }
 
 /// One row of the '=' inspector: a type, and the byte order it is read in.
@@ -3062,6 +3121,30 @@ const(char)[] ui_inspect_value(int index, ubyte[] bytes, char[] buf)
     return formatInspector(buf, row.type, bytes, row.endian);
 }
 
+/// Write the row the list is on into the box, for the modes whose rows are words of
+/// the query rather than places to go: the '/' vocabulary, and nothing else so far.
+/// The word lands over the half-typed one it was offered for, the rest of the query
+/// following it, and the box stays up with the caret behind what was written.
+///
+/// This is what Tab asks for outright. Enter comes through it too and falls past it
+/// when the row is not one to complete from, which is what keeps Enter meaning "run
+/// this" on every other row.
+/// Returns: false when there was nothing to complete.
+bool ui_omni_complete(OmniMode mode, int id)
+{
+    if (mode != OmniMode.find || id < 0 || id >= cast(int) SEARCH_PREFIXES.length)
+        return false;
+
+    // Through a buffer of our own: the tail is a slice of the box's own text, which
+    // omni_refill is about to write over. Room for a full box and the longest word
+    // in front of it, sformat throwing rather than cutting; omni_refill is what
+    // trims the result back to what the box holds.
+    char[256] line = void;
+    const(char)[] rest = omni_query(omni)[ui_find_word().length .. $];
+    omni_refill(omni, sformat(line, "%s%s", SEARCH_PREFIXES[id].text, rest));
+    return true;
+}
+
 /// Act on the row the omnibar took, in the mode it was showing when the list was
 /// built (which is not necessarily the mode its text spells out now: a prefix
 /// typed this frame only reaches the list on the next one).
@@ -3102,6 +3185,10 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         view.hex.takeFocus = true;
         break;
     case OmniMode.find:
+        // A vocabulary row is a word being picked, not a pattern being run, so
+        // Enter on one fills the box in exactly as Tab does and leaves it up.
+        if (ui_omni_complete(mode, id))
+            break;
         // Take the pattern as the one to repeat, then look for it from just past
         // the caret, so Enter on the same pattern walks the document.
         Needle needle;
@@ -3683,6 +3770,10 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     final switch (omni_frame(ctx, omni, rows, width, height, chosen))
     {
     case OmniAction.none:     ui_struct_preview(mode);            break;
+    // Tab fills the box in rather than taking anything, so the box is still up and
+    // the '#' preview carries on as it does on a quiet frame.
+    case OmniAction.complete: cast(void) ui_omni_complete(mode, chosen);
+                              ui_struct_preview(mode);            break;
     // A row taken is the preview made permanent: the caret is already on it, and
     // ui_omni_accept puts it there again for the routes that never previewed.
     case OmniAction.accept:   ui_preview_drop();

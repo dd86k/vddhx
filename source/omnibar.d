@@ -15,7 +15,10 @@
 ///
 /// A mode whose answer is computed rather than picked hands in a single pinned
 /// row instead of a list: the query never filters it out, so the caller can keep
-/// rewriting it into a live preview of what taking it would do.
+/// rewriting it into a live preview of what taking it would do. A caller whose
+/// matching is narrower than this box's pins every row it hands in and does its
+/// own; '/' offers the words a pattern may open with that way, and omni_refill is
+/// what writes the taken one back into the box.
 ///
 /// One mode has no prefix to reach it by: omni_prompt raises the box on a question
 /// the caller asked (naming a bookmark), where the text is an answer rather than a
@@ -82,6 +85,12 @@ enum OmniAction
 {
     none,    /// Still open, nothing settled.
     accept,  /// A row was taken (Enter, or a click on it). The box has closed.
+    /// Tab: the row is a word for the query rather than a thing to go to, so fill
+    /// the box in from it (omni_refill) and leave it up. A mode with nothing to
+    /// complete ignores this, which leaves Tab doing nothing - and not, as ddui's
+    /// own focus navigation would have it, closing the box out from under a
+    /// keystroke meant to fill it in.
+    complete,
     /// Ditto, with Shift held: "take this row, and bring it to me" rather than
     /// "go to it". The box only reports which it was; what the difference means -
     /// or that there is none - is the caller's to decide, mode by mode.
@@ -133,6 +142,9 @@ struct Omnibar
     bool prompting;
     // Set the frame the box is raised, so it takes the keyboard without a click.
     bool focusWanted;
+    // Set by omni_refill: the text grew under ddui, which would leave the caret
+    // sitting where it was in the middle of it.
+    bool recaret;
     // The query, NUL-terminated, prefix character and all. ddui's textbox owns the
     // editing; this is where it keeps the text.
     char[TEXT_MAX] text = 0;
@@ -189,6 +201,29 @@ void omni_hide(ref Omnibar o)
     o.current = -1;
 }
 
+/// Put `query` in the box, after the mode's prefix character, and keep the box up
+/// with the caret at the end of it.
+///
+/// For a mode whose rows are words of the query rather than places to go: taking
+/// one has already closed the box, and this puts it back with the word written in.
+/// `query` must not be a slice of the box's own text - omni_query hands out one of
+/// those, so copy through a buffer of your own first.
+void omni_refill(ref Omnibar o, const(char)[] query)
+{
+    o.shown = true;
+    o.focusWanted = true;
+    o.recaret = true;
+    o.selected = 0;
+    o.scroll = 0;
+
+    size_t at = omni_start(o);
+    size_t n = query.length;
+    if (n > o.text.length - at - 1)
+        n = o.text.length - at - 1;
+    o.text[at .. at + n] = query[0 .. n];
+    o.text[at + n] = 0;
+}
+
 /// The id of the row the list is sitting on, for a mode that shows what taking a row
 /// would do rather than waiting to be asked - the '#' list moving the caret as it is
 /// walked. Read after omni_frame, which is what sets it.
@@ -234,13 +269,10 @@ const(char)[] omni_query(ref const(Omnibar) o)
 {
     // A prompt's text is taken whole: it is a name the user typed, and trimming it
     // would be this box deciding what a name may start with.
-    size_t at;
+    size_t at = omni_start(o);
     if (o.prompting == false)
-    {
-        at = omni_prefix_mode(o.text[0]) == OmniMode.switcher ? 0 : 1;
         while (at < o.text.length && o.text[at] == ' ')
             ++at;
-    }
     size_t end = at;
     while (end < o.text.length && o.text[end])
         ++end;
@@ -301,6 +333,15 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     mu_layout_row(ctx, 1, full.ptr, boxH);
     mu_Rect box = mu_layout_next(ctx);
     mu_Id qid = mu_get_id(ctx, QUERY.ptr, cast(int) QUERY.length);
+    // ddui holds the caret itself and only re-seats it when focus arrives from
+    // elsewhere, so text written into the buffer behind it has to say where the
+    // caret went: to the end of what was just written, ready to be typed after.
+    if (o.recaret)
+    {
+        o.recaret = false;
+        ctx.caret_id = qid;
+        ctx.caret = ctx.select_anchor = omni_textlen(o);
+    }
     bool raised = o.focusWanted;
     if (raised)
     {
@@ -368,6 +409,17 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     OmniAction taken = (ctx.key_down & MU_KEY_SHIFT) ? OmniAction.transfer : OmniAction.accept;
     OmniAction action = (res & MU_RES_SUBMIT) && count ? taken : OmniAction.none;
 
+    // Tab is ddui's focus navigation, which walks off the query box and so reads
+    // below as the user having clicked away - a keystroke meant to fill the box in
+    // would close it instead. Swallowed here rather than handled: the box holds one
+    // control, so there is nowhere for that navigation to usefully go.
+    if (ctx.key_pressed & MU_KEY_TAB)
+    {
+        ctx.key_pressed &= ~MU_KEY_TAB;
+        if (count && action == OmniAction.none)
+            action = OmniAction.complete;
+    }
+
     if (count == 0)
     {
         mu_draw_text(ctx, font, EMPTY,
@@ -415,7 +467,10 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     {
         if (action != OmniAction.dismiss)
             chosen = rows[o.selected].id;
-        omni_hide(o);
+        // Completing is the one taking that leaves the box up: the caller writes
+        // the row into the query and the user carries on typing after it.
+        if (action != OmniAction.complete)
+            omni_hide(o);
     }
 
     mu_end_window(ctx);
@@ -462,6 +517,24 @@ enum int BAR_INSET  = 3;  // kept clear either side of it
 enum int BAR_MIN    = 12; // shortest thumb, so a long list still shows one
 /// Fraction of a row the detail column may take before it is elided too.
 enum int DETAIL_SHARE = 2;
+
+/// Where the query begins: past the mode's prefix character, there being none to
+/// step over in the two modes that have no prefix.
+size_t omni_start(ref const(Omnibar) o)
+{
+    if (o.prompting)
+        return 0;
+    return omni_prefix_mode(o.text[0]) == OmniMode.switcher ? 0 : 1;
+}
+
+/// How much of the text buffer is in use, up to its terminator.
+size_t omni_textlen(ref const(Omnibar) o)
+{
+    size_t n;
+    while (n < o.text.length && o.text[n])
+        ++n;
+    return n;
+}
 
 /// The mode a prefix character opens.
 OmniMode omni_prefix_mode(char prefix)

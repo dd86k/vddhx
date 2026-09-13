@@ -486,6 +486,10 @@ private int omniKey(SDL_KeyCode key)
     case SDLK_X:                     return MU_KEY_CUT;       // ditto
     case SDLK_V:                     return MU_KEY_PASTE;     // ditto
     case SDLK_A:                     return MU_KEY_SELECTALL; // ditto
+    // Reached before the Ctrl+Tab that cycles tabs, which is tested further down
+    // the event handler: while the box is up it owns the keyboard, and this is the
+    // key that fills it in from the row the list is on.
+    case SDLK_TAB:                   return MU_KEY_TAB;
     case SDLK_UP:                    return OMNI_KEY_UP;
     case SDLK_DOWN:                  return OMNI_KEY_DOWN;
     case SDLK_PAGEUP:                return OMNI_KEY_PAGEUP;

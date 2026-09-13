@@ -5,20 +5,25 @@
 ///
 /// The pattern syntax is ddhx's own, read by ddhx's own parser (`utils.arguments`
 /// splits the line, `patterns.pattern` compiles the tokens), so the two cannot
-/// drift apart. One concession to a graphical find box: text with no prefix at all
-/// is taken literally, spaces and all, so typing `hello world` finds those eleven
-/// bytes rather than two tokens with nothing to say what they are.
+/// drift apart. There is no bare-text form and no exception for one: a pattern
+/// names what it is or it is not a pattern. Text without a prefix would have to
+/// pick an encoding on the user's behalf, and there are six of them to pick from.
 ///
-///   hello world     the bytes of the text, exactly as typed
-///   "hello world"   the same, the quoting saying where it ends
-///   utf8:hello      ditto, said with a prefix
+///   utf8:hello      the bytes of the text, as UTF-8
 ///   utf16:hello     the same text, as UTF-16 code units
+///   utf8bom:hello   ditto, behind the byte-order mark that marks it
+///   utf8:"a\nb"     one token, spaces and all; a C string, so escapes resolve
+///   utf8:'a\nb'     ditto to the byte: nothing inside is syntax
 ///   0xdeadbeef      four bytes, written out in hex
 ///   x:de ad be ef   the same four; "ad" and the rest inherit the prefix
 ///   u16:255  i8:-1  a value encoded into the width its prefix names
 ///   f32:1.0         IEEE-754, the bits a float occupies
 ///   0xde ? 0xef     '?' stands for one byte, whatever it is
 ///   0xde * 0xef     '*' for a run of them, however long
+///
+/// A quote is about escaping rather than encoding - which is the other half of
+/// why it cannot stand in for a prefix - so it says how a token is spelled and
+/// the prefix in front of it says what the token is.
 ///
 /// Scalars are encoded in the byte order the caller passes in - the document's
 /// own setting, as ddhx has one for the same job. Byte strings (`x:`, text) have
@@ -75,28 +80,16 @@ bool search_parse(const(char)[] text, out Needle needle,
 
     // ddhx's own splitting, so the quoting is read by the rules that wrote it.
     Argument[] args;
-    bool split = true;
     try args = arguments(text);
     catch (Exception)
-        split = false; // an unterminated quote, or an escape that is not one
-
-    // Nothing in front to say what the text is means it is text, spaces and all.
-    // A line that came to exactly one argument is taken from it, so `"hello
-    // world"` loses its quotes; where the split failed, the line as typed is all
-    // there is to ask.
-    if (split == false)
-    {
-        // A prefix in front of a quote that has not been closed yet is a pattern
-        // mid-keystroke, not text; text with a quote in it has no prefix.
-        if (search_prefixed(text))
-            return false;
-        return search_puttext(needle, text);
-    }
+        return false; // an unterminated quote, or an escape that is not one
     if (args.length == 0)
         return false;
+
+    // The first token is the one that has to say what the pattern is; the rest
+    // inherit from it, which is ddhx's own rule.
     if (search_prefixed(cast(const(char)[]) args[0].data) == false)
-        return search_puttext(needle,
-            args.length == 1 ? cast(const(char)[]) args[0].data : text);
+        return false;
 
     Pattern pat;
     try pat = pattern(endian, args);
@@ -109,6 +102,85 @@ bool search_parse(const(char)[] text, out Needle needle,
     needle.length = pat.data.length;
     needle.flags  = pat.flags;
     return search_matchable(needle);
+}
+
+/// Whether `text` opens with one of ddhx's pattern prefixes, or is a wildcard of
+/// its own. ddhx answers this, so a prefix it grows (`ascii:`, `ebcdic:`) needs
+/// nothing here to keep in step.
+bool search_prefixed(const(char)[] text)
+{
+    if (text == "?" || text == "*")
+        return true;
+    return patternpfx(text).spec.type != PatternType.unknown;
+}
+
+/// One word of the pattern vocabulary, for a find box to offer.
+struct SearchPrefix
+{
+    /// The word itself, colon and all, as it is written into the box.
+    string text;
+    /// What it makes of whatever follows it, for the row beside it.
+    string what;
+}
+
+/// Every prefix ddhx reads, in the order ddhx's own table lists them.
+///
+/// A second copy of a list that lives in ddhx, because that one is a local inside
+/// `patternpfx` and carries no wording to put on screen. The unittest below holds
+/// it to ddhx's: a prefix dropped or renamed there fails the build here. One added
+/// there goes unnoticed, which is the cheaper way round - it still parses and still
+/// searches, it is only missing from the list until someone types it.
+immutable SearchPrefix[] SEARCH_PREFIXES = [
+    { "x:",        "bytes as written: x:de ad be ef" },
+    { "0x",        "ditto, run together: 0xdeadbeef" },
+
+    { "utf8:",     "text, as UTF-8" },
+    { "utf16:",    "text, as UTF-16 code units" },
+    { "utf32:",    "text, as UTF-32 code units" },
+    { "utf8bom:",  "UTF-8 text, behind its byte-order mark" },
+    { "utf16bom:", "UTF-16 text, behind its byte-order mark" },
+    { "utf32bom:", "UTF-32 text, behind its byte-order mark" },
+
+    { "x8:",       "hexadecimal value, 1 byte wide" },
+    { "x16:",      "hexadecimal value, 2 bytes wide" },
+    { "x32:",      "hexadecimal value, 4 bytes wide" },
+    { "x64:",      "hexadecimal value, 8 bytes wide" },
+
+    { "u8:",       "unsigned value, 1 byte wide" },
+    { "u16:",      "unsigned value, 2 bytes wide" },
+    { "u32:",      "unsigned value, 4 bytes wide" },
+    { "u64:",      "unsigned value, 8 bytes wide" },
+
+    { "i8:",       "signed value, 1 byte wide" },
+    { "i16:",      "signed value, 2 bytes wide" },
+    { "i32:",      "signed value, 4 bytes wide" },
+    { "i64:",      "signed value, 8 bytes wide" },
+
+    { "o8:",       "octal value, 1 byte wide" },
+    { "o16:",      "octal value, 2 bytes wide" },
+    { "o32:",      "octal value, 4 bytes wide" },
+    { "o64:",      "octal value, 8 bytes wide" },
+
+    { "f32:",      "IEEE-754 binary32" },
+    { "f64:",      "IEEE-754 binary64" },
+    { "f80:",      "IEEE-754 80-bit extended" },
+];
+
+/// The vocabulary word `text` opens with, for a find box saying which one is being
+/// typed. The longest match, so `utf8bom:` is not read as `utf8:` were the two ever
+/// to nest.
+/// Returns: null when it opens with none of them.
+immutable(SearchPrefix)* search_prefix_of(const(char)[] text)
+{
+    immutable(SearchPrefix)* best;
+    foreach (ref immutable SearchPrefix p; SEARCH_PREFIXES)
+    {
+        if (text.length < p.text.length || text[0 .. p.text.length] != p.text)
+            continue;
+        if (best is null || p.text.length > best.text.length)
+            best = &p;
+    }
+    return best;
 }
 
 /// The fewest bytes a match can come to: every element bar a SEARCH_RUN stands
@@ -264,27 +336,6 @@ __gshared ubyte[SEARCH_WINDOW] runWindow;
 /// The element a skip walks over, copied out of the document once so the windows
 /// can be compared against it. Off the stack for the same reason as `window`.
 __gshared ubyte[SEARCH_ELEMENT_MAX] element;
-
-/// Whether `text` opens with one of ddhx's pattern prefixes, or is a wildcard of
-/// its own - anything else being text the find box takes literally. ddhx answers
-/// this, so a prefix it grows (`ascii:`, `re:`) needs nothing here to keep in step.
-bool search_prefixed(const(char)[] text)
-{
-    if (text == "?" || text == "*")
-        return true;
-    return patternpfx(text).spec.type != PatternType.unknown;
-}
-
-/// Take `text` as the needle, byte for byte.
-bool search_puttext(ref Needle needle, const(char)[] text)
-{
-    if (text.length == 0 || text.length > SEARCH_MAX)
-        return false;
-    foreach (size_t i, char c; text)
-        needle.data[i] = cast(ubyte) c;
-    needle.length = text.length;
-    return true;
-}
 
 /// Whether the pattern holds anything to actually match on. Wildcards alone fit at
 /// every offset, answering a search with "the next byte", so they are refused.
@@ -544,20 +595,22 @@ unittest
     }
     static const(ushort)[] elems(ref Needle n) { return n.data[0 .. n.length]; }
 
-    // Plain text, spaces being part of it rather than separators.
-    Needle n = parse("hi");
-    assert(elems(n) == [ 'h', 'i' ]);
-    n = parse("hello world");
-    assert(n.length == 11);
-    n = parse(`"hello world"`); // one argument, so the quotes come off it
-    assert(n.length == 11);
-    n = parse("utf8:abc");
+    // Text says which encoding it is in, every time.
+    Needle n = parse("utf8:abc");
     assert(elems(n) == [ 'a', 'b', 'c' ]);
     n = parse("utf16:hi");      // code units, little-endian like any scalar
     assert(elems(n) == [ 'h', 0, 'i', 0 ]);
     n = parse("utf32:h");
     assert(elems(n) == [ 'h', 0, 0, 0 ]);
-    n = parse(`C:\Users`);      // a path is text, backslashes and colon and all
+    n = parse(`utf8:"hello world"`); // quoted, so the space is part of the token
+    assert(n.length == 11);
+    n = parse(`utf8:'hello world'`);
+    assert(n.length == 11);
+    n = parse(`utf8:"a\nb"`);    // a C string: the escape is one
+    assert(elems(n) == [ 'a', '\n', 'b' ]);
+    n = parse(`utf8:'a\nb'`);    // literal to the byte: it is not
+    assert(elems(n) == [ 'a', '\\', 'n', 'b' ]);
+    n = parse(`utf8:C:\Users`);  // the colon and backslashes are text, not syntax
     assert(n.length == 8);
 
     // Numbers, in each base and width ddhx spells out.
@@ -617,10 +670,32 @@ unittest
     assert(search_parse("?", bad) == false);      // matches everything: not a search
     assert(search_parse("* ?", bad) == false);
 
-    // An unterminated quote with no prefix in front is not a half-typed pattern,
-    // it is text with a quote in it, and the find box takes it as such.
-    assert(search_parse(`"unclosed`, bad));
-    assert(bad.length == 9);
+    // Nothing in front to say what it is, so there is nothing to search for: no
+    // bare text, and no quote standing in for a prefix it cannot spell.
+    assert(search_parse("hi", bad) == false);
+    assert(search_parse("hello world", bad) == false);
+    assert(search_parse(`"hello world"`, bad) == false);
+    assert(search_parse(`'hello world'`, bad) == false);
+    assert(search_parse(`"unclosed`, bad) == false);
+    assert(search_parse(`C:\Users`, bad) == false);
+    assert(search_parse("deadbeef", bad) == false); // hex digits are not a prefix
+}
+
+unittest
+{
+    // The offered vocabulary is ddhx's: every word on the list parses as one.
+    foreach (ref immutable SearchPrefix p; SEARCH_PREFIXES)
+    {
+        assert(search_prefixed(p.text), p.text);
+        assert(p.what.length, p.text);
+    }
+
+    assert(search_prefix_of("utf16:hi").text == "utf16:");
+    assert(search_prefix_of("utf16bom:hi").text == "utf16bom:"); // the longer word wins
+    assert(search_prefix_of("0xdead").text == "0x");
+    assert(search_prefix_of("utf") is null);   // half a word is not one
+    assert(search_prefix_of("hello") is null);
+    assert(search_prefix_of("") is null);
 }
 
 unittest
@@ -683,7 +758,7 @@ unittest
     assert(len == 0);
     assert(search_parse("0xde * 0xc0ffee", n));
     assert(search_find(n, 0, size, false, len, &reader, null) == -1);
-    assert(search_parse("hello world, and then some more text than fits", n));
+    assert(search_parse(`utf8:'hello world, and then some more text than fits'`, n));
     assert(search_find(n, 0, size, false, len, &reader, null) == -1);
 }
 

@@ -781,6 +781,42 @@ int screenshot_run(string[] args)
     frame();
 
     ui_omni_toggle(OMNI_FIND);
+    frame(); frame();
+    shot("omni-find-words.bmp"); // nothing typed: the list is the vocabulary
+    mu_input_text(&ctx, "u");
+    frame(); frame();
+    shot("omni-find-narrow.bmp"); // ...narrowed to the words that open with it
+    mu_input_text(&ctx, "tf16:");
+    frame(); frame();
+    shot("omni-find-text.bmp"); // a prefix and nothing behind it yet
+
+    // Enter on a word writes it into the box rather than running anything, and
+    // leaves the caret behind it: what is typed next lands after the prefix.
+    ui_omni_close();
+    ui_omni_toggle(OMNI_FIND);
+    frame();
+    mu_input_text(&ctx, "utf1");
+    frame(); frame();
+    tap(MU_KEY_RETURN);
+    frame(); frame();
+    mu_input_text(&ctx, "hi");
+    frame(); frame();
+    shot("omni-find-picked.bmp");
+
+    // Tab means the same, and only that: ddui would have walked the focus off the
+    // query box, which the omnibar reads as being clicked away from.
+    ui_omni_close();
+    ui_omni_toggle(OMNI_FIND);
+    frame();
+    mu_input_text(&ctx, "utf1");
+    frame(); frame();
+    tap(MU_KEY_TAB);
+    frame(); frame();
+    shot("omni-find-tab.bmp");
+    find("not a pattern yet"); // throws if the box closed on the keystroke
+
+    ui_omni_close();
+    ui_omni_toggle(OMNI_FIND);
     frame();
     mu_input_text(&ctx, "0xcafebabe");
     frame(); frame();
@@ -792,7 +828,7 @@ int screenshot_run(string[] args)
     // A pattern that is nowhere in the document says so rather than going quiet.
     ui_omni_toggle(OMNI_FIND);
     frame();
-    mu_input_text(&ctx, "no such text here");
+    mu_input_text(&ctx, "utf8:'no such text here'");
     frame(); frame();
     tap(MU_KEY_RETURN);
     frame();
@@ -1002,7 +1038,7 @@ int screenshot_run(string[] args)
     // they should have put up.
     static immutable string[3][6] raises = [
         [ "Help",      "Keyboard Shortcuts...", "Omnibar: this sheet" ],
-        [ "Search",    "Find...",               "waiting for a pattern" ],
+        [ "Search",    "Find...",               "bytes as written" ],
         [ "Search",    "Go to Offset...",       "waiting for an offset" ],
         [ "View",      "Inspect Bytes...",      "u8" ],
         [ "Bookmarks", "List Bookmarks...",     "no bookmarks in this document" ],
