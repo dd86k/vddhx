@@ -2445,7 +2445,7 @@ enum
     CMD_NEW_TAB, CMD_OPEN, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE, CMD_GOTO,
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT, CMD_STRUCTURE,
-    CMD_SKIP_NEXT, CMD_SKIP_PREV,
+    CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
     CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
@@ -2474,6 +2474,8 @@ immutable Entry[] COMMANDS = [
     Entry("Go to Field...",   "",             CMD_STRUCTURE,    "structure layout chunk record section symbol header"),
     Entry("Skip Forward",     "Ctrl+Right",   CMD_SKIP_NEXT,    "run element next word"),
     Entry("Skip Back",        "Ctrl+Left",    CMD_SKIP_PREV,    "run element previous word"),
+    Entry("Select Run Forward","Ctrl+Shift+Right", CMD_SKIP_SEL_NEXT, "skip selection extend next padding"),
+    Entry("Select Run Back",  "Ctrl+Shift+Left",  CMD_SKIP_SEL_PREV, "skip selection extend previous padding"),
     Entry("Toggle Bookmark",  "Ctrl+B",       CMD_MARK,         "mark set flag"),
     Entry("Name Bookmark...", "Ctrl+Shift+B", CMD_MARK_NAME,    "mark label rename annotate tag comment field"),
     Entry("Next Bookmark",    "]",            CMD_MARK_NEXT,    "mark forward"),
@@ -2538,6 +2540,7 @@ immutable Entry[] SHORTCUTS = [
     Entry("Undo / redo",                  "Ctrl+Z / Ctrl+Y"),
     Entry("Move the caret",               "Arrows"),
     Entry("Skip the run under the caret", "Ctrl+Left / Ctrl+Right"),
+    Entry("Select that run instead",      "Ctrl+Shift+Left / Ctrl+Shift+Right"),
     Entry("Extend the selection",         "Shift+Arrows"),
     Entry("Row start / row end",          "Home / End"),
     Entry("File start / file end",        "Ctrl+Home / Ctrl+End"),
@@ -3231,7 +3234,14 @@ public void ui_find_repeat(bool backward)
 /// there is one, which is how a table of records is walked a record at a time. What
 /// is landed on stays selected so the walk can be repeated - ddhx drops the
 /// selection there, but a chord that cannot be pressed twice is half a movement.
-public void ui_skip_element(bool backward)
+///
+/// `select` (the Shift half of the chord) keeps the anchor and covers the bytes
+/// crossed rather than jumping the caret past them, so a megabyte of 0xff is one
+/// keystroke to select. It walks a byte at a time, and from the first byte the
+/// selection does not already hold: the selection is what grows here, so it
+/// cannot also be the element being compared, and starting on the byte the last
+/// press stopped on would compare that press's run against itself and stall.
+public void ui_skip_element(bool backward, bool select = false)
 {
     if (doc.editor is null)
         return;
@@ -3240,18 +3250,29 @@ public void ui_skip_element(bool backward)
     if (total <= 0)
         return;
 
-    // Taken from the selection's low end, the way ddhx takes it, so both directions
-    // step in the same lane. A selection can outlive the bytes it covered (a delete
-    // under it), hence the clamp.
-    long from = cast(long) hex_sel_low(view.hex);
-    long high = cast(long) hex_sel_high(view.hex);
-    if (high >= total)
-        high = total - 1;
-    long len = high >= from ? high - from + 1 : 1;
-    if (len > cast(long) SEARCH_ELEMENT_MAX)
+    long from, len = 1;
+    if (select)
     {
-        ui_status("selection too long to skip over (max %u bytes)", SEARCH_ELEMENT_MAX);
-        return;
+        from = cast(long) view.hex.cursor + (backward ? -1 : 1);
+        if (from < 0)
+            return;
+    }
+    else
+    {
+        // Taken from the selection's low end, the way ddhx takes it, so both
+        // directions step in the same lane. A selection can outlive the bytes it
+        // covered (a delete under it), hence the clamp.
+        from = cast(long) hex_sel_low(view.hex);
+        long high = cast(long) hex_sel_high(view.hex);
+        if (high >= total)
+            high = total - 1;
+        if (high >= from)
+            len = high - from + 1;
+        if (len > cast(long) SEARCH_ELEMENT_MAX)
+        {
+            ui_status("selection too long to skip over (max %u bytes)", SEARCH_ELEMENT_MAX);
+            return;
+        }
     }
     // Nothing ahead of the append slot, so a forward skip from there has nowhere to
     // go; backward still walks the run behind it.
@@ -3261,10 +3282,30 @@ public void ui_skip_element(bool backward)
     long at = search_skip(from, len, total, backward, &hexRead, cast(void*) doc.editor);
     if (at < 0)
         return;
-    if (len > 1)
+    if (select)
+        hex_extend_caret(view.hex, cast(size_t) skipRunEnd(from, at, backward, total));
+    else if (len > 1)
         ui_select_range(view, cast(size_t) at, cast(size_t) len);
     else
         hex_set_caret(view.hex, cast(size_t) at);
+}
+
+/// Far end of the run a skip from `from` crossed, given the `at` it landed on:
+/// one byte short of it, since that byte is what ended the run and belongs to
+/// whatever comes next. Unless the walk ran into an edge of the document without
+/// finding anything different, where `at` is the last byte of the run itself -
+/// told apart by reading it back, which is one byte either way.
+long skipRunEnd(long from, long at, bool backward, long total)
+{
+    if (from >= total) // the append slot: the skip took its run from here instead
+        from = total - 1;
+
+    View* v = &view();
+    ubyte ended, here;
+    if (viewByte(v, cast(size_t) at, ended) && viewByte(v, cast(size_t) from, here)
+        && ended == here)
+        return at;
+    return backward ? at + 1 : at - 1;
 }
 
 /// Put `v`'s selection over `len` bytes at `start` and scroll it into view. The
@@ -3435,6 +3476,8 @@ void ui_omni_run(int id)
     case CMD_FIND_PREV: ui_find_repeat(true);  break;
     case CMD_SKIP_NEXT: ui_skip_element(false); break;
     case CMD_SKIP_PREV: ui_skip_element(true);  break;
+    case CMD_SKIP_SEL_NEXT: ui_skip_element(false, true); break;
+    case CMD_SKIP_SEL_PREV: ui_skip_element(true, true);  break;
     case CMD_MARK:      ui_mark_toggle();      break;
     case CMD_MARK_NEXT: ui_mark_step(1);       break;
     case CMD_MARK_PREV: ui_mark_step(-1);      break;
@@ -4376,6 +4419,8 @@ void ui_menubar(mu_Context* ctx)
         // Not a search of the document, but the same walk over it by another name.
         if (mu_menu_item_ex(ctx, "Skip Forward",  "Ctrl+Right",   0, 0)) ui_skip_element(false);
         if (mu_menu_item_ex(ctx, "Skip Back",     "Ctrl+Left",    0, 0)) ui_skip_element(true);
+        if (mu_menu_item_ex(ctx, "Select Run Forward", "Ctrl+Shift+Right", 0, 0)) ui_skip_element(false, true);
+        if (mu_menu_item_ex(ctx, "Select Run Back",    "Ctrl+Shift+Left",  0, 0)) ui_skip_element(true, true);
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }

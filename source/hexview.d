@@ -467,6 +467,20 @@ void hex_set_caret(ref HexView v, size_t pos)
     hex_reveal(v, pos, v.columns > 0 ? v.columns : 16, v.visRows);
 }
 
+/// Ditto, leaving the anchor where it is so the selection grows over `pos`
+/// instead of collapsing onto it: the Shift half of a chord the panel does not
+/// handle itself.
+void hex_extend_caret(ref HexView v, size_t pos)
+{
+    size_t total = hex_total(v);
+    if (pos > total)
+        pos = total;
+    v.cursor  = pos;
+    v.active  = true;
+    v.editLow = false;
+    hex_reveal(v, pos, v.columns > 0 ? v.columns : 16, v.visRows);
+}
+
 /// Which row the panel is scrolled to, and how to put it back. For a caller holding
 /// a position to return to - the omnibar, restoring a browse it moved the caret for;
 /// where the panel sits is its own business the rest of the time, and the next draw

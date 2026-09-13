@@ -387,9 +387,10 @@ int main(string[] args)
                     }
                     // ddhx's skip-back / skip-forward, caught here so the arrow
                     // never reaches the panel, which would step one nibble.
+                    // Shift selects the run crossed rather than jumping over it.
                     if (event.key.key == SDLK_LEFT || event.key.key == SDLK_RIGHT)
                     {
-                        ui_skip_element(event.key.key == SDLK_LEFT);
+                        ui_skip_element(event.key.key == SDLK_LEFT, (event.key.mod & SDL_KMOD_SHIFT) != 0);
                         break;
                     }
                 }

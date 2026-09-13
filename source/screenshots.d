@@ -903,6 +903,24 @@ int screenshot_run(string[] args)
     frame();
     shot("skip-back2.bmp"); // and across the whole run to 0x00
 
+    // The Shift half of the same chords covers the run rather than jumping it, so
+    // the run itself ends up selected and the byte that ended it does not.
+    ui_skip_element(false, true);
+    frame();
+    shot("skip-grow.bmp");  // 0x00-0x07 selected, the eight zeroes
+    ui_skip_element(false, true);
+    frame();
+    shot("skip-grow2.bmp"); // and on over the run after them
+
+    // Backward from just past the run: nothing differs below it, so the walk ends
+    // on the document's own start rather than one byte above it.
+    chord(MU_KEY_CTRL, HEX_KEY_HOME);
+    foreach (i; 0 .. 16) tap(HEX_KEY_RIGHT); // a nibble each, so eight bytes
+    frame();
+    ui_skip_element(true, true);
+    frame();
+    shot("skip-grow-back.bmp"); // 0x00-0x08: the zeroes, plus the byte started on
+
     // With a selection the element is the whole of it: three identical four-byte
     // records at 0x10, the first selected. The skip crosses them a record at a time
     // and keeps the selection, landing on 0x1c - not 0x14, which reads the same.
