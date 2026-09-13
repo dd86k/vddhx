@@ -2160,10 +2160,25 @@ bool copySelection(bool asText)
 /// where they are. A bare caret cuts the byte Delete would drop.
 public void ui_cut()
 {
+    cutSelection(false);
+}
+
+/// Cut the selection, leaving the text rendering on the clipboard rather than the
+/// hex one - Ctrl+Shift+C's copy with Ctrl+X's removal. The document loses the same
+/// bytes either way; only what can be pasted back differs, and the text form cannot
+/// (see ui_copy_text).
+public void ui_cut_text()
+{
+    cutSelection(true);
+}
+
+/// Ditto.
+void cutSelection(bool asText)
+{
     size_t low, high;
     if (ui_selection(view, low, high) == false)
         return;
-    if (ui_copy() == false)
+    if (copySelection(asText) == false)
         return;
 
     try
@@ -2443,7 +2458,7 @@ struct Entry
 enum
 {
     CMD_NEW_TAB, CMD_OPEN, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
-    CMD_UNDO, CMD_REDO, CMD_CUT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE, CMD_GOTO,
+    CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE, CMD_GOTO,
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT, CMD_STRUCTURE,
     CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
@@ -2463,6 +2478,7 @@ immutable Entry[] COMMANDS = [
     Entry("Undo",             "Ctrl+Z",       CMD_UNDO,         "back revert history step"),
     Entry("Redo",             "Ctrl+Y",       CMD_REDO,         "forward again history step"),
     Entry("Cut",              "Ctrl+X",       CMD_CUT,          "clipboard remove delete"),
+    Entry("Cut as Text",      "Ctrl+Shift+X", CMD_CUT_TEXT,     "clipboard remove delete ascii string chars characters column lane"),
     Entry("Copy",             "Ctrl+C",       CMD_COPY,         "clipboard yank hex"),
     Entry("Copy as Text",     "Ctrl+Shift+C", CMD_COPY_TEXT,    "clipboard yank ascii string chars characters column lane"),
     Entry("Paste",            "Ctrl+V",       CMD_PASTE,        "clipboard insert put"),
@@ -2536,7 +2552,7 @@ immutable Entry[] SHORTCUTS = [
     Entry("Name the bookmark at the caret", "Ctrl+Shift+B"),
     Entry("Next / previous bookmark",     "] / ["),
     Entry("Cut / copy / paste bytes",     "Ctrl+X / C / V"),
-    Entry("Copy the selection as text",   "Ctrl+Shift+C"),
+    Entry("Cut / copy the selection as text", "Ctrl+Shift+X / Ctrl+Shift+C"),
     Entry("Undo / redo",                  "Ctrl+Z / Ctrl+Y"),
     Entry("Move the caret",               "Arrows"),
     Entry("Skip the run under the caret", "Ctrl+Left / Ctrl+Right"),
@@ -3466,6 +3482,7 @@ void ui_omni_run(int id)
     case CMD_UNDO:      ui_undo(false);        break;
     case CMD_REDO:      ui_undo(true);         break;
     case CMD_CUT:       ui_cut();              break;
+    case CMD_CUT_TEXT:  ui_cut_text();         break;
     case CMD_COPY:      cast(void)ui_copy();             break;
     case CMD_COPY_TEXT: cast(void)ui_copy_text();        break;
     case CMD_PASTE:     ui_paste();            break;
@@ -4396,6 +4413,7 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Redo",  "Ctrl+Y", 0, 0)) ui_undo(true);
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Cut",   "Ctrl+X", 0, 0)) ui_cut();
+        if (mu_menu_item_ex(ctx, "Cut as Text", "Ctrl+Shift+X", 0, 0)) ui_cut_text();
         if (mu_menu_item_ex(ctx, "Copy",  "Ctrl+C", 0, 0)) cast(void)ui_copy();
         if (mu_menu_item_ex(ctx, "Copy as Text", "Ctrl+Shift+C", 0, 0)) cast(void)ui_copy_text();
         if (mu_menu_item_ex(ctx, "Paste", "Ctrl+V", 0, 0)) ui_paste();

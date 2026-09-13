@@ -353,7 +353,10 @@ int main(string[] args)
                     }
                     if (event.key.key == SDLK_X)
                     {
-                        ui_cut();
+                        if (event.key.mod & SDL_KMOD_SHIFT)
+                            ui_cut_text();
+                        else
+                            ui_cut();
                         break;
                     }
                     // Shift copies the text lane instead of the hex one. Caught
