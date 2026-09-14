@@ -11,7 +11,8 @@ import ddlogger;
 static if (staticBinding)
 {
     /// Open the SDL3 libraries, before the first SDL_* or TTF_* call.
-    /// Returns: false if a library is missing or unusable (reason is logged).
+    /// Returns: false if a library is missing or unusable, the reason logged and
+    /// put up in a message box.
     bool loader_init() { return true; }
 
     /// Close the SDL3 libraries.
@@ -19,9 +20,11 @@ static if (staticBinding)
 }
 else
 {
-    import std.string : fromStringz;
+    import std.format : format;
+    import std.string : fromStringz, toStringz;
     import bindbc.loader : ErrorInfo, LoadMsg, errors, resetErrors;
-    import bindbc.sdl : loadSDL, unloadSDL, loadSDLTTF, unloadSDLTTF;
+    import bindbc.sdl : loadSDL, unloadSDL, loadSDLTTF, unloadSDLTTF,
+        SDL_ShowSimpleMessageBox, SDL_MESSAGEBOX_ERROR;
 
     // bindbc only probes the unversioned SONAME (libSDL3.so), which distributions
     // ship in their -dev package; try the runtime package's ABI-versioned names
@@ -37,11 +40,20 @@ else
         private immutable string[] ttfNames = [];
     }
 
+    // Set the moment SDL3 itself is in, which is what makes SDL_* callable:
+    // until then every binding is a null pointer, SDL's message box included.
+    private __gshared bool sdlLoaded;
+
+    /// Ditto
     bool loader_init()
     {
-        return open!loadSDL("SDL3", sdlNames) && open!loadSDLTTF("SDL3_ttf", ttfNames);
+        if (open!loadSDL("SDL3", sdlNames) == false)
+            return false;
+        sdlLoaded = true;
+        return open!loadSDLTTF("SDL3_ttf", ttfNames);
     }
 
+    /// Ditto
     void loader_quit()
     {
         unloadSDLTTF();
@@ -67,13 +79,37 @@ else
         case LoadMsg.success:
             return true;
         case LoadMsg.noLibrary:
-            logCritical("%s: shared library not found", what);
+            version (Windows)
+                enum string hint = ".dll was not found next to vddhx.exe or in PATH.";
+            else
+                enum string hint = ": shared library not found.";
+            fail(what ~ hint);
             return false;
         case LoadMsg.badLibrary:
-            logCritical("%s: shared library is missing symbols (too old?)", what);
+            // Missing symbols don't mean much to people, at least logs will have them
             foreach (ref const(ErrorInfo) err; errors)
                 logCritical("%s: %s: %s", what, err.error.fromStringz, err.message.fromStringz);
+            fail(format("%s is missing symbols, it is likely too old (SDL 3.2.0 or later is needed).", what));
             return false;
+        }
+    }
+
+    // Called by open() and invokes SDL_ShowSimpleMessageBox or Win32 MsgBox if able.
+    private void fail(string message)
+    {
+        logCritical("%s", message);
+
+        if (sdlLoaded)
+        {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "vddhx", message.toStringz, null);
+            return;
+        }
+
+        version (Windows)
+        {
+            import core.sys.windows.winuser : MessageBoxW, MB_ICONERROR, MB_OK;
+            import std.utf : toUTF16z;
+            MessageBoxW(null, message.toUTF16z, "vddhx"w.ptr, MB_ICONERROR | MB_OK);
         }
     }
 }
