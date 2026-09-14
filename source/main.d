@@ -1,7 +1,8 @@
 /// Main loop.
 module main;
 
-import std.string : fromStringz;
+import std.format : format;
+import std.string : fromStringz, toStringz;
 import ddlogger;
 import bindbc.sdl;
 import ddui;
@@ -35,34 +36,22 @@ int main(string[] args)
     }
 
     if (SDL_Init(SDL_INIT_VIDEO) == false)
-    {
-        logCritical("SDL_Init: %s", SDL_GetError().fromStringz);
-        return 1;
-    }
+        return fatal(null, format("SDL_Init: %s", SDL_GetError().fromStringz));
     scope(exit) SDL_Quit();
 
     SDL_Window* window = SDL_CreateWindow("vddhx", 800, 600, SDL_WINDOW_RESIZABLE);
     if (window is null)
-    {
-        logCritical("SDL_CreateWindow: %s", SDL_GetError().fromStringz);
-        return 1;
-    }
+        return fatal(null, format("SDL_CreateWindow: %s", SDL_GetError().fromStringz));
     scope(exit) SDL_DestroyWindow(window);
 
     icon_apply(window);
 
     if (SDL_SetWindowMinimumSize(window, 640, 480) == false)
-    {
-        logCritical("SDL_SetWindowMinimumSize: %s", SDL_GetError().fromStringz);
-        return 1;
-    }
+        return fatal(window, format("SDL_SetWindowMinimumSize: %s", SDL_GetError().fromStringz));
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, null);
     if (renderer is null)
-    {
-        logCritical("SDL_CreateRenderer: %s", SDL_GetError().fromStringz);
-        return 1;
-    }
+        return fatal(window, format("SDL_CreateRenderer: %s", SDL_GetError().fromStringz));
     scope(exit) SDL_DestroyRenderer(renderer);
 
     // Cap the loop to the display refresh instead of a manual frame delay.
@@ -72,11 +61,9 @@ int main(string[] args)
         SDL_SetRenderVSync(renderer, 1); // fall back to plain vsync
     }
 
-    if (render_init(renderer) == false)
-    {
-        logCritical("render_init: %s", SDL_GetError().fromStringz);
-        return 1;
-    }
+    string reason = render_init(renderer);
+    if (reason.length)
+        return fatal(window, reason);
     scope(exit) render_quit();
 
     SDL_StartTextInput(window);
@@ -440,6 +427,17 @@ int main(string[] args)
     }
 
     return 0;
+}
+
+// Startup gives out before there is a window to draw the reason into, and a
+// desktop launcher has no console to leave it on: SDL's box is the only surface
+// left, and it is drawn by the platform rather than by the fonts we just failed
+// to find.
+private int fatal(SDL_Window* window, string message)
+{
+    logCritical("%s", message);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "vddhx", message.toStringz, window);
+    return 1;
 }
 
 /// Map an SDL3 keycode for the omnibar's text box (0 if unmapped).

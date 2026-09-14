@@ -193,8 +193,12 @@ int screenshot_run(string[] args)
     }
     scope(exit) SDL_DestroyRenderer(renderer);
 
-    if (render_init(renderer) == false)
-        return 1; // render_init says which step went wrong
+    string reason = render_init(renderer);
+    if (reason.length)
+    {
+        logCritical("%s", reason);
+        return 1;
+    }
     scope(exit) render_quit();
 
     static mu_Context ctx; // ~4 MB; keep it off the stack

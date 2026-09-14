@@ -8,8 +8,13 @@
 module render;
 
 import core.stdc.string : strlen;
-import std.file : exists;
-import std.string : fromStringz, toStringz;
+import std.algorithm.searching : canFind, endsWith;
+import std.algorithm.sorting : sort;
+import std.file : DirEntry, SpanMode, dirEntries, exists, isDir;
+import std.format : format;
+import std.path : baseName, buildPath;
+import std.process : environment;
+import std.string : fromStringz, toLower, toStringz;
 import bindbc.sdl; // publicly re-exports SDL3_ttf (TTF_*) under the static config
 import ddlogger;
 import ddui;
@@ -88,38 +93,34 @@ else
 
 /// Bring up SDL3_ttf, the text engine, and the font faces. Call once after the
 /// renderer is created.
-/// Returns: false on failure (SDL_GetError has the reason).
-bool render_init(SDL_Renderer* renderer)
+/// Returns: null on success, else a reason worded for the user.
+string render_init(SDL_Renderer* renderer)
 {
     if (TTF_Init() == false)
-    {
-        logCritical("TTF_Init: %s", SDL_GetError().fromStringz);
-        return false;
-    }
+        return format("TTF_Init: %s", SDL_GetError().fromStringz);
 
     engine = TTF_CreateRendererTextEngine(renderer);
     if (engine is null)
-    {
-        logCritical("TTF_CreateRendererTextEngine: %s", SDL_GetError().fromStringz);
-        return false;
-    }
+        return format("TTF_CreateRendererTextEngine: %s", SDL_GetError().fromStringz);
 
     // Without this the renderer writes fills as-is: a translucent tint (the
     // minimap's viewport marker) comes out solid, and the fully transparent
     // MU_COLOR_PANELBG paints black over whatever the panel sits on.
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-    // Nothing here consults SDL_GetError: a face is missing because none of the
-    // paths existed, which SDL never saw, so the caller has only the list to go on.
-    fontUI = openFirst(uiPaths);
+    // Nothing here consults SDL_GetError: a face is missing because nothing on
+    // the machine matched, which SDL never saw.
+    fontUI = openRole(FontRole.ui, uiPaths, "VDDHX_FONT");
     if (fontUI is null)
     {
-        logCritical("no UI font; install one of: %s", uiPaths);
-        return false;
+        logCritical("no UI font; looked for %-(%s, %)", uiPaths);
+        return format("No usable font found.\n\nNothing under %-(%s, %)\ncan draw " ~
+            "the interface.\n\nInstall a TrueType font (fonts-noto or fonts-dejavu " ~
+            "will do), or point VDDHX_FONT at one.", fontRoots());
     }
 
     // Missing the mono face is not fatal, the hex panel merely goes unaligned.
-    fontMono = openFirst(monoPaths);
+    fontMono = openRole(FontRole.mono, monoPaths, "VDDHX_FONT_MONO");
     if (fontMono is null)
     {
         logWarn("no monospace font, falling back to the UI face (the hex grid " ~
