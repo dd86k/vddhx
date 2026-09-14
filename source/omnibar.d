@@ -148,9 +148,15 @@ struct Omnibar
     // The query, NUL-terminated, prefix character and all. ddui's textbox owns the
     // editing; this is where it keeps the text.
     char[TEXT_MAX] text = 0;
-    // Highlighted row, and the first row on screen when the list overflows.
+    // Highlighted row, and the first row on screen when the list overflows. The
+    // second follows the first when the first moves, and is the user's to place
+    // otherwise: a wheel scroll leaves the selection where it was, the way looking
+    // around an editor does not move its caret.
     int selected;
     int scroll;
+    // Leftover wheel pixels below one row height, carried between frames so a slow
+    // wheel still advances when a notch is shorter than a row.
+    int wheelAccum;
     // Rows that matched, best first, and their scores. Only ever grown, so a
     // steady list costs no allocation once it has been drawn once.
     OmniItem[] matches;
@@ -175,6 +181,7 @@ void omni_show(ref Omnibar o, char prefix = 0)
     o.focusWanted = true;
     o.selected = 0;
     o.scroll = 0;
+    o.wheelAccum = 0;
     o.text[0] = prefix;
     o.text[prefix ? 1 : 0] = 0;
 }
@@ -215,6 +222,7 @@ void omni_refill(ref Omnibar o, const(char)[] query)
     o.recaret = true;
     o.selected = 0;
     o.scroll = 0;
+    o.wheelAccum = 0;
 
     size_t at = omni_start(o);
     size_t n = query.length;
@@ -311,6 +319,22 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     // collapsing to the input alone reads as broken rather than as an answer.
     int visible = count ? mu_min(count, o.maxRows) : 1;
 
+    // Last frame's wheel notches, drained into whole rows. Before the window opens
+    // rather than where the list is drawn: ddui folds a container's scroll offset
+    // into the layout it pushes, so a delta left standing would shift the whole box
+    // up for the one frame it takes to read it.
+    if (cnt.scroll.y != 0)
+    {
+        o.wheelAccum += cnt.scroll.y;
+        cnt.scroll.y = 0;
+    }
+    int wheelRows = o.wheelAccum / rowH;
+    if (wheelRows != 0)
+    {
+        o.scroll += wheelRows;
+        o.wheelAccum -= wheelRows * rowH;
+    }
+
     int w = mu_clamp(width - MARGIN * 2, MIN_WIDTH, o.width);
     int h = pad * 2 + boxH + ctx.style.spacing + visible * rowH;
 
@@ -362,6 +386,7 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
         // best row rather than on whatever index it held.
         o.selected = 0;
         o.scroll   = 0;
+        o.wheelAccum = 0;
     }
 
     // The prefix sheet would be an answer to a question nobody asked while the box
@@ -374,10 +399,12 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     // down wrap, so a short list is a ring rather than a dead end.
     if (o.selected >= count)
         o.selected = count ? count - 1 : 0;
+    bool moved;
     if (count && ctx.key_pressed & (OMNI_KEY_UP | OMNI_KEY_DOWN))
     {
         int step = (ctx.key_pressed & OMNI_KEY_UP) ? count - 1 : 1;
         o.selected = (o.selected + step) % count;
+        moved = true;
     }
     // Paging clamps where the arrows wrap: a page is a distance rather than a
     // step, and landing at the far end of the list from running off one edge
@@ -386,18 +413,31 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     {
         int step = (ctx.key_pressed & OMNI_KEY_PAGEUP) ? -visible : visible;
         o.selected = mu_clamp(o.selected + step, 0, count - 1);
+        moved = true;
     }
-    // Scroll the least that brings the selection back into view.
-    if (o.scroll > o.selected)
-        o.scroll = o.selected;
-    if (o.scroll < o.selected - visible + 1)
-        o.scroll = o.selected - visible + 1;
-    o.scroll = mu_clamp(o.scroll, 0, mu_max(0, count - visible));
     o.current = count ? rows[o.selected].id : -1;
 
     mu_layout_row(ctx, 1, full.ptr, visible * rowH);
     mu_Rect list = mu_layout_next(ctx);
     mu_draw_rect(ctx, list, OMNI_LIST);
+
+    // The box runs NOSCROLL, so ddui never arms it as a wheel target: point the
+    // wheel at it by hand while the pointer is over it, from inside the window so
+    // the grid underneath is not the one asked. Folded in at frame end, read above.
+    if (mu_mouse_over(ctx, cnt.body_))
+        ctx.scroll_target = cnt;
+
+    // The view follows the selection only where the selection just moved, scrolling
+    // the least that brings it back: a wheel that leaves it behind is the user
+    // looking elsewhere in the list, which is not the same as picking another row.
+    if (moved)
+    {
+        if (o.scroll > o.selected)
+            o.scroll = o.selected;
+        if (o.scroll < o.selected - visible + 1)
+            o.scroll = o.selected - visible + 1;
+    }
+    o.scroll = mu_clamp(o.scroll, 0, mu_max(0, count - visible));
 
     // Room for the position indicator, and only when the list runs past its
     // window: under a list shown whole a bar would say nothing.

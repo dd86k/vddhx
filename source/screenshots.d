@@ -343,6 +343,24 @@ int screenshot_run(string[] args)
     frame(); frame();
     shot("omni-struct.bmp");
 
+    // The wheel moves the view and leaves the selection behind, the way scrolling a
+    // document does not move its caret: the accent is off the top of the list in the
+    // first shot, and the arrow key in the second brings the view back to it rather
+    // than stepping from whatever the wheel stopped on.
+    mu_input_mousemove(&ctx, 400, 120);
+    frame(); frame();
+    foreach (i; 0 .. 4) // a notch is 30px, shorter than a row: this is four rows
+    {
+        mu_input_scroll(&ctx, 0, 30);
+        frame(); frame();
+    }
+    shot("omni-wheel.bmp");
+    tap(OMNI_KEY_DOWN);
+    frame(); frame();
+    shot("omni-wheel-reveal.bmp");
+    mu_input_mousemove(&ctx, 0, 0);
+    frame();
+
     // Walking the list takes the caret with it, the field centred in what the box is
     // not covering rather than scrolled to just inside the panel - which would be
     // behind the box. Esc puts the browse back where it started.
