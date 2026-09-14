@@ -49,7 +49,7 @@ int main(string[] args)
     if (SDL_SetWindowMinimumSize(window, 640, 480) == false)
         return fatal(window, format("SDL_SetWindowMinimumSize: %s", SDL_GetError().fromStringz));
 
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, null);
+    SDL_Renderer* renderer = render_create(window);
     if (renderer is null)
         return fatal(window, format("SDL_CreateRenderer: %s", SDL_GetError().fromStringz));
     scope(exit) SDL_DestroyRenderer(renderer);
@@ -58,7 +58,8 @@ int main(string[] args)
     if (SDL_SetRenderVSync(renderer, SDL_RENDERER_VSYNC_ADAPTIVE) == false)
     {
         logInfo("SDL_SetRenderVSync(SDL_RENDERER_VSYNC_ADAPTIVE) -> false, falling back to 1");
-        SDL_SetRenderVSync(renderer, 1); // fall back to plain vsync
+        if (SDL_SetRenderVSync(renderer, 1) == false)
+            logInfo("no vsync on this renderer: %s", SDL_GetError().fromStringz);
     }
 
     string reason = render_init(renderer);

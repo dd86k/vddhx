@@ -37,6 +37,12 @@ dub build -c static
 
 Windows uses `build-sdl3.ps1`, which installs into `./install` instead.
 
+## Variables
+
+A few environment variables are available for diagnostic purposes.
+
+- `VDDHX_RENDERER`: Select SDL's renderer backend. `auto` usually selects an accelerated one. Defaults to `software`.
+
 ## Hacking
 
 `source/README.md` has the module map and the cross-module notes.

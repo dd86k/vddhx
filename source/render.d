@@ -10,6 +10,7 @@ module render;
 import core.stdc.string : strlen;
 import std.file : exists;
 import std.format : format;
+import std.process : environment;
 import std.string : fromStringz, toStringz;
 import bindbc.sdl; // publicly re-exports SDL3_ttf (TTF_*) under the static config
 import ddlogger;
@@ -106,6 +107,37 @@ else
         "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
         "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
     ];
+}
+
+// Asked for first, before whatever SDL would have picked. A frame here is flat
+// filled rects plus glyphs the text engine has already rasterised, which the CPU
+// keeps up with at window sizes; the accelerated drivers are where the surprises
+// live (remote X, a VM without 3D, a GL stack the machine cannot initialise).
+private enum DEFAULT_DRIVER = "software";
+
+/// Create the window's renderer. `VDDHX_RENDERER` names a different SDL driver
+/// ("opengl", "vulkan", "gpu", ...), or "auto" to let SDL order them itself.
+///
+/// Returns: null on failure, with the reason left in SDL_GetError.
+SDL_Renderer* render_create(SDL_Window* window)
+{
+    string wanted = environment.get("VDDHX_RENDERER", DEFAULT_DRIVER);
+    const(char)* driver = wanted.length == 0 || wanted == "auto" ? null : wanted.toStringz;
+
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, driver);
+
+    // A named driver that this build or this machine does not have is a
+    // preference we cannot honour, not a reason to refuse to start.
+    if (renderer is null && driver)
+    {
+        logWarn(`renderer "%s" unavailable: %s (have: %-(%s, %)); letting SDL choose`,
+            wanted, SDL_GetError().fromStringz, driverNames());
+        renderer = SDL_CreateRenderer(window, null);
+    }
+
+    if (renderer)
+        logInfo("renderer: %s", SDL_GetRendererName(renderer).fromStringz);
+    return renderer;
 }
 
 /// Bring up SDL3_ttf, the text engine, and the font faces. Call once after the
@@ -263,6 +295,16 @@ void render_commands(SDL_Renderer* renderer, mu_Context* ctx)
 }
 
 private:
+
+// Only for the message above, so nothing caches it.
+string[] driverNames()
+{
+    int count = SDL_GetNumRenderDrivers();
+    string[] names = new string[count];
+    foreach (int i; 0 .. count)
+        names[i] = SDL_GetRenderDriver(i).fromStringz.idup;
+    return names;
+}
 
 // A face for one role: fontconfig's answer for the pattern, then the built-in
 // paths. `probe` is a codepoint the face has to carry, or 0 to take whatever

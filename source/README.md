@@ -17,7 +17,7 @@ this is the map and the handful of things that span modules.
 | `address.d` | offset expression parsing |
 | `bookmarks.d` | bookmark list, names, and edit shifting |
 | `menu.d` | menubar widgets (candidates for ddui itself) |
-| `render.d` | SDL3_ttf text engine and font faces |
+| `render.d` | renderer creation, SDL3_ttf text engine and font faces |
 | `icon.d` | window icon lookup (BMP only: SDL3 core decodes nothing else) |
 | `loader.d` | opens the SDL3 shared libraries (dynamic build only) |
 | `about.d`, `uitext.d` | About dialog, text helpers |
@@ -48,6 +48,16 @@ loop:
   what `ui_wakeup` is for, and how the async file dialogs get themselves drawn.
   The one exception is `ui_animating`: while it holds, the loop skips the wait
   and free-runs at vsync, because something on screen moves without being asked.
+- **The software renderer is the default.** `render_create` asks SDL for
+  `software` before whatever it would have picked itself, `VDDHX_RENDERER`
+  naming another driver (or `auto` for SDL's own order). A frame is filled rects
+  and glyphs the text engine has already rasterised, so the CPU keeps up, and
+  the accelerated drivers are where the portability goes. It presents by handing
+  the window surface back to the platform, so it has no vsync of its own, but
+  the loop still needs none: SDL either forwards the request to the accelerated
+  renderer it keeps behind that surface, or waits out the display's refresh
+  interval itself in `SDL_RenderPresent`. Only `SDL_RENDERER_VSYNC_ADAPTIVE`
+  comes back unsupported, which is what the fallback to plain vsync is for.
 - **Command replay order.** `render_commands` walks the command list with
   `mu_get_next_command`, not `mu_command_range`. The former follows the jumps
   ddui writes to splice containers into z-order; the latter walks raw and draws

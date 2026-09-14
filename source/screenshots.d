@@ -185,7 +185,7 @@ int screenshot_run(string[] args)
     }
     scope(exit) SDL_DestroyWindow(window);
 
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, null);
+    SDL_Renderer* renderer = render_create(window);
     if (renderer is null)
     {
         logCritical("SDL_CreateRenderer: %s", SDL_GetError().fromStringz);
