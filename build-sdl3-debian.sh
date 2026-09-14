@@ -5,7 +5,7 @@ set -euo pipefail
 # X11: Needs libxtst-dev
 
 PREFIX="${1:-$HOME/.local}"
-SDL_TAG="release-3.4.12"        # pin a real SDL3 tag, not main
+SDL_TAG="release-3.4.16"        # pin a real SDL3 tag, not main
 SDL_TTF_TAG="release-3.2.2"     # matches the SDL_TTF_3_2_2 version in dub.sdl
 
 # --- 1. build-time deps (only prompts sudo once; harmless to re-run) ---
@@ -15,11 +15,11 @@ SDL_TTF_TAG="release-3.2.2"     # matches the SDL_TTF_3_2_2 version in dub.sdl
 # /usr/share/fonts/**/noto (see source/render.d).
 # The guard checks libharfbuzz-dev too so an existing checkout still picks up
 # the fonts/freetype/harfbuzz packages on a re-run (dpkg -s fails if ANY is missing).
-if ! dpkg -s libwayland-dev libharfbuzz-dev >/dev/null 2>&1; then
+if ! dpkg -s libwayland-dev libharfbuzz-dev libxtst-dev >/dev/null 2>&1; then
   sudo apt update
   sudo apt install -y build-essential cmake ninja-build git \
     libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
-    libxfixes-dev libxss-dev libwayland-dev wayland-protocols \
+    libxfixes-dev libxss-dev libxtst-dev libwayland-dev wayland-protocols \
     libxkbcommon-dev libegl1-mesa-dev libgles2-mesa-dev \
     libpulse-dev libasound2-dev libdbus-1-dev \
     libfreetype-dev libharfbuzz-dev \
