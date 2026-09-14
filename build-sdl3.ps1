@@ -26,7 +26,7 @@
 [CmdletBinding()]
 param(
     [string]$Prefix = (Join-Path $PSScriptRoot 'install'),
-    [string]$SdlTag = 'release-3.4.12',
+    [string]$SdlTag = 'release-3.4.16',
     [string]$SdlTtfTag = 'release-3.2.2',
     [switch]$NoClean,
     [switch]$DynamicCrt
