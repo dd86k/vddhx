@@ -109,25 +109,24 @@ else
     ];
 }
 
-// Asked for first, before whatever SDL would have picked. A frame here is flat
-// filled rects plus glyphs the text engine has already rasterised, which the CPU
-// keeps up with at window sizes; the accelerated drivers are where the surprises
-// live (remote X, a VM without 3D, a GL stack the machine cannot initialise).
-private enum DEFAULT_DRIVER = "software";
-
-/// Create the window's renderer. `VDDHX_RENDERER` names a different SDL driver
-/// ("opengl", "vulkan", "gpu", ...), or "auto" to let SDL order them itself.
+/// Create the window's renderer.
+///
+/// The `VDDHX_RENDERER` environment variable allows creation of another renderer
+/// for SDL.
+///
+/// Nothing forces a choice by default: SDL walks its driver list itself and ends
+/// on the software one, so a machine whose accelerated drivers all fail to
+/// create still gets a renderer.
 ///
 /// Returns: null on failure, with the reason left in SDL_GetError.
 SDL_Renderer* render_create(SDL_Window* window)
 {
-    string wanted = environment.get("VDDHX_RENDERER", DEFAULT_DRIVER);
-    const(char)* driver = wanted.length == 0 || wanted == "auto" ? null : wanted.toStringz;
+    string wanted = environment.get("VDDHX_RENDERER", null);
+    const(char)* driver = wanted ? wanted.toStringz : null;
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, driver);
 
-    // A named driver that this build or this machine does not have is a
-    // preference we cannot honour, not a reason to refuse to start.
+    // If renderer creation failed with a named renderer, retry with the default (auto: null).
     if (renderer is null && driver)
     {
         logWarn(`renderer "%s" unavailable: %s (have: %-(%s, %)); letting SDL choose`,

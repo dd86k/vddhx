@@ -41,7 +41,7 @@ Windows uses `build-sdl3.ps1`, which installs into `./install` instead.
 
 A few environment variables are available for diagnostic purposes.
 
-- `VDDHX_RENDERER`: Select SDL's renderer backend. `auto` usually selects an accelerated one. Defaults to `software`.
+- `VDDHX_RENDERER`: Force select a renderer for SDL (`software`, `opengl`, `vulkan`, ...). Unset (`auto`, defaults to accelerated).
 
 ## Hacking
 
