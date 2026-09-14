@@ -94,6 +94,10 @@ else
         }
     }
 
+    // core.sys.windows.winuser has its own pragma(lib, "user32"), but that only
+    // reaches the linker when winuser.obj is itself pulled out of druntime.lib.
+    version (Windows) pragma(lib, "user32");
+
     // Called by open() and invokes SDL_ShowSimpleMessageBox or Win32 MsgBox if able.
     private void fail(string message)
     {
