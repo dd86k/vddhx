@@ -55,7 +55,10 @@ SDL_Surface* load()
     foreach (string path; candidates(ICON_SIZE))
     {
         if (exists(path) == false)
+        {
+            logDebugging("icon %s: absent", path);
             continue;
+        }
         SDL_Surface* s = SDL_LoadBMP(path.toStringz);
         if (s is null)
         {
@@ -81,15 +84,15 @@ string[] candidates(int size)
         // XDG_DATA_DIRS, each with the documented default when unset. Not the
         // hicolor theme, which is PNG only.
         string home = environment.get("XDG_DATA_HOME");
-        if (home)
+        if (home.length)
         {
             paths ~= buildPath(home, leaf);
         }
         else
         {
             string h = environment.get("HOME");
-            if (h)
-                home = buildPath(h, ".local", "share");
+            if (h.length)
+                paths ~= buildPath(h, ".local", "share", leaf);
         }
 
         foreach (string dir; environment.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").splitter(':'))
