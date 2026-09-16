@@ -25,6 +25,7 @@ import search;
 import split;
 import tabbar;
 import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector;
+import ddhx.transcoder : CharacterSet, charsetID, charsetName, transcode;
 import std.system : Endian;
 import render : render_font_mono;
 import std.array : Appender, appender;
@@ -74,6 +75,16 @@ struct Document
     /// A layout names the order of its own fields and ignores this, formats being
     /// free to mix the two internally.
     Endian endian = Endian.littleEndian;
+
+    /// Which single-byte set the text lane reads the bytes through. Per document
+    /// for the same reason the order is: a mainframe dump is EBCDIC in every pane
+    /// it is open in, and what a byte says is a property of the file rather than of
+    /// the looking.
+    ///
+    /// The lane and nothing else. A find pattern names its own encoding (`utf8:`,
+    /// `utf16:`) and goes on meaning that whatever this says, there being no such
+    /// thing as a pattern whose encoding is implied.
+    CharacterSet charset = CharacterSet.ascii;
 }
 
 /// One way of looking at a document: which document, plus everything about the
@@ -343,6 +354,18 @@ struct MarkPrompt
 }
 /// Ditto.
 __gshared MarkPrompt markPrompt;
+
+/// Which question the box is holding an answer to. OmniMode.prompt is one mode for
+/// all of them - the box knows it was asked something, not what - so this is what
+/// the rows, the preview and the answer are dispatched on.
+enum PromptKind
+{
+    markName,
+    columns,
+    charset,
+}
+/// Ditto. Read only while the box is up on OmniMode.prompt.
+__gshared PromptKind promptKind;
 
 /// The pane taking the keyboard, the view it has in front, and the document that
 /// view is showing: `pane` for the tabs, `view` for the caret and what is on
@@ -2112,7 +2135,7 @@ bool copySelection(bool asText)
     static immutable string digits = "0123456789abcdef";
     int cols = view.hex.columns > 0 ? view.hex.columns : 16;
     Appender!(char[]) text = appender!(char[]);
-    text.reserve(len * (asText ? 1 : 3) + 1); // plus the terminator
+    text.reserve(len * 3 + 1); // plus the terminator; a character can be three too
 
     // A chunk at a time: the selection can be large, and only the bytes being
     // formatted need holding.
@@ -2129,7 +2152,13 @@ bool copySelection(bool asText)
         {
             if (asText)
             {
-                text.put(b >= 0x20 && b < 0x7f ? cast(char) b : '.');
+                // The lane as it is drawn, which is the document's set: what you
+                // see is what you get, dots and all.
+                const(char)[] glyph = transcode(b, doc.charset);
+                if (glyph.length)
+                    text.put(glyph);
+                else
+                    text.put('.');
                 continue;
             }
             size_t at = done + i;
@@ -2464,7 +2493,8 @@ enum
     CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
-    CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
+    CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_COLUMNS, CMD_CHARSET,
+    CMD_KEYS, CMD_ABOUT, CMD_QUIT,
 }
 
 /// Ditto.
@@ -2507,6 +2537,8 @@ immutable Entry[] COMMANDS = [
     Entry("Toggle Minimap",   "",             CMD_MINIMAP,      "ribbon overview scrollbar sidebar"),
     Entry("Toggle Breadcrumbs","",            CMD_CRUMBS,       "crumbs path field structure format layout trail"),
     Entry("Toggle Byte Order","",             CMD_ENDIAN,       "endian endianness little big le be swap order inspector pattern"),
+    Entry("Columns...",       "",             CMD_COLUMNS,      "width row bytes per line wrap 8 16 24 32 auto fit resize"),
+    Entry("Character Set...", "",             CMD_CHARSET,      "charset encoding text lane ascii cp437 ibm dos oem ebcdic mainframe mac roman"),
     Entry("Keyboard Shortcuts...", "",        CMD_KEYS,          "keys chords bindings help cheat sheet"),
     Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
@@ -2777,9 +2809,22 @@ const(OmniItem)[] ui_omni_items()
         }
         break;
     case OmniMode.prompt:
-        string plabel, pdetail;
-        ui_mark_name_preview(plabel, pdetail);
-        put(plabel, pdetail, 0, false, true);
+        // One mode, three questions: the box knows it was asked something, and this
+        // is where what was asked decides the rows.
+        final switch (promptKind)
+        {
+        case PromptKind.markName:
+            string plabel, pdetail;
+            ui_mark_name_preview(plabel, pdetail);
+            put(plabel, pdetail, 0, false, true);
+            break;
+        case PromptKind.columns:
+            ui_columns_rows(&put);
+            break;
+        case PromptKind.charset:
+            ui_charset_rows(&put);
+            break;
+        }
         break;
     case OmniMode.help:
         // The prefixes first, then the chords: equal scores keep this order, so
@@ -3088,6 +3133,122 @@ public void ui_endian_toggle()
         ? Endian.bigEndian : Endian.littleEndian;
 }
 
+/// Set the document's character set. Per document, so both views of one file read
+/// it the same way. No message: the lane is headed with the set's name and the
+/// bytes under it have just been redrawn through it.
+public void ui_charset_set(CharacterSet set)
+{
+    doc.charset = set;
+}
+
+/// What the panel reads a byte as, for its text lane. Bound per frame in ui_pane
+/// against the document, so both views of one file decode it the same way.
+const(char)[] ui_charset_text(ubyte value, void* user)
+{
+    return transcode(value, (cast(const(Document)*) user).charset);
+}
+
+/// Set how many bytes the focused view puts on a row, 0 fitting them to the pane
+/// and refitting on every resize.
+///
+/// Per view rather than per document: the width is how the bytes are being looked
+/// at, not what they are, so two panes on one file are free to disagree - which is
+/// the point of splitting one. A split inherits the width it was made from.
+/// Returns: False for a count the grid cannot draw, the view left as it was.
+public bool ui_columns_set(int cols)
+{
+    if (cols < 0 || cols > HEX_COLUMNS_MAX)
+        return false;
+
+    view.hex.autoColumns = cols == 0;
+    if (cols > 0)
+        view.hex.columns = cols;
+    return true;
+}
+
+/// The focused view's width, 0 while it is fitting itself to the pane.
+int ui_columns()
+{
+    return view.hex.autoColumns ? 0 : view.hex.columns;
+}
+
+/// A width as the prompt's rows write it. Arena-backed, so it lives as long as the
+/// frame's rows do; see ui_columns_label for the menu's NUL-terminated copy.
+string ui_columns_name(int cols)
+{
+    if (cols == 0)
+        return "auto";
+
+    char[8] buf = void;
+    return ui_row_text(sformat(buf, "%d", cols));
+}
+
+/// The focused view's width for the menu's right-hand column, where the on/off
+/// states go. Its own buffer rather than the row arena, which ui_omni_items clears
+/// out from under it every frame, and NUL-terminated, ddui taking C strings.
+const(char)* ui_columns_label()
+{
+    if (view.hex.autoColumns)
+        return "auto";
+
+    __gshared char[8] buf;
+    size_t n = sformat(buf[0 .. $ - 1], "%d", view.hex.columns).length;
+    buf[n] = 0;
+    return buf.ptr;
+}
+
+/// Read a width out of what was typed at the columns prompt: a plain count, or
+/// ddhx's own words for fitting it to the screen. Blank is not an answer.
+///
+/// Decimal only, as ddhx's `columns` setting is. A row length is a count of things
+/// rather than an address, so the 0x / 0b / 0o forms the goto box takes would be
+/// answering a question nobody asked.
+/// Returns: False when `typed` is not a width, `cols` untouched.
+bool ui_columns_parse(const(char)[] typed, out int cols)
+{
+    import std.conv : ConvException, to;
+
+    const(char)[] text = strip(typed);
+    if (text.length == 0)
+        return false;
+
+    // ddhx takes both, and "autoresize" is what its own option is called.
+    if (text == "auto" || text == "autoresize")
+        return true; // cols stays 0, which is what auto is
+
+    try
+        cols = to!int(text);
+    catch (ConvException)
+        return false;
+
+    return cols >= 0 && cols <= HEX_COLUMNS_MAX;
+}
+
+unittest
+{
+    int cols;
+    assert(ui_columns_parse("16", cols) && cols == 16);
+    assert(ui_columns_parse("  32  ", cols) && cols == 32);
+    assert(ui_columns_parse("1", cols) && cols == 1);
+
+    // Auto is 0, by both of the names ddhx knows it under.
+    cols = 99;
+    assert(ui_columns_parse("auto", cols) && cols == 0);
+    cols = 99;
+    assert(ui_columns_parse("autoresize", cols) && cols == 0);
+    // As is a typed zero, ddhx's own spelling of it.
+    assert(ui_columns_parse("0", cols) && cols == 0);
+
+    assert(ui_columns_parse("", cols) == false);
+    assert(ui_columns_parse("   ", cols) == false);
+    assert(ui_columns_parse("wide", cols) == false);
+    assert(ui_columns_parse("16 bytes", cols) == false);
+    assert(ui_columns_parse("0x10", cols) == false); // a count, not an address
+    assert(ui_columns_parse("-8", cols) == false);
+    assert(ui_columns_parse("257", cols) == false);  // past what the grid draws
+    assert(ui_columns_parse("999999999999", cols) == false); // past an int, even
+}
+
 /// The row shown at `index`, the document's order coming first.
 ref immutable(Inspect) ui_inspect_row(int index)
 {
@@ -3237,7 +3398,17 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         view.hex.takeFocus = true;
         break;
     case OmniMode.prompt:
-        ui_mark_name_commit(omni_query(omni));
+        // The name prompt's answer is the text; the two settings' is the row, which
+        // is already what the browse behind the box was showing.
+        final switch (promptKind)
+        {
+        case PromptKind.markName: ui_mark_name_commit(omni_query(omni)); break;
+        case PromptKind.columns:  ui_columns_commit(id);                 break;
+        case PromptKind.charset:
+            if (id >= 0 && id <= CharacterSet.max)
+                ui_charset_set(cast(CharacterSet) id);
+            break;
+        }
         view.hex.takeFocus = true;
         break;
     case OmniMode.help:
@@ -3261,12 +3432,20 @@ string ui_bookmark_bytes(ref const(Bookmark) mark)
     if (bytes.length > mark.length)
         bytes = bytes[0 .. cast(size_t) mark.length];
 
-    char[80] buf = void;
+    // Eight bytes of hex, then the same eight as text - up to three bytes each
+    // once the set reaches outside ASCII - and the run's length after them.
+    char[96] buf = void;
     size_t n;
     foreach (ubyte b; bytes)
         n += sformat(buf[n .. $], "%02x ", b).length;
     foreach (ubyte b; bytes)
-        buf[n++] = b >= 0x20 && b < 0x7f ? cast(char) b : '.';
+    {
+        const(char)[] glyph = transcode(b, doc.charset);
+        if (glyph.length == 0)
+            glyph = ".";
+        buf[n .. n + glyph.length] = glyph;
+        n += glyph.length;
+    }
     if (mark.length > bytes.length)
         n += sformat(buf[n .. $], "  (%d bytes)", mark.length).length;
     return ui_row_text(buf[0 .. n]);
@@ -3465,7 +3644,262 @@ public void ui_mark_name()
     // The run holding the caret can start before it; the prompt is about the whole
     // of it, so it is that start the answer is applied to.
     markPrompt = MarkPrompt(&doc(), doc.marks[index].at);
-    omni_prompt(omni, doc.marks[index].name);
+    promptKind = PromptKind.markName;
+    omni_prompt(omni, "name this run of bytes", doc.marks[index].name);
+}
+
+/// Ask how many bytes go on a row. A prompt rather than a menu that steps through
+/// a handful of counts: the answer is a number, and a file with 24-byte records
+/// wants that number typed, not cycled past. The common widths are still rows, so
+/// the list is the vocabulary and the box is the way past it.
+public void ui_columns_prompt()
+{
+    settingPreview = SettingPreview(&view(), &doc(), view.hex.columns,
+        view.hex.autoColumns, doc.charset, true);
+    promptKind = PromptKind.columns;
+    omni_prompt(omni, "count, or auto to fit the pane");
+    omni_select(omni, ui_columns_index(ui_columns()));
+}
+
+/// Ditto, for the set the text lane is read through. The four are a closed list, so
+/// the rows are the answer and typing narrows them; nothing here is free text.
+public void ui_charset_prompt()
+{
+    settingPreview = SettingPreview(&view(), &doc(), view.hex.columns,
+        view.hex.autoColumns, doc.charset, true);
+    promptKind = PromptKind.charset;
+    omni_prompt(omni, "ascii, cp437, ebcdic, mac");
+    omni_select(omni, cast(int) doc.charset); // the rows are the enum, in its order
+}
+
+/// The widths the columns prompt suggests: the conventional 16, its halves and
+/// doubles, and auto. Anything else is typed.
+immutable int[5] COLUMN_SUGGESTED = [ 8, 16, 24, 32, 0 ];
+
+/// Those, plus wherever the focused view is now when that is none of them, in
+/// ascending order with auto last.
+///
+/// Where the view stands always has a row of its own: the highlight opens on it
+/// (see omni_select) and walking the list is a browse that applies what it lands
+/// on, so a list without it would move the grid the moment the box came up.
+/// Returns: How much of `offered` was filled.
+size_t ui_columns_offered(int current, out int[COLUMN_SUGGESTED.length + 1] offered)
+{
+    size_t n;
+    bool placed = current == 0; // auto is on the list already, and last
+
+    foreach (int cols; COLUMN_SUGGESTED)
+    {
+        if (placed == false && (cols == 0 || cols >= current))
+        {
+            if (cols != current)
+                offered[n++] = current;
+            placed = true;
+        }
+        offered[n++] = cols;
+    }
+    return n;
+}
+
+unittest
+{
+    int[COLUMN_SUGGESTED.length + 1] got;
+
+    // A suggested width adds nothing: the list is what it always was.
+    assert(ui_columns_offered(16, got) == 5);
+    assert(got[0 .. 5] == [ 8, 16, 24, 32, 0 ]);
+    assert(ui_columns_offered(0, got) == 5);   // auto, already last
+    assert(got[0 .. 5] == [ 8, 16, 24, 32, 0 ]);
+    assert(ui_columns_offered(8, got) == 5);   // the first of them
+    assert(got[0 .. 5] == [ 8, 16, 24, 32, 0 ]);
+
+    // Anything else takes a row, in the place its number puts it.
+    assert(ui_columns_offered(48, got) == 6);
+    assert(got[0 .. 6] == [ 8, 16, 24, 32, 48, 0 ]); // past them all, before auto
+    assert(ui_columns_offered(10, got) == 6);
+    assert(got[0 .. 6] == [ 8, 10, 16, 24, 32, 0 ]);
+    assert(ui_columns_offered(1, got) == 6);
+    assert(got[0 .. 6] == [ 1, 8, 16, 24, 32, 0 ]); // narrower than any of them
+
+    // And the highlight opens on it wherever it landed.
+    assert(ui_columns_index(16) == 1);
+    assert(ui_columns_index(0) == 4);
+    assert(ui_columns_index(48) == 4);
+    assert(ui_columns_index(10) == 1);
+}
+
+/// The width the columns prompt was raised on, which the browse may have moved the
+/// view off since. Its own width when no browse is in hand.
+int ui_columns_baseline()
+{
+    if (settingPreview.active)
+        return settingPreview.autoColumns ? 0 : settingPreview.columns;
+    return ui_columns();
+}
+
+/// Ditto, the set the character prompt was raised on.
+CharacterSet ui_charset_baseline()
+{
+    return settingPreview.active ? settingPreview.charset : doc.charset;
+}
+
+/// Where a width sits in that list, for the opening highlight.
+int ui_columns_index(int current)
+{
+    int[COLUMN_SUGGESTED.length + 1] offered = void;
+    size_t n = ui_columns_offered(current, offered);
+    foreach (size_t i; 0 .. n)
+        if (offered[i] == current)
+            return cast(int) i;
+    return 0;
+}
+
+/// The columns prompt's rows: the widths on offer, plus - only when what was typed
+/// is none of them - a pinned readout of it, that being exactly when the list has
+/// no answer to give.
+void ui_columns_rows(scope void delegate(string, string, int, bool, bool, string) put)
+{
+    // What the box was raised on, not what the browse has since applied: the rows
+    // would otherwise reshuffle under the highlight walking them, and "current"
+    // would follow it around saying nothing.
+    int current = ui_columns_baseline();
+    int[COLUMN_SUGGESTED.length + 1] offered = void;
+    size_t n = ui_columns_offered(current, offered);
+
+    const(char)[] query = omni_query(omni);
+    int typed;
+    if (ui_columns_parse(query, typed))
+    {
+        bool listed;
+        foreach (size_t i; 0 .. n)
+            if (offered[i] == typed)
+                listed = true;
+        if (listed == false)
+        {
+            char[64] buf = void;
+            put(ui_columns_name(typed),
+                ui_row_text(sformat(buf, "%d bytes to the row", typed)),
+                typed, false, true, null);
+        }
+    }
+    else if (query.length)
+    {
+        // Every other row has filtered out by now, and an empty list reads as the
+        // box still thinking rather than as an answer that is not coming.
+        put("not a column count", "a number up to 256, or auto", -1, false, true, null);
+    }
+
+    foreach (size_t i; 0 .. n)
+    {
+        int cols = offered[i];
+        string detail = cols == 0 ? "fit the row to the pane" : null;
+        if (cols == current)
+            detail = cols == 0 ? "current, fitting the pane" : "current";
+        put(ui_columns_name(cols), detail, cols, false, false,
+            cols == 0 ? "fit resize pane window" : null);
+    }
+}
+
+/// Ditto for the character set: one row per set, named as ddhx names it, with the
+/// full name in the detail column so "code page" and "roman" find one.
+void ui_charset_rows(scope void delegate(string, string, int, bool, bool, string) put)
+{
+    CharacterSet current = ui_charset_baseline();
+    foreach (CharacterSet set; [ CharacterSet.ascii, CharacterSet.cp437,
+                                 CharacterSet.ebcdic, CharacterSet.mac ])
+    {
+        string detail = charsetName(set);
+        if (set == current)
+            detail = ui_row_text(detail ~ "  -  current");
+        put(charsetID(set), detail, cast(int) set, false, false, null);
+    }
+}
+
+/// What the two settings prompts were looking at before the list started walking
+/// them, so a browse called off puts back what it found.
+///
+/// The parallel of Preview, for the answers that show themselves in the grid rather
+/// than by moving the caret: walking to cp437 redraws the lane in it, which is the
+/// whole reason to offer a list rather than a cycle.
+struct SettingPreview
+{
+    View* view;
+    Document* doc;
+    int columns;
+    bool autoColumns;
+    CharacterSet charset;
+    bool active;
+}
+/// Ditto.
+__gshared SettingPreview settingPreview;
+
+/// Apply the highlighted row as the box is walked. Nothing is committed here: what
+/// this writes is undone by ui_setting_restore unless the row is taken.
+void ui_setting_preview(OmniMode mode)
+{
+    if (mode != OmniMode.prompt || ui_omni_active() == false
+        || promptKind == PromptKind.markName)
+    {
+        ui_setting_restore(); // the box moved on, or the question was another one
+        return;
+    }
+    if (settingPreview.active == false)
+        return;
+
+    // The browse is the arrow keys. Typing is naming a value outright, and the list
+    // it filters re-ranks under every keystroke while running a frame behind the
+    // text - so previewing whatever the highlight lands on mid-word would strobe the
+    // grid through two or three widths per keypress. It shows what it was raised on
+    // until Enter says otherwise.
+    if (omni_query(omni).length)
+    {
+        ui_setting_rewind();
+        return;
+    }
+
+    int id = omni_current(omni);
+    if (id < 0)
+        return; // no row under the highlight: leave the last one showing
+
+    if (promptKind == PromptKind.columns)
+        cast(void) ui_columns_set(id);
+    else if (id <= CharacterSet.max)
+        ui_charset_set(cast(CharacterSet) id);
+}
+
+/// Put both settings back to what the box was raised on, the browse still in hand.
+void ui_setting_rewind()
+{
+    if (settingPreview.active == false)
+        return;
+
+    // Through the captured view and document rather than the globals: the box holds
+    // the keyboard while it is up, so these are still the ones it was raised on.
+    settingPreview.view.hex.columns = settingPreview.columns;
+    settingPreview.view.hex.autoColumns = settingPreview.autoColumns;
+    settingPreview.doc.charset = settingPreview.charset;
+}
+
+/// Ditto, and the browse is over.
+void ui_setting_restore()
+{
+    ui_setting_rewind();
+    settingPreview = SettingPreview.init;
+}
+
+/// Ditto, keeping where the browse got to: the row was taken.
+void ui_setting_drop()
+{
+    settingPreview = SettingPreview.init;
+}
+
+/// Take the answer the columns prompt came back with, `id` being the row's width.
+void ui_columns_commit(int id)
+{
+    if (id < 0) // the "not a column count" row; the box said so while it was up
+        return;
+    if (ui_columns_set(id) == false)
+        ui_status("columns: %d is past the %d the grid draws", id, HEX_COLUMNS_MAX);
 }
 
 /// The naming prompt's one row: which run is being named, and what the text in the
@@ -3599,6 +4033,8 @@ void ui_omni_run(int id)
     case CMD_MARK_LIST: ui_omni_open(OMNI_BOOKMARK); return;
     case CMD_STRUCTURE: ui_omni_open(OMNI_STRUCTURE); return;
     case CMD_MARK_NAME: ui_mark_name();              return;
+    case CMD_COLUMNS:   ui_columns_prompt();         return;
+    case CMD_CHARSET:   ui_charset_prompt();         return;
     case CMD_KEYS:      ui_omni_open(OMNI_HELP);     return;
     case CMD_ABOUT:     about_open();          break;
     case CMD_QUIT:
@@ -3769,18 +4205,20 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     const(OmniItem)[] rows = ui_omni_active() ? ui_omni_items() : null;
     final switch (omni_frame(ctx, omni, rows, width, height, chosen))
     {
-    case OmniAction.none:     ui_struct_preview(mode);            break;
+    case OmniAction.none:     ui_struct_preview(mode);
+                              ui_setting_preview(mode);           break;
     // Tab fills the box in rather than taking anything, so the box is still up and
     // the '#' preview carries on as it does on a quiet frame.
     case OmniAction.complete: cast(void) ui_omni_complete(mode, chosen);
-                              ui_struct_preview(mode);            break;
+                              ui_struct_preview(mode);
+                              ui_setting_preview(mode);           break;
     // A row taken is the preview made permanent: the caret is already on it, and
     // ui_omni_accept puts it there again for the routes that never previewed.
-    case OmniAction.accept:   ui_preview_drop();
+    case OmniAction.accept:   ui_preview_drop(); ui_setting_drop();
                               ui_omni_accept(mode, chosen);       break;
-    case OmniAction.transfer: ui_preview_drop();
+    case OmniAction.transfer: ui_preview_drop(); ui_setting_drop();
                               ui_omni_accept(mode, chosen, true); break;
-    case OmniAction.dismiss:  ui_preview_restore();
+    case OmniAction.dismiss:  ui_preview_restore(); ui_setting_restore();
                               view.hex.takeFocus = true;          break;
     }
 }
@@ -4237,6 +4675,13 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     View* v = p.views[p.current];
     v.hex.minimap = minimapEnabled != 0;
 
+    // The set is the document's, the panel only draws through it, so the binding is
+    // remade each frame rather than being carried in the view: a tab dragged into
+    // another pane takes its document's set with it either way.
+    v.hex.textFn    = &ui_charset_text;
+    v.hex.textUser  = cast(void*) v.doc;
+    v.hex.textLabel = charsetID(v.doc.charset);
+
     // Under the tab and over the grid, where VS Code puts it: the trail belongs to
     // the view, so it goes inside the pane rather than on any window-wide bar, and
     // it reads as a caption to the bytes under it. Drawn on every document, parsed
@@ -4556,6 +5001,15 @@ void ui_menubar(mu_Context* ctx)
         // on/off states below it, being the same kind of fact about this tab.
         if (mu_menu_item_ex(ctx, "Byte Order", doc.endian == Endian.bigEndian ? "Big" : "Little", 0, 0))
             ui_endian_toggle();
+        // The two settings the grid itself shows: what a row holds, and what the
+        // text lane reads the bytes through. Both raise the box on a question -
+        // hence the ellipsis - rather than stepping, a width being a number to type
+        // and a set being one of four to pick. The value stays in the shortcut
+        // column, so the menu reads as the settings it is.
+        if (mu_menu_item_ex(ctx, "Columns...", ui_columns_label(), 0, 0))
+            ui_columns_prompt();
+        if (mu_menu_item_ex(ctx, "Character Set...", charsetID(doc.charset).ptr, 0, 0))
+            ui_charset_prompt();
         mu_menu_separator(ctx);
         // No native checkmark on a ddui menu item, so the on/off state rides in the
         // shortcut column instead.

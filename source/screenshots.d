@@ -30,6 +30,7 @@ import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
 import ui;
+import ddhx.transcoder : CharacterSet;
 
 /// Default output directory, relative to the working directory.
 enum SCREENSHOT_DIR = "screenshots";
@@ -876,6 +877,123 @@ int screenshot_run(string[] args)
     ui_endian_toggle();
     frame();
 
+    // Scenario 14b: the two settings the grid shows for itself, both answered
+    // through the omnibar. Put back at the end, the shots below this point being of
+    // a 16-column ASCII grid.
+    //
+    // The document is random bytes, which is what makes a set visible at all: in
+    // ASCII most of a row is dots, and in CP437 every byte has a character.
+
+    // Nothing typed yet: the placeholder says what the box wants, the rows are the
+    // widths worth suggesting, and the highlight opens on the one in force - so the
+    // grid behind is untouched by the box coming up.
+    ui_columns_prompt();
+    frame(); frame();
+    shot("prompt-columns.bmp");
+
+    // Walking the list is a browse, as the '#' list is: the row under the highlight
+    // is applied to the grid behind the box, so 32 is on screen before Enter is
+    // anywhere near it.
+    tap(OMNI_KEY_DOWN); tap(OMNI_KEY_DOWN);
+    frame(); frame();
+    shot("prompt-columns-browse.bmp");
+
+    // Esc is the way out of a browse: what the box found is what it leaves. A
+    // browse is put back at the end of a frame, and shot() captures the last one
+    // drawn, so every shot of an answer taken or dropped wants the frame after it.
+    ui_omni_close();
+    frame(); frame();
+    shot("columns-restored.bmp");
+
+    // A width off the list is typed instead, and the pinned row reads it back. 48
+    // is wider than the pane, so the grid is drawn as far as it goes and clipped -
+    // and the second pane stays at 16, the width being the view's own.
+    ui_columns_prompt();
+    frame();
+    mu_input_text(&ctx, "48");
+    frame(); frame();
+    find("48 bytes to the row");
+    shot("prompt-columns-typed.bmp");
+    tap(MU_KEY_RETURN);
+    frame(); frame();
+    shot("columns-48.bmp");
+
+    // Typing what is not a count says so rather than emptying the list.
+    ui_columns_prompt();
+    frame();
+    mu_input_text(&ctx, "wide");
+    frame(); frame();
+    find("not a column count");
+    shot("prompt-columns-bad.bmp");
+    ui_omni_close();
+    frame();
+
+    // Auto by name, which is the one answer that is a word.
+    ui_columns_prompt();
+    frame();
+    mu_input_text(&ctx, "auto");
+    frame(); frame();
+    tap(MU_KEY_RETURN);
+    frame(); frame();
+    shot("columns-auto.bmp");
+
+    // The set prompt is a closed list, so there is nothing to type and the rows are
+    // the answer. Walking it redraws the lane behind the box, which is the whole
+    // reason to offer a list rather than a cycle.
+    ui_charset_prompt();
+    frame(); frame();
+    shot("prompt-charset.bmp");
+    tap(OMNI_KEY_DOWN);
+    frame(); frame();
+    shot("prompt-charset-browse.bmp");
+    tap(MU_KEY_RETURN);
+    frame(); frame();
+    shot("charset-cp437.bmp");
+
+    // Typing narrows it, the full name being matched as well as the short one.
+    ui_charset_prompt();
+    frame();
+    mu_input_text(&ctx, "ebc");
+    frame(); frame();
+    find("ebcdic");
+    tap(MU_KEY_RETURN);
+    frame(); frame();
+    shot("charset-ebcdic.bmp");
+
+    // Neither setting has a chord, so the command list is the keyboard's way to
+    // both. find throws when the row is not there, which is the check; the shot is
+    // for the eye.
+    ui_omni_toggle(OMNI_COMMAND);
+    frame();
+    mu_input_text(&ctx, "set");
+    frame(); frame();
+    find("Character Set...");
+    shot("omni-command-charset.bmp");
+    ui_omni_close();
+    frame();
+
+    // Both settings read at once, which is what the menu is for: they carry their
+    // value in the shortcut column, where the on/off states go. Shot away from the
+    // defaults, where a live label and a hardcoded one look alike.
+    mu_Vec2 viewMenu = find("View");
+    click(viewMenu.x + 3, viewMenu.y + 3);
+    frame(); frame();
+    shot("menu-view.bmp");
+    // Closed through an item rather than a click outside, which would land in the
+    // grid and move the caret the scenarios below mark from.
+    mu_Vec2 inspectItem = find("Inspect Bytes...");
+    click(inspectItem.x + 3, inspectItem.y + 3);
+    frame(); frame();
+    ui_omni_close();
+    frame();
+
+    ui_charset_set(CharacterSet.ascii);
+    cast(void) ui_columns_set(16);
+    // And the pointer off the tab strip the menu click left it over, or every shot
+    // below this one carries a tab hovered into its close cross.
+    mu_input_mousemove(&ctx, 400, 400);
+    frame();
+
     // Scenario 15: bookmarks, a single byte and then a four-byte run; the panel
     // washes every byte of both, grid and minimap. A marked run is drawn under the
     // selection that set it, so shot-mark-range shows it only after the caret moves.
@@ -1058,11 +1176,13 @@ int screenshot_run(string[] args)
     // that opened it, and every one of these used to blink and be gone the next
     // frame. One shot for the sheet, the rest checked by finding a row of the mode
     // they should have put up.
-    static immutable string[3][6] raises = [
+    static immutable string[3][8] raises = [
         [ "Help",      "Keyboard Shortcuts...", "Omnibar: this sheet" ],
         [ "Search",    "Find...",               "bytes as written" ],
         [ "Search",    "Go to Offset...",       "waiting for an offset" ],
         [ "View",      "Inspect Bytes...",      "u8" ],
+        [ "View",      "Columns...",            "fit the row to the pane" ],
+        [ "View",      "Character Set...",      "IBM PC Code Page 437" ],
         [ "Bookmarks", "List Bookmarks...",     "no bookmarks in this document" ],
         [ "Bookmarks", "Name Bookmark...",      "type a name, Enter to set" ],
     ];

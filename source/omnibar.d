@@ -21,8 +21,10 @@
 /// what writes the taken one back into the box.
 ///
 /// One mode has no prefix to reach it by: omni_prompt raises the box on a question
-/// the caller asked (naming a bookmark), where the text is an answer rather than a
-/// search and every character of it is the user's, first one included.
+/// the caller asked (naming a bookmark, setting the columns), where the text is an
+/// answer rather than a search and every character of it is the user's, first one
+/// included. An empty one shows the question's own placeholder in place of the
+/// prefix sheet above.
 ///
 /// The widget owns the box, the matching and the selection; the caller owns the
 /// rows, asking omni_mode what the box is after and rebuilding the candidates for
@@ -140,6 +142,9 @@ struct Omnibar
     bool shown;
     // Raised by omni_prompt: the text is an answer, not a query.
     bool prompting;
+    // What an empty prompt says it wants, in place of the prefix sheet. Empty
+    // leaves an empty box empty, for a question with nothing short to suggest.
+    string hint;
     // Set the frame the box is raised, so it takes the keyboard without a click.
     bool focusWanted;
     // Set by omni_refill: the text grew under ddui, which would leave the caret
@@ -188,17 +193,36 @@ void omni_show(ref Omnibar o, char prefix = 0)
 
 /// Raise the box on a question of the caller's, with `seed` already typed into it
 /// (the name a bookmark carries, so renaming starts from it rather than from
-/// nothing). The caller recognises the mode as OmniMode.prompt, hands in the one
-/// pinned row that reads back what taking the answer would do, and reads the answer
-/// off omni_query when the row is accepted.
-void omni_prompt(ref Omnibar o, const(char)[] seed = null)
+/// nothing). The caller recognises the mode as OmniMode.prompt, hands in the rows
+/// that answer the question - one pinned readout, a list to pick from, or both -
+/// and reads the answer off omni_query or the accepted row's id.
+///
+/// `hint` is what an empty box says it is waiting for, standing in for the prefix
+/// sheet, which would be an answer to a question nobody asked here. Empty for a
+/// question whose answer is too open to suggest.
+void omni_prompt(ref Omnibar o, string hint = null, const(char)[] seed = null)
 {
     omni_show(o);
     o.prompting = true;
+    o.hint = hint;
 
-    size_t n = seed.length < o.text.length ? seed.length : o.text.length - 1;
+    // Subtraction is okay, o.text is statically sized
+    size_t n = seed.length < o.text.length ? seed.length : o.text.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     o.text[0 .. n] = seed[0 .. n];
     o.text[n] = 0;
+}
+
+/// Start the highlight on row `index` rather than on the first, for a question
+/// whose list holds the answer already in force: walking it is a browse, so opening
+/// the box has to land on where things stand and not move them.
+///
+/// An index into the rows as the caller hands them in, which is what the box
+/// matches while nothing has been typed. The first keystroke puts the highlight
+/// back on the best match, as it does for any other query.
+void omni_select(ref Omnibar o, int index)
+{
+    o.selected = index > 0 ? index : 0;
+    o.scroll = 0;
 }
 
 /// Put the box away, keeping nothing but the text (the next omni_show clears it).
@@ -390,9 +414,10 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     }
 
     // The prefix sheet would be an answer to a question nobody asked while the box
-    // is holding a prompt; that row's own text says what is wanted there.
-    if (o.text[0] == 0 && o.prompting == false)
-        mu_draw_text(ctx, font, HINT,
+    // is holding a prompt, which says what it wants in its own words instead.
+    string hint = o.prompting ? o.hint : HINT;
+    if (o.text[0] == 0 && hint.length)
+        mu_draw_text(ctx, font, hint,
             mu_Vec2(box.x + pad + HINT_INSET, box.y + (box.h - th) / 2), OMNI_HINT);
 
     // Hold the selection inside a list that shrank under it, then step it. Up and

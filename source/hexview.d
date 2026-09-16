@@ -54,6 +54,15 @@ alias HexBackFn = mu_Color function(size_t offset, ubyte value, void* user);
 /// which would step over a short mark. So it asks the span outright.
 alias HexBackSpanFn = mu_Color function(long at, long length, void* user);
 
+/// Text-lane hook: the characters byte `value` reads as, empty for one the set has
+/// no character for, which draws as a dot. `user` is HexView.textUser; null falls
+/// back to printable ASCII.
+///
+/// A slice rather than a char because a single-byte set still reaches outside
+/// ASCII - CP437's box drawing, EBCDIC's accents - and one column of those arrives
+/// as several UTF-8 bytes.
+alias HexTextFn = const(char)[] function(ubyte value, void* user);
+
 /// The extent of one structure span, and the colour its border is drawn in.
 struct HexSpan
 {
@@ -129,6 +138,10 @@ private enum
 /// topmost of the panel's backgrounds: see the rendering priority in hex_draw_row.
 enum mu_Color HEX_SEL_WASH = mu_Color(48, 84, 140, 255);
 
+/// Widest row the panel will draw or fit itself to. Past this an offset stops
+/// being findable by eye, which is what the grid is for.
+enum int HEX_COLUMNS_MAX = 256;
+
 /// State and configuration for one hex panel. Persist it across frames (the
 /// selection lives here); the byte buffer and options can change frame to frame.
 struct HexView
@@ -137,6 +150,11 @@ struct HexView
     const(ubyte)[] data;
     /// Bytes per row. Powers of two read most naturally; 16 is conventional.
     int columns = 16;
+    /// Fit `columns` to the panel instead of holding it, remeasured as the window
+    /// resizes. The count arrived at is written back to `columns`, so what a row
+    /// holds is one field either way - including between frames, where a caret move
+    /// has to divide by it and no panel has been measured yet.
+    bool autoColumns;
     /// Address printed for the first byte, so a slice can show file offsets.
     long baseAddress;
     /// Minimum hex digits in the offset column, 8 fitting a 32-bit span. The panel
@@ -172,6 +190,14 @@ struct HexView
     HexBackSpanFn backSpanFn;
     /// Opaque pointer forwarded to both background hooks.
     void* backUser;
+
+    /// Optional character set for the text lane. Null reads printable ASCII and
+    /// draws the rest as dots. See HexTextFn.
+    HexTextFn textFn;
+    /// Opaque pointer forwarded to textFn.
+    void* textUser;
+    /// What the lane is headed with, naming the set textFn decodes.
+    const(char)[] textLabel = "ascii";
 
     /// Optional structure hook, drawing a border round the record each byte belongs
     /// to. See HexSpanFn.
@@ -242,6 +268,9 @@ struct HexView
     // covers, which it can only know in pixels.
     int bodyY;
     int rowHeight = 1;
+    // Grid width the last frame had, minus the scroll strip: what an auto column
+    // count is fitted to. Zero until the first frame measures one.
+    int bodyW;
 
     // Nibble sub-position within the caret byte: false means the next hex digit is
     // the byte's high nibble, true its low. Reset on any caret move. editByte holds
@@ -615,8 +644,19 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
     if (charW <= 0) charW = 1;
     if (rowH  <= 0) rowH  = 1;
 
-    int cols = v.columns > 0 ? v.columns : 16;
     size_t total = hex_total(v);
+
+    // An auto count is fitted to the last frame's grid: the header is laid out
+    // before the body it labels exists, and the two have to agree on the count
+    // within a frame. A resize therefore lands a frame late, which is a frame
+    // nobody sees. The offset column is measured at its widest here - the document's
+    // last byte rather than its last row - so the fit can only come out
+    // conservative, never a column wider than the pane.
+    if (v.autoColumns && v.bodyW > 0)
+        v.columns = hex_fit_columns(v.bodyW, charW,
+            hex_fit_digits(cast(ulong)(v.baseAddress + total), v.offsetDigits));
+
+    int cols = v.columns > 0 ? v.columns : 16;
     long rows  = (cast(long) total + cols - 1) / cols;
 
     // Widen the offset column to fit the last row's label. Without this a document
@@ -658,6 +698,7 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
         int stripW = v.minimap ? MINIMAP_WIDTH : SCROLLBAR_WIDTH;
         mu_Rect strip = mu_Rect(body_.x + body_.w - stripW, body_.y, stripW, body_.h);
         body_.w -= stripW;
+        v.bodyW = body_.w; // what the next frame fits an auto count to
 
         // NOSCROLL means ddui no longer routes the wheel, so re-arm the target
         // while the mouse is over the panel. It still folds the notch delta into
@@ -733,6 +774,60 @@ unittest
 
     assert(hex_fit_digits(0, 0) == 8); // a bad floor falls back to 8
     assert(hex_fit_digits(0, -4) == 8);
+}
+
+// Most columns whose grid still fits `availW` pixels, at least one: the offset
+// column, the two two-space gaps, and per byte three glyphs of hex, one of text
+// and a group space every eight. The same arithmetic hex_layout lays out with,
+// solved the other way round.
+int hex_fit_columns(int availW, int charW, int offsetDigits)
+{
+    if (charW <= 0) charW = 1;
+    if (offsetDigits <= 0) offsetDigits = 8;
+
+    int best = 1;
+    for (int cols = 1; cols <= HEX_COLUMNS_MAX; ++cols)
+    {
+        int need = offsetDigits + 4 + cols * 4 + (cols - 1) / 8;
+        if (need * charW > availW)
+            break;
+        best = cols;
+    }
+    return best;
+}
+
+unittest
+{
+    // The fit and the layout are one sum: what comes back has to be the widest
+    // count whose grid ends inside the pane, and one more has to overrun it.
+    static void fits(int availW, int charW, int digits)
+    {
+        int cols = hex_fit_columns(availW, charW, digits);
+        assert(cols >= 1);
+        assert(hex_layout(digits, cols, charW).totalCols * charW <= availW || cols == 1);
+        if (cols < HEX_COLUMNS_MAX)
+            assert(hex_layout(digits, cols + 1, charW).totalCols * charW > availW);
+    }
+
+    foreach (int w; [40, 100, 337, 640, 800, 1024, 1920])
+        foreach (int cw; [7, 8, 11])
+            fits(w, cw, 8);
+
+    // The conventional grid at an 8-digit offset is 77 columns of glyphs.
+    assert(hex_fit_columns(77 * 8, 8, 8) == 16);
+    assert(hex_fit_columns(77 * 8 - 1, 8, 8) == 15);
+
+    // A wider offset column is that many fewer bytes to the row.
+    assert(hex_fit_columns(77 * 8, 8, 16) < 16);
+
+    // Nothing fits, and a row is still a row: a panel too narrow for one byte
+    // draws the byte and clips it, rather than dividing offsets by zero.
+    assert(hex_fit_columns(0, 8, 8) == 1);
+    assert(hex_fit_columns(-100, 8, 8) == 1);
+    assert(hex_fit_columns(1000, 0, 8) >= 1);   // a font that measures nothing
+
+    // And it stops before the grid stops being readable.
+    assert(hex_fit_columns(int.max, 1, 8) == HEX_COLUMNS_MAX);
 }
 
 HexLayout hex_layout(int offsetDigits, int cols, int charW)
@@ -856,9 +951,12 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
         mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(x, r.y), dim);
     }
 
+    // The lane's heading names the set it is decoded through, that being the only
+    // place the setting shows: the bytes themselves are what changed.
+    const(char)[] label = v.textLabel.length ? v.textLabel : "ascii";
     int ax = r.x + lay.asciiStart * charW;
-    if (hex_fits(ax, 5, charW, endX))
-        mu_draw_text(ctx, font, "ascii", 5, mu_Vec2(ax, r.y), dim);
+    if (hex_fits(ax, cast(int) label.length, charW, endX))
+        mu_draw_text(ctx, font, label.ptr, cast(int) label.length, mu_Vec2(ax, r.y), dim);
 
     mu_pop_clip_rect(ctx);
 }
@@ -1718,14 +1816,55 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
             mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(hx, y), color);
         }
 
-        ch[0] = (b >= 0x20 && b < 0x7f) ? cast(char) b : '.';
+        const(char)[] glyph = hex_text(v, b, ch);
         int ax = originX + (lay.asciiStart + i) * charW;
         if (hex_fits(ax, 1, charW, endX))
-            mu_draw_text(ctx, font, ch.ptr, 1, mu_Vec2(ax, y), color);
+            mu_draw_text(ctx, font, glyph.ptr, cast(int) glyph.length, mu_Vec2(ax, y), color);
     }
 
     if (v.active && v.cursor >= rowStart && v.cursor < rowStart + count)
         hex_draw_caret(ctx, lay, originX, y, cast(int)(v.cursor - rowStart), charW, rowH, hex_caret_nib(v));
+}
+
+// What a byte reads as in the text lane. `scratch` carries the single-character
+// answers out, mu_draw_text taking a pointer and a length rather than a string.
+const(char)[] hex_text(ref const(HexView) v, ubyte b, char[] scratch)
+{
+    if (v.textFn)
+    {
+        const(char)[] s = v.textFn(b, cast(void*) v.textUser);
+        if (s.length)
+            return s;
+    }
+    else if (b >= 0x20 && b < 0x7f)
+    {
+        scratch[0] = cast(char) b;
+        return scratch[0 .. 1];
+    }
+
+    scratch[0] = '.';
+    return scratch[0 .. 1];
+}
+
+unittest
+{
+    static const(char)[] upper(ubyte value, void* user)
+    {
+        // Both answers a set gives: a character, and none at all.
+        return value == 'a' ? "A" : null;
+    }
+
+    char[1] ch = void;
+    HexView v;
+
+    assert(hex_text(v, 'a', ch) == "a");
+    assert(hex_text(v, 0, ch) == ".");
+    assert(hex_text(v, 0x7f, ch) == ".");
+
+    v.textFn = &upper;
+    assert(hex_text(v, 'a', ch) == "A");
+    assert(hex_text(v, 'b', ch) == "."); // the set has no character for it
+    assert(hex_text(v, 0, ch) == ".");
 }
 
 // Which nibble the caret boxes: -1 for the whole pair (a read-only view has no
