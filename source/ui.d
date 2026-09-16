@@ -5015,11 +5015,8 @@ void ui_menubar(mu_Context* ctx)
         // shortcut column instead.
         if (mu_menu_item_ex(ctx, "Minimap", minimapEnabled ? "On" : "Off", 0, 0))
             minimapEnabled = minimapEnabled ? 0 : 1;
-        if (mu_menu_item_ex(ctx, "Breadcrumbs", crumbsEnabled
-     ? "On" : "Off", 0, 0))
-            crumbsEnabled
-         = crumbsEnabled
-         ? 0 : 1;
+        if (mu_menu_item_ex(ctx, "Breadcrumbs", crumbsEnabled ? "On" : "Off", 0, 0))
+            crumbsEnabled = crumbsEnabled ? 0 : 1;
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }

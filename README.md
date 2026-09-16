@@ -31,17 +31,19 @@ The `static` configuration links SDL3 in instead, for a binary that runs with
 nothing installed, and needs the libraries built first:
 
 ```
-./build-sdl3-debian.sh      # installs libSDL3.a / libSDL3_ttf.a into ~/.local
 dub build -c static
 ```
 
-Windows uses `build-sdl3.ps1`, which installs into `./install` instead.
+If your platform does not offer SDL3 static libraries, there are helper scripts
+that fetches dependencies and SDL3, builds it, and installs it locally:
+- `./build-sdl3-debian.sh`: installs into `~/.local`
+- `build-sdl3.ps1`: installs into `.\install`
 
 ## Variables
 
 A few environment variables are available for diagnostic purposes.
 
-- `VDDHX_RENDERER`: Force select a renderer for SDL (`software`, `opengl`, `vulkan`, ...). Unset (`auto`, defaults to accelerated).
+- `VDDHX_RENDERER`: Force a renderer for SDL (`software`, `opengl`, `vulkan`, ...). Default: `auto` (accelerated if able).
 
 ## Hacking
 

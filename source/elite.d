@@ -157,7 +157,7 @@ void elite_frame(mu_Context* ctx, int width, int height)
     }
     showing = true;
 
-    version (Screenshot)
+    version (Screenshots)
     {
         // Shots get diffed against a previous run, so a fixed slice is what poses
         // the ship the same way every time.
