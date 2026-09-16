@@ -58,7 +58,7 @@ private mu_Color theme_base(LayoutRole role)
     case printable:  return mu_Color(220, 220, 220, 255);  // off-white
     case whitespace: return mu_Color(120, 170, 200, 255);  // steel blue
     case control:    return mu_Color(200, 130, 90, 255);   // burnt orange (darker)
-    case high:       return mu_Color(150, 190, 130, 255);  // sage green
+    case unmapped:   return mu_Color(150, 190, 130, 255);  // sage green
 
     case magic:      return mu_Color(240, 205, 115, 255);  // gold
     case length:     return mu_Color(120, 195, 235, 255);  // sky blue
@@ -103,9 +103,12 @@ unittest
     // The classifier roles keep the colours the grid has always drawn them in: the
     // panel's own hex_classify is what an uncoloured view uses, and a byte no layout
     // covers must not change colour for having been named through here instead.
+    // hex_classify reads a byte as ASCII, so that is the set the two have to agree on.
     import hexview : hex_classify;
+    import ddhx.transcoder : CharacterSet;
     foreach (ubyte value; [0x00, 'A', '\n', 0x01, 0x7f, 0x80, 0xff])
-        assert(theme_role(layout_classify(value)) == hex_classify(0, value, null));
+        assert(theme_role(layout_classify(value, CharacterSet.ascii))
+            == hex_classify(0, value, null));
 
     assert(theme_edge(0) != theme_edge(1));
 

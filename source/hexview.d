@@ -602,9 +602,12 @@ unittest
     assert(hex_sel_high(v) == 7);
 }
 
-/// Default colour scheme: dim the padding zeros, keep printable ASCII bright,
-/// tint control bytes cool and high-range bytes warm, so structure in a binary
+/// Default colour scheme: dim the padding zeros, keep printable ASCII bright, and tell
+/// control bytes apart from the ones ASCII does not cover, so structure in a binary
 /// (strings, runs of zeros, tables) is legible at a glance.
+///
+/// Reads a byte as ASCII, this being the panel's own default; a host colouring by some
+/// other encoding hands in a colorFn of its own.
 mu_Color hex_classify(size_t offset, ubyte value, void* user)
 {
     if (value == 0)
@@ -613,9 +616,9 @@ mu_Color hex_classify(size_t offset, ubyte value, void* user)
         return mu_Color(220, 220, 220, 255);        // printable ASCII
     if (value == '\t' || value == '\n' || value == '\r')
         return mu_Color(120, 170, 200, 255);        // whitespace controls
-    if (value < 0x20)
-        return mu_Color(200, 130, 90, 255);         // other control bytes
-    return mu_Color(150, 190, 130, 255);            // high range (>= 0x80)
+    if (value < 0x20 || value == 0x7f)
+        return mu_Color(200, 130, 90, 255);         // other control bytes, DEL included
+    return mu_Color(150, 190, 130, 255);            // outside ASCII (>= 0x80)
 }
 
 unittest
@@ -624,7 +627,8 @@ unittest
     assert(hex_coleq(hex_classify(0, 'A', null),  mu_Color(220, 220, 220, 255))); // printable
     assert(hex_coleq(hex_classify(0, '\n', null), mu_Color(120, 170, 200, 255))); // whitespace
     assert(hex_coleq(hex_classify(0, 0x01, null), mu_Color(200, 130, 90, 255)));  // control
-    assert(hex_coleq(hex_classify(0, 0x80, null), mu_Color(150, 190, 130, 255))); // high range
+    assert(hex_coleq(hex_classify(0, 0x7f, null), mu_Color(200, 130, 90, 255)));  // DEL
+    assert(hex_coleq(hex_classify(0, 0x80, null), mu_Color(150, 190, 130, 255))); // unmapped
 }
 
 /// Draw and drive a hex panel.

@@ -1209,14 +1209,16 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
 /// the theme to draw a step off; a byte left to the classifier is never shaded.
 LayoutRole byteRole(View* v, size_t offset, ubyte value, out bool shade)
 {
-    // This provides a fallback if layout isn't answering at position
+    // A container claims the byte but colours nothing, so `none` falls through to the
+    // classifier the same as no span at all.
     LayoutSpan span;
     if (layout_at(v.doc.layout, cast(long) offset, span) && span.role != LayoutRole.none)
     {
         shade = span.shade;
         return span.role;
     }
-    return layout_classify(value);
+    // The document's set, so the colour agrees with the glyph the text lane drew.
+    return layout_classify(value, v.doc.charset);
 }
 
 /// Ditto, as the grid wants it.
@@ -1337,7 +1339,7 @@ const(char)[] viewCrumbs(View* v)
 
     ubyte value;
     if (path.length == 0 && viewByte(v, v.hex.cursor, value))
-        path = layout_role_name(layout_classify(value));
+        path = layout_role_name(layout_classify(value, v.doc.charset));
 
     string format = layout_name(v.doc.layout);
     if (format.length == 0)
