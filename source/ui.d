@@ -9,7 +9,8 @@ import bindbc.sdl;
 import ddlogger;
 import ddui;
 import ddhx.document : FileDocument, IDocument;
-import ddhx.editor : IDocumentEditor, spawnEditor;
+import ddhx.editor : IDocumentEditor;
+import ddhx.editor.piecev4 : PieceV4DocumentEditor;
 import about : about_open, about_frame;
 import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
@@ -25,7 +26,7 @@ import search;
 import split;
 import tabbar;
 import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector;
-import ddhx.transcoder : CharacterSet, charsetID, charsetName, transcode;
+import ddhx.charset : Charset, charsets, ASCII;
 import std.system : Endian;
 import render : render_font_mono;
 import std.array : Appender, appender;
@@ -84,7 +85,7 @@ struct Document
     /// The lane and nothing else. A find pattern names its own encoding (`utf8:`,
     /// `utf16:`) and goes on meaning that whatever this says, there being no such
     /// thing as a pattern whose encoding is implied.
-    CharacterSet charset = CharacterSet.ascii;
+    immutable(Charset)* charset = &ASCII;
 }
 
 /// One way of looking at a document: which document, plus everything about the
@@ -612,7 +613,7 @@ public void ui_new_tab()
     ++untitled;
 
     Document* d = new Document;
-    d.editor = spawnEditor(); // no document: a zero-length, in-memory buffer
+    d.editor = new PieceV4DocumentEditor(true); // no document: a zero-length, in-memory buffer
     d.title  = untitled == 1 ? "untitled" : format("untitled %u", untitled);
     docs ~= d;
 
@@ -1908,7 +1909,7 @@ Document* ui_load(string path)
     try
     {
         IDocument document = new FileDocument(path); // read-only by default
-        ed = spawnEditor();                          // the default backend
+        ed = new PieceV4DocumentEditor(true);
         ed.open(document);
     }
     catch (Exception e)
@@ -2156,7 +2157,7 @@ bool copySelection(bool asText)
             {
                 // The lane as it is drawn, which is the document's set: what you
                 // see is what you get, dots and all.
-                const(char)[] glyph = transcode(b, doc.charset);
+                const(char)[] glyph = doc.charset.glyph(b);
                 if (glyph.length)
                     text.put(glyph);
                 else
@@ -2540,7 +2541,7 @@ immutable Entry[] COMMANDS = [
     Entry("Toggle Breadcrumbs","",            CMD_CRUMBS,       "crumbs path field structure format layout trail"),
     Entry("Toggle Byte Order","",             CMD_ENDIAN,       "endian endianness little big le be swap order inspector pattern"),
     Entry("Columns...",       "",             CMD_COLUMNS,      "width row bytes per line wrap 8 16 24 32 auto fit resize"),
-    Entry("Character Set...", "",             CMD_CHARSET,      "charset encoding text lane ascii cp437 ibm dos oem ebcdic mainframe mac roman"),
+    Entry("Character Set...", "",             CMD_CHARSET,      "charset encoding text lane ascii cp437 ibm dos oem ebcdic mainframe mac roman latin1 iso 8859 win1252 windows"),
     Entry("Keyboard Shortcuts...", "",        CMD_KEYS,          "keys chords bindings help cheat sheet"),
     Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
@@ -3138,7 +3139,7 @@ public void ui_endian_toggle()
 /// Set the document's character set. Per document, so both views of one file read
 /// it the same way. No message: the lane is headed with the set's name and the
 /// bytes under it have just been redrawn through it.
-public void ui_charset_set(CharacterSet set)
+public void ui_charset_set(immutable(Charset)* set)
 {
     doc.charset = set;
 }
@@ -3147,7 +3148,7 @@ public void ui_charset_set(CharacterSet set)
 /// against the document, so both views of one file decode it the same way.
 const(char)[] ui_charset_text(ubyte value, void* user)
 {
-    return transcode(value, (cast(const(Document)*) user).charset);
+    return (cast(const(Document)*) user).charset.glyph(value);
 }
 
 /// Set how many bytes the focused view puts on a row, 0 fitting them to the pane
@@ -3407,8 +3408,8 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         case PromptKind.markName: ui_mark_name_commit(omni_query(omni)); break;
         case PromptKind.columns:  ui_columns_commit(id);                 break;
         case PromptKind.charset:
-            if (id >= 0 && id <= CharacterSet.max)
-                ui_charset_set(cast(CharacterSet) id);
+            if (id >= 0 && id < charsets.length)
+                ui_charset_set(charsets[id]);
             break;
         }
         view.hex.takeFocus = true;
@@ -3442,7 +3443,7 @@ string ui_bookmark_bytes(ref const(Bookmark) mark)
         n += sformat(buf[n .. $], "%02x ", b).length;
     foreach (ubyte b; bytes)
     {
-        const(char)[] glyph = transcode(b, doc.charset);
+        const(char)[] glyph = doc.charset.glyph(b);
         if (glyph.length == 0)
             glyph = ".";
         buf[n .. n + glyph.length] = glyph;
@@ -3670,8 +3671,8 @@ public void ui_charset_prompt()
     settingPreview = SettingPreview(&view(), &doc(), view.hex.columns,
         view.hex.autoColumns, doc.charset, true);
     promptKind = PromptKind.charset;
-    omni_prompt(omni, "ascii, cp437, ebcdic, mac");
-    omni_select(omni, cast(int) doc.charset); // the rows are the enum, in its order
+    omni_prompt(omni, "ascii, cp437, ebcdic037, macroman, latin1, win1252");
+    omni_select(omni, ui_charset_index(doc.charset)); // the rows are ddhx's list, in its order
 }
 
 /// The widths the columns prompt suggests: the conventional 16, its halves and
@@ -3740,9 +3741,18 @@ int ui_columns_baseline()
 }
 
 /// Ditto, the set the character prompt was raised on.
-CharacterSet ui_charset_baseline()
+immutable(Charset)* ui_charset_baseline()
 {
     return settingPreview.active ? settingPreview.charset : doc.charset;
+}
+
+/// Where a set sits in ddhx's list, which is the order the prompt rows follow.
+int ui_charset_index(immutable(Charset)* set)
+{
+    foreach (size_t i, immutable(Charset)* s; charsets)
+        if (s == set)
+            return cast(int) i;
+    return 0;
 }
 
 /// Where a width sits in that list, for the opening highlight.
@@ -3806,14 +3816,13 @@ void ui_columns_rows(scope void delegate(string, string, int, bool, bool, string
 /// full name in the detail column so "code page" and "roman" find one.
 void ui_charset_rows(scope void delegate(string, string, int, bool, bool, string) put)
 {
-    CharacterSet current = ui_charset_baseline();
-    foreach (CharacterSet set; [ CharacterSet.ascii, CharacterSet.cp437,
-                                 CharacterSet.ebcdic, CharacterSet.mac ])
+    immutable(Charset)* current = ui_charset_baseline();
+    foreach (size_t i, immutable(Charset)* set; charsets)
     {
-        string detail = charsetName(set);
+        string detail = set.name;
         if (set == current)
             detail = ui_row_text(detail ~ "  -  current");
-        put(charsetID(set), detail, cast(int) set, false, false, null);
+        put(set.id, detail, cast(int) i, false, false, null);
     }
 }
 
@@ -3829,7 +3838,7 @@ struct SettingPreview
     Document* doc;
     int columns;
     bool autoColumns;
-    CharacterSet charset;
+    immutable(Charset)* charset;
     bool active;
 }
 /// Ditto.
@@ -3865,8 +3874,8 @@ void ui_setting_preview(OmniMode mode)
 
     if (promptKind == PromptKind.columns)
         cast(void) ui_columns_set(id);
-    else if (id <= CharacterSet.max)
-        ui_charset_set(cast(CharacterSet) id);
+    else if (id < charsets.length)
+        ui_charset_set(charsets[id]);
 }
 
 /// Put both settings back to what the box was raised on, the browse still in hand.
@@ -4682,7 +4691,7 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     // another pane takes its document's set with it either way.
     v.hex.textFn    = &ui_charset_text;
     v.hex.textUser  = cast(void*) v.doc;
-    v.hex.textLabel = charsetID(v.doc.charset);
+    v.hex.textLabel = v.doc.charset.id;
 
     // Under the tab and over the grid, where VS Code puts it: the trail belongs to
     // the view, so it goes inside the pane rather than on any window-wide bar, and
@@ -5006,11 +5015,11 @@ void ui_menubar(mu_Context* ctx)
         // The two settings the grid itself shows: what a row holds, and what the
         // text lane reads the bytes through. Both raise the box on a question -
         // hence the ellipsis - rather than stepping, a width being a number to type
-        // and a set being one of four to pick. The value stays in the shortcut
+        // and a set being one of six to pick. The value stays in the shortcut
         // column, so the menu reads as the settings it is.
         if (mu_menu_item_ex(ctx, "Columns...", ui_columns_label(), 0, 0))
             ui_columns_prompt();
-        if (mu_menu_item_ex(ctx, "Character Set...", charsetID(doc.charset).ptr, 0, 0))
+        if (mu_menu_item_ex(ctx, "Character Set...", doc.charset.id.ptr, 0, 0))
             ui_charset_prompt();
         mu_menu_separator(ctx);
         // No native checkmark on a ddui menu item, so the on/off state rides in the

@@ -20,7 +20,7 @@ module layout;
 
 import std.system : Endian;
 
-import ddhx.transcoder : CharacterSet;
+import ddhx.charset : Charset, ASCII;
 
 /// What a span, or a lone byte, is. The theme maps every one of these to a colour.
 enum LayoutRole
@@ -58,72 +58,20 @@ enum LayoutRole
 /// which bucket a byte falls into varies by set; the colours behind the roles never do,
 /// or the grid would mean a different thing per encoding.
 ///
-/// `control` follows the set's own control region rather than whether transcode has a
-/// glyph for the byte: CP437 draws all of C0, and calling those printable would paint a
-/// whole file in one colour.
-LayoutRole layout_classify(ubyte value, CharacterSet set = CharacterSet.ascii)
-{
-    final switch (set) with (CharacterSet) {
-    case ascii:  return classifyASCII(value);
-    case cp437:  return classifyCP437(value);
-    case ebcdic: return classifyEBCDIC(value);
-    case mac:    return classifyMac(value);
-    }
-}
-
-private LayoutRole classifyASCII(ubyte value)
+/// `control` and `whitespace` read the code point the set maps the byte to, not whether
+/// it draws a glyph: CP437 draws all of C0, and calling those printable would paint a
+/// whole file in one colour. `unmapped` is everything else the set has nothing to draw
+/// for, soft hyphen and private use included.
+LayoutRole layout_classify(ubyte value, immutable(Charset)* set = &ASCII)
 {
     if (value == 0)
         return LayoutRole.zero;
-    if (value >= 0x20 && value < 0x7f)
-        return LayoutRole.printable;
-    if (value == '\t' || value == '\n' || value == '\r')
+    dchar c = set.decode(value);
+    if (c == '\t' || c == '\n' || c == '\r' || c == 0x85) // 0x85: NEL, EBCDIC's newline
         return LayoutRole.whitespace;
-    if (value < 0x20 || value == 0x7f)
+    if (c < 0x20 || (c >= 0x7f && c < 0xa0))
         return LayoutRole.control;
-    return LayoutRole.unmapped;
-}
-
-/// Ditto, for a set covering the whole byte range: nothing in CP437 is unmapped, and
-/// the top half is text rather than the "high" bytes ASCII makes of it.
-private LayoutRole classifyCP437(ubyte value)
-{
-    if (value == 0)
-        return LayoutRole.zero;
-    if (value == '\t' || value == '\n' || value == '\r')
-        return LayoutRole.whitespace;
-    if (value < 0x20 || value == 0x7f)
-        return LayoutRole.control;
-    return LayoutRole.printable;
-}
-
-/// Ditto, CCSID 37: the control region runs to 0x40 rather than 0x20, and the newline
-/// family sits where nothing else would look for it.
-private LayoutRole classifyEBCDIC(ubyte value)
-{
-    if (value == 0)
-        return LayoutRole.zero;
-    if (value == 0x05 || value == 0x0d || value == 0x15 || value == 0x25) // HT CR NL LF
-        return LayoutRole.whitespace;
-    if (value < 0x40)
-        return LayoutRole.control;
-    if (value == 0xca || value == 0xff) // the two the set leaves without a character
-        return LayoutRole.unmapped;
-    return LayoutRole.printable;
-}
-
-/// Ditto, Mac OS Roman.
-private LayoutRole classifyMac(ubyte value)
-{
-    if (value == 0)
-        return LayoutRole.zero;
-    if (value == '\t' || value == '\n' || value == '\r')
-        return LayoutRole.whitespace;
-    if (value < 0x20 || value == 0x7f)
-        return LayoutRole.control;
-    if (value == 0xf0) // the Apple logo, which Unicode has no code point for
-        return LayoutRole.unmapped;
-    return LayoutRole.printable;
+    return set.printable(value) ? LayoutRole.printable : LayoutRole.unmapped;
 }
 
 /// What to call a role in the interface, empty for `none`.
@@ -155,41 +103,49 @@ unittest
 /// coloured as though it sat outside the set.
 unittest
 {
-    import ddhx.transcoder : transcode;
+    import ddhx.charset : charsets, findCharset;
 
-    // Letters in the high half, a control region running to 0x40, and the two bytes
-    // CCSID 37 assigns nothing to.
-    assert(layout_classify(0xc1, CharacterSet.ebcdic) == LayoutRole.printable);  // 'A'
-    assert(layout_classify(0x40, CharacterSet.ebcdic) == LayoutRole.printable);  // space
-    assert(layout_classify(0x25, CharacterSet.ebcdic) == LayoutRole.whitespace); // LF
-    assert(layout_classify(0x3f, CharacterSet.ebcdic) == LayoutRole.control);
-    assert(layout_classify(0xff, CharacterSet.ebcdic) == LayoutRole.unmapped);
+    // Letters in the high half, a control region running to 0x40, and soft hyphen,
+    // which the set maps but nothing draws.
+    immutable(Charset)* ebcdic = findCharset("ebcdic037");
+    assert(layout_classify(0xc1, ebcdic) == LayoutRole.printable);  // 'A'
+    assert(layout_classify(0x40, ebcdic) == LayoutRole.printable);  // space
+    assert(layout_classify(0x25, ebcdic) == LayoutRole.whitespace); // LF
+    assert(layout_classify(0x15, ebcdic) == LayoutRole.whitespace); // NEL
+    assert(layout_classify(0x3f, ebcdic) == LayoutRole.control);
+    assert(layout_classify(0xff, ebcdic) == LayoutRole.control);    // U+009F
+    assert(layout_classify(0xca, ebcdic) == LayoutRole.unmapped);
 
     // CP437 spans the whole byte range, so nothing in it is unmapped - but C0 keeps the
     // control colour though the set draws a glyph for every one of those bytes.
-    assert(layout_classify(0x80, CharacterSet.cp437) == LayoutRole.printable); // 'Ç'
-    assert(layout_classify(0x01, CharacterSet.cp437) == LayoutRole.control);   // draws '☺'
+    immutable(Charset)* cp437 = findCharset("cp437");
+    assert(layout_classify(0x80, cp437) == LayoutRole.printable); // 'Ç'
+    assert(layout_classify(0x01, cp437) == LayoutRole.control);   // draws '☺'
     foreach (int i; 0 .. 256)
-        assert(layout_classify(cast(ubyte) i, CharacterSet.cp437) != LayoutRole.unmapped);
+        assert(layout_classify(cast(ubyte) i, cp437) != LayoutRole.unmapped);
 
-    assert(layout_classify(0xf0, CharacterSet.mac) == LayoutRole.unmapped); // the logo
-    assert(layout_classify(0x80, CharacterSet.mac) == LayoutRole.printable);
+    immutable(Charset)* mac = findCharset("macroman");
+    assert(layout_classify(0xf0, mac) == LayoutRole.unmapped); // the logo
+    assert(layout_classify(0x80, mac) == LayoutRole.printable);
 
-    // Bound to the transcoder, so the two cannot drift: what the classifier calls
+    assert(layout_classify(0x85, findCharset("latin1")) == LayoutRole.whitespace);
+    assert(layout_classify(0x80, findCharset("win1252")) == LayoutRole.printable); // '€'
+    assert(layout_classify(0x81, findCharset("win1252")) == LayoutRole.unmapped);
+
+    // Bound to the glyph table, so the two cannot drift: what the classifier calls
     // printable the lane can draw, and what it calls unmapped the lane cannot. Nothing
     // is promised the other way - CP437's controls draw too, which is the whole point
     // of keeping them out of `printable`.
-    foreach (CharacterSet set; [CharacterSet.ascii, CharacterSet.cp437,
-                                CharacterSet.ebcdic, CharacterSet.mac])
+    foreach (immutable(Charset)* set; charsets)
         foreach (int i; 0 .. 256)
         {
             ubyte value = cast(ubyte) i;
             LayoutRole role = layout_classify(value, set);
             assert(role != LayoutRole.none); // it always commits; see LayoutRole.none
             if (role == LayoutRole.printable)
-                assert(transcode(value, set).length);
+                assert(set.printable(value));
             else if (role == LayoutRole.unmapped)
-                assert(transcode(value, set).length == 0);
+                assert(set.printable(value) == false);
         }
 }
 

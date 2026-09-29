@@ -105,9 +105,9 @@ unittest
     // covers must not change colour for having been named through here instead.
     // hex_classify reads a byte as ASCII, so that is the set the two have to agree on.
     import hexview : hex_classify;
-    import ddhx.transcoder : CharacterSet;
+    import ddhx.charset : ASCII;
     foreach (ubyte value; [0x00, 'A', '\n', 0x01, 0x7f, 0x80, 0xff])
-        assert(theme_role(layout_classify(value, CharacterSet.ascii))
+        assert(theme_role(layout_classify(value, &ASCII))
             == hex_classify(0, value, null));
 
     assert(theme_edge(0) != theme_edge(1));

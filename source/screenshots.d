@@ -30,7 +30,7 @@ import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
 import ui;
-import ddhx.transcoder : CharacterSet;
+import ddhx.charset : ASCII;
 
 /// Default output directory, relative to the working directory.
 enum SCREENSHOT_DIR = "screenshots";
@@ -987,7 +987,7 @@ int screenshot_run(string[] args)
     ui_omni_close();
     frame();
 
-    ui_charset_set(CharacterSet.ascii);
+    ui_charset_set(&ASCII);
     cast(void) ui_columns_set(16);
     // And the pointer off the tab strip the menu click left it over, or every shot
     // below this one carries a tab hovered into its close cross.
