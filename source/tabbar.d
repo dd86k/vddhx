@@ -23,6 +23,9 @@ struct TabItem
     /// two copies of a file, when in truth they share an editor, an undo history
     /// and a set of bookmarks.
     int views;
+    /// How far along a job running in the tab is, 0 to 100, drawn as a bar under
+    /// the label. -1 for none.
+    int progress = -1;
 }
 
 /// Persistent strip state; keep one across frames. The scroll offset and the
@@ -114,6 +117,7 @@ private enum int TAB_DOT      = 6; // side of the unsaved-changes dot
 private enum int TAB_GAP      = 3; // strip colour showing between two tabs
 private enum int TAB_PAD      = 2; // added to style.padding for a tab's own insets
 private enum int TAB_INSET    = 4; // strip colour left of the first tab
+private enum int TAB_BAR_H    = 2; // thickness of the job progress bar
 
 // Pixels the pointer must travel with the button down before a click on a tab
 // becomes a drag. Without a threshold every click would jitter the order by a
@@ -653,6 +657,14 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
         string label = ui_elide(ctx, it.label, textW, scratch);
         if (label.length)
             mu_draw_text(ctx, font, label, mu_Vec2(textX, textY), ink);
+    }
+
+    if (it.progress >= 0 && textW > 0)
+    {
+        int y = mu_min(textY + th + 1, r.y + r.h - TAB_BAR_H);
+        mu_draw_rect(ctx, mu_Rect(textX, y, textW, TAB_BAR_H), TAB_CLOSEBG);
+        mu_draw_rect(ctx, mu_Rect(textX, y, textW * mu_min(it.progress, 100) / 100, TAB_BAR_H),
+            TAB_ACCENT);
     }
 
     if (it.modified && closeHot == false)

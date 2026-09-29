@@ -242,6 +242,13 @@ struct HexView
     /// the caret in place; insert splices a fresh byte in and pushes the rest up.
     bool insertMode;
 
+    /// Refuse edits, the write hooks staying bound: the caret still moves.
+    bool readOnly;
+
+    /// Take no pointer or key input at all, only the wheel: whatever the caret is
+    /// waiting on will put it where it belongs.
+    bool locked;
+
     /// Byte the pointer is resting on this frame, or -1 for none. Written by hex_view
     /// on every frame it draws, for a caller with something to say about the byte
     /// under the pointer rather than the one under the caret.
@@ -1141,6 +1148,12 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     if ((ctx.mouse_down & MU_MOUSE_LEFT) == 0)
         v.dragSel = false;
 
+    if (v.locked)
+    {
+        v.hoverByte = -1;
+        return 0;
+    }
+
     int res = 0;
     size_t total = hex_total(v);
     bool editable = hex_editable(v);
@@ -1295,7 +1308,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     // Ctrl+Z steps back, Ctrl+Y (or Ctrl+Shift+Z) forward. The hook refreshes
     // dataSize as a side effect, so hex_total is current for the clamp below.
     if (ctx.focus == id && v.active && (ctx.key_down & MU_KEY_CTRL) &&
-        (v.undoFn || v.redoFn))
+        (v.undoFn || v.redoFn) && v.readOnly == false)
     {
         bool shiftHeld = (ctx.key_down & MU_KEY_SHIFT) != 0;
         bool undoKey = (ctx.key_pressed & HEX_KEY_UNDO) != 0;
@@ -1326,7 +1339,8 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
 // Whether the panel carries the full set of write hooks needed to edit.
 bool hex_editable(ref const(HexView) v)
 {
-    return v.replaceFn && v.insertFn && v.removeFn;
+    return v.readOnly == false && v.locked == false &&
+        v.replaceFn && v.insertFn && v.removeFn;
 }
 
 // Apply one typed hex nibble at the caret, overwriting or inserting per the mode.

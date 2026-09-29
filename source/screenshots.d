@@ -217,7 +217,20 @@ int screenshot_run(string[] args)
     // what lets scenarios close panes without balancing every edit first.
     uiConfirmAuto = ConfirmAuto.discard;
 
-    void frame() { mu_begin(&ctx); ui_frame(&ctx, W, H); mu_end(&ctx); }
+    // Walks answer on their own thread, so a shot taken straight after one would
+    // catch the question rather than the answer.
+    void frame()
+    {
+        import core.thread : Thread;
+        import core.time : msecs;
+        import worker : worker_pump;
+        while (ui_jobs_busy())
+        {
+            Thread.sleep(1.msecs);
+            worker_pump();
+        }
+        mu_begin(&ctx); ui_frame(&ctx, W, H); mu_end(&ctx);
+    }
 
     // Locate a drawn label so scripted clicks do not hardcode layout maths. The
     // walk is in z-index order and the string lives in the per-frame arena, the

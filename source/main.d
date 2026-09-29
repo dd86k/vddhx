@@ -265,6 +265,11 @@ int main(string[] args)
                         mu_input_keyup(ctx, okey);
                     break;
                 }
+                // After the omnibar, whose own Escape closes it: only then does the
+                // key reach a walk the focused tab is waiting on.
+                if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE &&
+                    ui_job_cancel())
+                    break;
                 // Alt+1..9 picks a tab within the focused pane, counting the way
                 // Ctrl+1..9 counts panes: one modifier per level of the grid, so a
                 // number key is never ambiguous about which it means. After the

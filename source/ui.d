@@ -25,6 +25,7 @@ import omnibar;
 import search;
 import split;
 import tabbar;
+import worker : BackgroundWorker, worker_pump, worker_wake;
 import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector;
 import ddhx.charset : Charset, charsets, ASCII;
 import std.system : Endian;
@@ -76,6 +77,16 @@ struct Document
     /// A layout names the order of its own fields and ignores this, formats being
     /// free to mix the two internally.
     Endian endian = Endian.littleEndian;
+
+    /// The find or skip walking these bytes off the UI thread, null until the first.
+    /// The document takes no edits while one runs: a match found before an insert
+    /// would land on the wrong bytes.
+    BackgroundWorker job;
+    /// The view the job was started from, locked until it answers.
+    View* jobView;
+    /// Ditto, when it started: the tab only shows a bar for a walk long enough to
+    /// be seen, or every F3 would flash one.
+    MonoTime jobSince;
 
     /// Which single-byte set the text lane reads the bytes through. Per document
     /// for the same reason the order is: a mainframe dump is EBCDIC in every pane
@@ -602,6 +613,7 @@ __gshared IDocumentEditor pendingSaveTarget;
 public void ui_init(SDL_Window* window)
 {
     uiWindow = window;
+    worker_wake = &ui_wakeup;
     ui_new_tab();
 }
 
@@ -710,6 +722,13 @@ void ui_close_tab_in(Pane* p, size_t index)
     // still be cancelled and leave everything as it was.
     diff_unlink(p.views[index]);
 
+    // Nobody left to land a walk on. The document may live on in another view.
+    if (d.jobView is p.views[index])
+    {
+        d.job.abandon();
+        d.jobView = null;
+    }
+
     // The view is not wanted back: this is the one route where a tab leaves a pane
     // for nowhere rather than for another pane.
     cast(void) ui_take_view(p, index);
@@ -753,6 +772,8 @@ size_t ui_view_count(const(Document)* d)
 /// left showing: every View.doc still held by a pane has to stay valid.
 void ui_drop_document(Document* d)
 {
+    if (d.job)
+        d.job.abandon(); // before the editor it reads through goes
     if (d.editor)
         d.editor.close();
     foreach (size_t i, Document* other; docs)
@@ -2208,6 +2229,8 @@ public void ui_cut_text()
 /// Ditto.
 void cutSelection(bool asText)
 {
+    if (ui_refuse_busy(&doc()))
+        return;
     size_t low, high;
     if (ui_selection(view, low, high) == false)
         return;
@@ -2239,7 +2262,7 @@ void cutSelection(bool asText)
 /// A selection wider than one byte is what the paste replaces, in either mode.
 public void ui_paste()
 {
-    if (doc.editor is null)
+    if (doc.editor is null || ui_refuse_busy(&doc()))
         return;
 
     char* clip = SDL_GetClipboardText(); // caller frees; an empty string on failure
@@ -2369,7 +2392,7 @@ unittest
 /// asked.
 public void ui_undo(bool redo)
 {
-    if (doc.editor is null)
+    if (doc.editor is null || ui_refuse_busy(&doc()))
         return;
 
     void* user = cast(void*) &view();
@@ -3473,6 +3496,88 @@ __gshared char[192] findText;
 /// Ditto, the byte order it was read in.
 __gshared Endian findEndian;
 
+/// Whether a job is walking `d`, in which case it takes no edits.
+bool ui_busy(const(Document)* d)
+{
+    return d.job && d.job.busy;
+}
+
+/// Whether `v` is the view waiting on its document's job.
+bool ui_locked(const(View)* v)
+{
+    return ui_busy(v.doc) && v.doc.jobView is v;
+}
+
+/// Turn down an edit or a second walk on a busy document, saying so rather than
+/// dropping the keystroke. Returns: true when refused.
+bool ui_refuse_busy(const(Document)* d)
+{
+    if (ui_busy(d) == false)
+        return false;
+    ui_status("busy searching %s, Esc cancels", ui_clip(d.title, 32));
+    return true;
+}
+
+/// Percentage for `v`'s tab, -1 when it has none to show.
+int ui_job_progress(const(View)* v)
+{
+    enum Duration QUIET = 150.msecs;
+    if (ui_locked(v) == false || MonoTime.currTime - v.doc.jobSince < QUIET)
+        return -1;
+    return v.doc.job.progress;
+}
+
+/// Walk `v`'s document on a worker thread, then hand `v` to `land` back on this
+/// one. `v` is locked and its document refuses edits until then; a walk that was
+/// cancelled, failed, or outlived the view's hold on the document lands nothing.
+void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*) land)
+{
+    Document* d = v.doc;
+    if (d.job is null)
+        d.job = new BackgroundWorker;
+    BackgroundWorker job = d.job;
+
+    SearchContext* ctx = search_context(&hexRead, cast(void*) d.editor);
+    ctx.cancel   = job.cancelToken();
+    ctx.progress = (int percent) { job.reportProgress(percent); };
+
+    job.doWork   = (BackgroundWorker) { walk(*ctx); };
+    job.workDone = (bool cancelled, Exception error) {
+        d.jobView = null;
+        if (error)
+        {
+            logWarn("search failed: %s", error.msg);
+            ui_status("search failed: %s", ui_clip(error.msg, 44));
+        }
+        else if (cancelled)
+            ui_status("search cancelled");
+        else if (v.doc is d)
+            land(v);
+    };
+    d.jobView  = v;
+    d.jobSince = MonoTime.currTime;
+    job.run();
+}
+
+/// Whether any document is being walked.
+public bool ui_jobs_busy()
+{
+    foreach (const(Document)* d; docs)
+        if (ui_busy(d))
+            return true;
+    return false;
+}
+
+/// Stop the walk the focused view is waiting on. Returns: false when there is none,
+/// so the key can mean something else.
+public bool ui_job_cancel()
+{
+    if (ui_locked(&view()) == false)
+        return false;
+    doc.job.cancel();
+    return true;
+}
+
 /// Look through `v`'s document for the last pattern from `from`, in whichever
 /// direction, and put that view's selection on what turns up. Reports through the
 /// status bar either way: a search that found nothing has to say so, or it reads
@@ -3484,22 +3589,27 @@ void ui_find_step(ref View v, bool backward, long from)
         ui_status("no pattern to find yet");
         return;
     }
-    if (v.doc.editor is null)
+    if (v.doc.editor is null || ui_refuse_busy(v.doc))
         return;
 
+    // Copied, since the find box can take another pattern while this one walks.
     // The length comes back from the search rather than off the needle: a '*' runs
     // for whatever the document held, so only the match knows how much to select.
+    Needle needle = lastNeedle;
+    long size = cast(long) hex_total(v.hex);
+    long at = -1;
     size_t length;
-    long at = search_find(lastNeedle, from, cast(long) hex_total(v.hex),
-        backward, length, &hexRead, cast(void*) v.doc.editor);
-    if (at < 0)
-    {
-        ui_status("not found");
-        return;
-    }
-
-    ui_select_range(v, cast(size_t) at, length);
-    ui_status("found at %#x", at);
+    ui_job(&v, (ref SearchContext ctx) {
+        at = search_find(needle, from, size, backward, length, ctx);
+    }, (View* w) {
+        if (at < 0)
+        {
+            ui_status("not found");
+            return;
+        }
+        ui_select_range(*w, cast(size_t) at, length);
+        ui_status("found at %#x", at);
+    });
 }
 
 /// Repeat the last search from where the caret is. The step off the caret is
@@ -3528,7 +3638,7 @@ public void ui_find_repeat(bool backward)
 /// press stopped on would compare that press's run against itself and stall.
 public void ui_skip_element(bool backward, bool select = false)
 {
-    if (doc.editor is null)
+    if (doc.editor is null || ui_refuse_busy(&doc()))
         return;
 
     long total = cast(long) hex_total(view.hex);
@@ -3564,15 +3674,19 @@ public void ui_skip_element(bool backward, bool select = false)
     if (from >= total && backward == false)
         return;
 
-    long at = search_skip(from, len, total, backward, &hexRead, cast(void*) doc.editor);
-    if (at < 0)
-        return;
-    if (select)
-        hex_extend_caret(view.hex, cast(size_t) skipRunEnd(from, at, backward, total));
-    else if (len > 1)
-        ui_select_range(view, cast(size_t) at, cast(size_t) len);
-    else
-        hex_set_caret(view.hex, cast(size_t) at);
+    long at = -1;
+    ui_job(&view(), (ref SearchContext ctx) {
+        at = search_skip(from, len, total, backward, ctx);
+    }, (View* v) {
+        if (at < 0)
+            return;
+        if (select)
+            hex_extend_caret(v.hex, cast(size_t) skipRunEnd(v, from, at, backward, total));
+        else if (len > 1)
+            ui_select_range(*v, cast(size_t) at, cast(size_t) len);
+        else
+            hex_set_caret(v.hex, cast(size_t) at);
+    });
 }
 
 /// Far end of the run a skip from `from` crossed, given the `at` it landed on:
@@ -3580,12 +3694,11 @@ public void ui_skip_element(bool backward, bool select = false)
 /// whatever comes next. Unless the walk ran into an edge of the document without
 /// finding anything different, where `at` is the last byte of the run itself -
 /// told apart by reading it back, which is one byte either way.
-long skipRunEnd(long from, long at, bool backward, long total)
+long skipRunEnd(View* v, long from, long at, bool backward, long total)
 {
     if (from >= total) // the append slot: the skip took its run from here instead
         from = total - 1;
 
-    View* v = &view();
     ubyte ended, here;
     if (viewByte(v, cast(size_t) at, ended) && viewByte(v, cast(size_t) from, here)
         && ended == here)
@@ -4099,6 +4212,9 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         int spacing = ctx.style.spacing;
         ctx.style.spacing = 0;
         scope(exit) ctx.style.spacing = spacing;
+
+        // Ahead of the panes, so a walk that just answered draws its answer.
+        worker_pump();
 
         // Pick up a file the async Open dialog chose since the last frame.
         if (atomicLoad(pendingReady))
@@ -4650,7 +4766,7 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
         p.items.length = p.views.length;
     foreach (size_t i, View* v; p.views)
         p.items[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited(),
-            cast(int) ui_view_count(v.doc));
+            cast(int) ui_view_count(v.doc), ui_job_progress(v));
 
     // Only the pane taking keys lights its accent, so with several panes open it
     // is never a guess which one a keystroke lands in.
@@ -4692,6 +4808,11 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     v.hex.textFn    = &ui_charset_text;
     v.hex.textUser  = cast(void*) v.doc;
     v.hex.textLabel = v.doc.charset.id;
+
+    // Every view of a document being walked reads on; only the one waiting on the
+    // walk stops taking input, since the answer is about to move its caret.
+    v.hex.readOnly = ui_busy(v.doc);
+    v.hex.locked   = ui_locked(v);
 
     // Under the tab and over the grid, where VS Code puts it: the trail belongs to
     // the view, so it goes inside the pane rather than on any window-wide bar, and
