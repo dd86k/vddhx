@@ -23,6 +23,7 @@ import theme : theme_edge, theme_role;
 import uitext : ui_elide;
 import omnibar;
 import search;
+import patterns : PatternRange;
 import split;
 import tabbar;
 import worker : BackgroundWorker, worker_pump, worker_wake;
@@ -3076,27 +3077,41 @@ bool ui_find_preview(out string label, out string detail)
         return false;
     }
 
-    // The elements as bytes, with '??' for a one-byte wildcard and '**' for a run.
-    // Long patterns are cut off here rather than in the row, which would elide the
-    // tail anyway, so the arena's slice stays short.
+    // The elements as bytes, with '??' for a one-byte wildcard, '**' for a run and
+    // [min..max] for a range. Long patterns are cut off here rather than in the row,
+    // which would elide the tail anyway, so the arena's slice stays short.
     char[128] buf = void;
     size_t at;
     foreach (ushort element; needle.data[0 .. needle.length])
     {
-        if (at + 3 > buf.length - 4) // @suppress(dscanner.suspicious.length_subtraction)
+        if (element == SEARCH_RANGE_TAIL)
+            continue;
+        // Used in previews (e.g., "ff aa ?? ...")
+        char[48] word = void;
+        const(char)[] text;
+        if (element == SEARCH_ANY)
+            text = "??";
+        else if (element == SEARCH_RUN)
+            text = "**";
+        else if (element >= SEARCH_RANGE)
+        {
+            const(PatternRange)* range = &needle.ranges[element - SEARCH_RANGE];
+            text = range.signed
+                ? sformat(word, "[%d..%d]", cast(long) range.min, cast(long) range.max)
+                : sformat(word, "[%u..%u]", range.min, range.max);
+        }
+        else
+            text = sformat(word, "%02x", cast(ubyte) element);
+
+        if (at + 1 + text.length > buf.length - 4) // @suppress(dscanner.suspicious.length_subtraction)
         {
             at += sformat(buf[at .. $], " ...").length;
             break;
         }
         if (at)
             buf[at++] = ' ';
-        if (element == SEARCH_ANY || element == SEARCH_RUN)
-        {
-            buf[at .. at + 2] = element == SEARCH_ANY ? "??" : "**";
-            at += 2;
-        }
-        else
-            at += sformat(buf[at .. $], "%02x", cast(ubyte) element).length;
+        buf[at .. at + text.length] = text;
+        at += text.length;
     }
 
     // A run stands for as many bytes as it takes, so the count is a floor rather

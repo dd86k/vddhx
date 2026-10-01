@@ -20,6 +20,7 @@
 ///   f32:1.0         IEEE-754, the bits a float occupies
 ///   0xde ? 0xef     '?' stands for one byte, whatever it is
 ///   0xde * 0xef     '*' for a run of them, however long
+///   u16:1..9        a value from 1 to 9, both ends included, in its width
 ///
 /// A quote is about escaping rather than encoding - which is the other half of
 /// why it cannot stand in for a prefix - so it says how a token is spelled and
@@ -35,15 +36,21 @@ import core.atomic : atomicLoad;
 import std.system : Endian;
 
 import patterns : pattern, Pattern, patternpfx, PatternType,
-    PATTERN_GLOB_MANY, PATTERN_GLOB_ONE, PATTERN_HAS_GLOB;
+    PatternRange, PATTERN_GLOB_MANY, PATTERN_GLOB_ONE, PATTERN_HAS_GLOB,
+    PATTERN_HAS_RANGE, PATTERN_RANGE, PATTERN_RANGE_TAIL;
 import utils : Argument, arguments;
 
 /// One element of a pattern: a byte value, ANY for "one byte, whatever", or RUN
-/// for "however many bytes, including none". ddhx's own sentinels, so a compiled
+/// for "however many bytes, including none", or part of a range. ddhx's own sentinels, so a compiled
 /// pattern drops straight into a needle.
 enum ushort SEARCH_ANY = PATTERN_GLOB_ONE;
 /// Ditto
 enum ushort SEARCH_RUN = PATTERN_GLOB_MANY;
+/// Head of a value range, plus the range's index in `Needle.ranges`; the rest of
+/// its width is SEARCH_RANGE_TAIL, so a range takes as many elements as bytes.
+enum ushort SEARCH_RANGE = PATTERN_RANGE;
+/// Ditto
+enum ushort SEARCH_RANGE_TAIL = PATTERN_RANGE_TAIL;
 
 /// Longest pattern taken, in elements. A needle is compared at every offset in
 /// the document, so this is a limit on the work one search can be asked to do as
@@ -56,13 +63,15 @@ enum size_t SEARCH_MAX = 256;
 /// its text every frame (see ui.ui_find_needle).
 struct Needle
 {
-    /// Elements, each a byte value, SEARCH_ANY or SEARCH_RUN.
+    /// Elements, each a byte value, SEARCH_ANY, SEARCH_RUN or part of a range.
     ushort[SEARCH_MAX] data;
     /// How many are in use. Not the length of a match, a SEARCH_RUN standing for
     /// as many bytes as it takes: see `search_least`.
     size_t length;
     /// ddhx's pattern flags, PATTERN_HAS_GLOB when a wildcard is among them.
     int flags;
+    /// What SEARCH_RANGE heads index. Never more than the elements they take.
+    PatternRange[SEARCH_MAX] ranges;
 }
 
 /// On-demand byte source, the same shape the hex panel reads through: fill `buf`
@@ -137,6 +146,7 @@ bool search_parse(const(char)[] text, out Needle needle,
     needle.data[0 .. pat.data.length] = pat.data;
     needle.length = pat.data.length;
     needle.flags  = pat.flags;
+    needle.ranges[0 .. pat.ranges.length] = pat.ranges;
     return search_matchable(needle);
 }
 
@@ -387,13 +397,14 @@ void search_advance(ref SearchContext ctx, long bytes)
 bool search_matchable(ref const(Needle) needle)
 {
     foreach (ushort element; needle.data[0 .. needle.length])
-        if (element < SEARCH_ANY)
+        if (element < SEARCH_ANY || element >= SEARCH_RANGE)
             return true;
     return false;
 }
 
 /// One stretch of the needle with no run in it: `length` elements from `at`, each
-/// a byte value or SEARCH_ANY, so it stands for exactly that many bytes.
+/// a byte value, SEARCH_ANY or part of a range, so it stands for exactly that many
+/// bytes. A run never falls inside a range, so neither does a seam.
 struct Segment
 {
     size_t at;
@@ -436,11 +447,21 @@ Segments search_split(ref const(Needle) needle)
 /// caller has already made room for.
 bool search_fits(ref const(Needle) needle, Segment seg, const(ubyte)[] have, size_t at)
 {
-    foreach (size_t i; 0 .. seg.length)
+    size_t i;
+    while (i < seg.length)
     {
         ushort element = needle.data[seg.at + i];
+        if (element >= SEARCH_RANGE)
+        {
+            const(PatternRange)* range = &needle.ranges[element - SEARCH_RANGE];
+            if (range.contains(have[at + i .. $]) == false)
+                return false;
+            i += range.width;
+            continue;
+        }
         if (element != SEARCH_ANY && have[at + i] != cast(ubyte) element)
             return false;
+        ++i;
     }
     return true;
 }
@@ -707,6 +728,14 @@ unittest
     n = parse(`utf8:"?"`);        // said with a prefix, so it is the character
     assert(elems(n) == [ '?' ]);
 
+    // Ranges, a head and as many tails as the width takes.
+    n = parse("u16:1..9 0x00");
+    assert(elems(n) == [ SEARCH_RANGE, SEARCH_RANGE_TAIL, 0 ]);
+    assert(n.flags & PATTERN_HAS_RANGE);
+    assert(n.ranges[0].min == 1 && n.ranges[0].max == 9 && n.ranges[0].width == 2);
+    n = parse("u8:0..255"); // fits every byte, but asked for by value
+    assert(search_least(n) == 1);
+
     // Not patterns.
     Needle bad;
     assert(search_parse("", bad) == false);
@@ -719,6 +748,8 @@ unittest
     assert(search_parse("utf8:'abc", bad) == false); // still being typed
     assert(search_parse("?", bad) == false);      // matches everything: not a search
     assert(search_parse("* ?", bad) == false);
+    assert(search_parse("u8:9..1", bad) == false); // backwards
+    assert(search_parse("u8:1..", bad) == false);  // still being typed
 
     // Nothing in front to say what it is, so there is nothing to search for: no
     // bare text, and no quote standing in for a prefix it cannot spell.
@@ -801,6 +832,24 @@ unittest
     assert(search_parse("0xbe * 0x33", n));
     assert(search_find(n, size - 1, size, true, len, *search_context(&reader, null)) == 8);
     assert(len == 4);
+
+    // Ranges take the width and byte order of their prefix.
+    assert(search_parse("u8:32..64", n));
+    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 10);
+    assert(len == 1);
+    assert(search_parse("i8:-40..-30", n)); // 0xde is -34
+    assert(search_find(n, 1, size, false, len, *search_context(&reader, null)) == 6);
+    assert(search_parse("x:de u8:170..175", n));
+    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 0);
+    assert(len == 2);
+    assert(search_parse("u16:57000..57100", n, Endian.bigEndian)); // de ad
+    assert(search_find(n, 1, size, false, len, *search_context(&reader, null)) == 6);
+    assert(len == 2);
+    assert(search_parse("u16:57000..57100", n));
+    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == -1);
+    assert(search_parse("u8:34..34 * u8:85", n));
+    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 10);
+    assert(len == 6);
 
     // Nowhere in the document, and longer than the document.
     assert(search_parse("0xc0ffee", n));
