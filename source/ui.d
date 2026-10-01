@@ -4819,8 +4819,7 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     // it reads as a caption to the bytes under it. Drawn on every document, parsed
     // or not - the classifier always has a word for the byte under the caret, and a
     // strip that came and went with the format would move the grid under the user.
-    if (crumbsEnabled
-)
+    if (crumbsEnabled)
         crumb_bar(ctx, cast(string) viewCrumbs(v), CANVAS);
 
     // The panel keeps its copy of the size live within a frame; this keeps it
