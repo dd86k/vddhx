@@ -54,6 +54,28 @@ private immutable Icon[MU_ICON_MAX] icons = [
 // Resolved once the faces are open, since the answer depends on what they hold.
 private __gshared immutable(char)*[MU_ICON_MAX] iconText;
 
+// Shaped strings, keyed by face and content: the hex view alone draws two per
+// visible byte each frame, and shaping them anew every time dominated the frame.
+// Entries left unused for TEXT_TTL frames are dropped, so scrolling through
+// offsets does not grow the cache without bound.
+private struct TextKey
+{
+    const(TTF_Font)* font;
+    const(char)[] str;
+
+    size_t toHash() const nothrow @trusted => hashOf(str, cast(size_t) font);
+    bool opEquals(ref const(TextKey) o) const nothrow @safe => font is o.font && str == o.str;
+}
+private struct TextEntry
+{
+    TTF_Text* text;
+    uint frame;
+}
+private enum uint TEXT_TTL = 64;
+private __gshared TextEntry[TextKey] textCache;
+private __gshared TextKey[] textStale; // reused by the sweep
+private __gshared uint textFrame;
+
 version (Windows)
 {
     private immutable string[] uiPaths = [
@@ -202,6 +224,10 @@ string render_init(SDL_Renderer* renderer)
 /// Close every face and tear down the text engine and SDL3_ttf.
 void render_quit()
 {
+    foreach (ref TextEntry e; textCache)
+        TTF_DestroyText(e.text);
+    textCache = null;
+
     foreach (ref f; fallbacks[0 .. fallbackCount])
     {
         TTF_CloseFont(f);
@@ -237,14 +263,15 @@ TTF_Font* render_font_mono() => fontMono;
 extern (C) int render_text_width(mu_Font font, const(char)* str, int len)
 {
     if (len < 0) len = cast(int) strlen(str);
-    // TTF_GetStringSize reads a zero length as "the string is NUL-terminated",
+    // TTF_CreateText reads a zero length as "the string is NUL-terminated",
     // which would run off the end of a caller's slice; an empty string measures
     // zero either way, so answer that here rather than handing it over.
     if (len == 0) return 0;
-    TTF_Font* f = cast(TTF_Font*) font;
-    if (f is null) f = fontUI;
+    TTF_Text* text = cached_text(cast(TTF_Font*) font, str[0 .. len]);
+    if (text is null)
+        return 0;
     int w;
-    TTF_GetStringSize(f, str, len, &w, null);
+    TTF_GetTextSize(text, &w, null);
     return w;
 }
 
@@ -291,6 +318,7 @@ void render_commands(SDL_Renderer* renderer, mu_Context* ctx)
     }
     // Leave clipping disabled for whatever is drawn after us.
     SDL_SetRenderClipRect(renderer, null);
+    sweep_text();
 }
 
 private:
@@ -471,14 +499,9 @@ void draw_rect(SDL_Renderer* renderer, mu_Rect rect, mu_Color color)
 
 void draw_text(mu_Font font, const(char)* str, mu_Vec2 pos, mu_Color color)
 {
-    TTF_Font* f = cast(TTF_Font*) font;
-    if (f is null) f = fontUI;
-
-    // length 0: SDL_ttf treats the string as null-terminated.
-    TTF_Text* text = TTF_CreateText(engine, f, str, 0);
+    TTF_Text* text = cached_text(cast(TTF_Font*) font, str[0 .. strlen(str)]);
     if (text is null)
         return;
-    scope(exit) TTF_DestroyText(text);
 
     TTF_SetTextColor(text, color.r, color.g, color.b, color.a);
     TTF_DrawRendererText(text, pos.x, pos.y);
@@ -492,10 +515,9 @@ void draw_icon(int id, mu_Rect rect, mu_Color color)
     if (glyph is null)
         return;
 
-    TTF_Text* text = TTF_CreateText(engine, fontUI, glyph, 0);
+    TTF_Text* text = cached_text(fontUI, glyph[0 .. strlen(glyph)]);
     if (text is null)
         return;
-    scope(exit) TTF_DestroyText(text);
 
     TTF_SetTextColor(text, color.r, color.g, color.b, color.a);
 
@@ -504,4 +526,35 @@ void draw_icon(int id, mu_Rect rect, mu_Color color)
     int x = rect.x + (rect.w - w) / 2;
     int y = rect.y + (rect.h - h) / 2;
     TTF_DrawRendererText(text, x, y);
+}
+
+TTF_Text* cached_text(TTF_Font* font, const(char)[] str)
+{
+    if (font is null) font = fontUI;
+    if (TextEntry* e = TextKey(font, str) in textCache)
+    {
+        e.frame = textFrame;
+        return e.text;
+    }
+    TTF_Text* text = TTF_CreateText(engine, font, str.ptr, str.length);
+    if (text is null)
+        return null;
+    textCache[TextKey(font, str.idup)] = TextEntry(text, textFrame);
+    return text;
+}
+
+void sweep_text()
+{
+    if (++textFrame % TEXT_TTL)
+        return;
+    textStale.length = 0;
+    textStale.assumeSafeAppend();
+    foreach (TextKey key, ref TextEntry e; textCache)
+        if (textFrame - e.frame >= TEXT_TTL)
+            textStale ~= key;
+    foreach (ref TextKey key; textStale)
+    {
+        TTF_DestroyText(textCache[key].text);
+        textCache.remove(key);
+    }
 }
