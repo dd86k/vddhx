@@ -26,6 +26,8 @@ struct TabItem
     /// How far along a job running in the tab is, 0 to 100, drawn as a bar under
     /// the label. -1 for none.
     int progress = -1;
+    /// Edits refused: a padlock ahead of the label.
+    bool locked;
 }
 
 /// Persistent strip state; keep one across frames. The scroll offset and the
@@ -118,6 +120,7 @@ private enum int TAB_GAP      = 3; // strip colour showing between two tabs
 private enum int TAB_PAD      = 2; // added to style.padding for a tab's own insets
 private enum int TAB_INSET    = 4; // strip colour left of the first tab
 private enum int TAB_BAR_H    = 2; // thickness of the job progress bar
+private enum int TAB_LOCK_W   = 8; // padlock body width; the shackle sits inset on it
 
 // Pixels the pointer must travel with the button down before a click on a tab
 // becomes a drag. Without a threshold every click would jitter the order by a
@@ -490,6 +493,8 @@ int tab_width(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     const(char)[] tag = tab_tag(it, tagbuf);
     if (tag.length)
         tw += ctx.text_width(ctx.style.font, tag.ptr, cast(int) tag.length) + inset;
+    if (it.locked)
+        tw += TAB_LOCK_W + inset;
     return mu_clamp(tw + closeW + inset * 3 + TAB_GAP, bar.minWidth, bar.maxWidth);
 }
 
@@ -608,6 +613,18 @@ unittest
     assert(tab_float_x(500, sliver, 10, 300, 100) == 10);
 }
 
+// A padlock TAB_LOCK_W wide at `x`, centred on a text line `th` high at `y`. Rects
+// rather than a glyph, the UI font not being sure to carry one.
+void tab_lock(mu_Context* ctx, int x, int y, int th, mu_Color ink)
+{
+    enum int BODY_H = 6, SHACKLE_H = 4, STROKE = 2;
+    int top = y + (th - BODY_H - SHACKLE_H) / 2;
+    mu_draw_rect(ctx, mu_Rect(x + 1, top, TAB_LOCK_W - 2, STROKE), ink);
+    mu_draw_rect(ctx, mu_Rect(x + 1, top, STROKE, SHACKLE_H), ink);
+    mu_draw_rect(ctx, mu_Rect(x + TAB_LOCK_W - 1 - STROKE, top, STROKE, SHACKLE_H), ink);
+    mu_draw_rect(ctx, mu_Rect(x, top + SHACKLE_H, TAB_LOCK_W, BODY_H), ink);
+}
+
 // Paint one tab in `r`. Split out of the strip's loop so a tab being dragged can
 // be drawn from the pointer once every other tab is down, and so land on top.
 void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
@@ -634,6 +651,13 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     int textX = r.x + inset;
     int textW = closeR.x - inset - textX;
     int textY = r.y + top + (r.h - top - th) / 2;
+
+    if (it.locked && textW > TAB_LOCK_W + inset)
+    {
+        tab_lock(ctx, textX, textY, th, ink);
+        textX += TAB_LOCK_W + inset;
+        textW -= TAB_LOCK_W + inset;
+    }
 
     // The shared-views count, dropped when the label would have to be elided to fit
     // it: tab_width reserves the room, but a strip squeezed to even shares has less

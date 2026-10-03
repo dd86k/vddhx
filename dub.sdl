@@ -7,7 +7,7 @@ license "MIT"
 dependency "bindbc-sdl" version="==2.4.4"
 dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="c3f59eaed292e06a6fd1a1455e5907f66a6cc24a"
 dependency "ddlogger" repository="git+https://github.com/dd86k/ddlogger.git" version="4397d8e57a88bd6b3a3e5e4c846ba97ac3bfd364"
-dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="fe39025ed8069c620022879e1e5e742d027d9444"
+dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="63428e6b90dc38529b2662932e2fb69458b22dcd"
 
 # bindbc-sdl baselines at SDL 3.2.0
 versions "SDL_TTF_3_2_2"

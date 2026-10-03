@@ -8,7 +8,7 @@ import std.string : fromStringz, toStringz, strip;
 import bindbc.sdl;
 import ddlogger;
 import ddui;
-import ddhx.document : FileDocument, IDocument;
+import ddhx.document : DocCaps, FileDocument, IDocument, OFlags;
 import ddhx.editor : IDocumentEditor;
 import ddhx.editor.piecev4 : PieceV4DocumentEditor;
 import about : about_open, about_frame;
@@ -16,6 +16,8 @@ import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
 import bookmarks;
 import crumbs;
+import disks : DISKS_LISTED, Disk, disks_list, disks_size;
+import elevate : Elevated, elevate_denied, elevate_poll, elevate_request;
 import hexview;
 import layout;
 import layouts.png : PngLayout, png_detect;
@@ -52,6 +54,10 @@ struct Document
 
     /// What the tab shows: the file's base name, or "untitled" for a scratch.
     string title;
+
+    /// Refuses edits until ui_toggle_readonly lifts it. Disks and devices open this
+    /// way: a stray keystroke there lands on bytes no temp file stands between.
+    bool restricted;
 
     /// Bookmarked runs of bytes, sorted. Per document rather than per view, since
     /// an offset only means something against the bytes it points into.
@@ -376,6 +382,7 @@ enum PromptKind
     markName,
     columns,
     charset,
+    openDevice,
 }
 /// Ditto. Read only while the box is up on OmniMode.prompt.
 __gshared PromptKind promptKind;
@@ -1816,10 +1823,15 @@ Pane* ui_view_pane(const(View)* v)
 /// elsewhere. Either way it is one document with two views, never two documents.
 public bool ui_open(string path, bool here = false)
 {
-    Document* d = ui_load(path);
+    Document* d = ui_load(path, true);
     if (d is null)
         return false;
+    return ui_show(d, here);
+}
 
+/// Ditto, for a document already loaded.
+bool ui_show(Document* d, bool here)
+{
     // The focused pane is where the user was working - or, on a drop, the pane the
     // file was let go over.
     Pane* p = focused;
@@ -1878,7 +1890,7 @@ public bool ui_open(string path, bool here = false)
     v.hex.cursor = 0;
     v.hex.anchor = 0;
     hex_reset_scroll(v.hex); // and scroll to the top so that first byte is visible
-    logInfo("opened %s (%s bytes)", path, v.hex.dataSize);
+    logInfo("opened %s (%s bytes)", d.path, v.hex.dataSize);
     return true;
 }
 
@@ -1922,20 +1934,27 @@ string ui_path_key(string path)
 /// Split out of ui_open because a comparison needs the file loaded without a tab
 /// being found for it: the second document goes in a pane of its own rather than
 /// wherever an Open would have landed. See ui_compare_with.
-Document* ui_load(string path)
+///
+/// `elevate` lets a refusal on permissions ask for an elevated open instead, which
+/// lands later through ui_elevated; null comes back meanwhile.
+Document* ui_load(string path, bool elevate = false)
 {
     if (Document* open = ui_find_document(path))
         return open;
 
-    IDocumentEditor ed;
     try
     {
-        IDocument document = new FileDocument(path); // read-only by default
-        ed = new PieceV4DocumentEditor(true);
-        ed.open(document);
+        // Shared, as ddhx opens it: Windows refuses a device the system already
+        // holds to an exclusive open.
+        return ui_adopt(path, new FileDocument(path, OFlags.read | OFlags.exists | OFlags.share));
     }
     catch (Exception e)
     {
+        if (elevate && elevate_denied(e))
+        {
+            ui_elevate(path, false);
+            return null;
+        }
         logWarn("open failed: %s", e.msg);
         // Both callers leave the window as it was, so a file picked from the Open
         // dialog that cannot be read would otherwise look like nothing happened.
@@ -1943,14 +1962,30 @@ Document* ui_load(string path)
         ui_status("cannot open %s: %s", ui_clip(baseName(path), 32), ui_clip(e.msg, 44));
         return null;
     }
+}
+
+/// A new document over `src`, opened at `path` by whichever process could.
+Document* ui_adopt(string path, IDocument src)
+{
+    IDocumentEditor ed = new PieceV4DocumentEditor(true);
+    ed.open(src);
 
     Document* d = new Document;
     docs ~= d;
     d.editor = ed;
     d.path   = path; // in-place Save now has a target
     d.title  = baseName(path);
+    d.restricted = ui_fixed(d);
     detectLayout(d);
     return d;
+}
+
+/// Whether `d` sits on a medium a save writes into rather than replaces: a disk or
+/// device, where renaming a temp file over the path would destroy the node.
+bool ui_fixed(Document* d)
+{
+    IDocument src = d.editor ? d.editor.document() : null;
+    return src && (src.caps() & DocCaps.replace) == 0;
 }
 
 /// Whether `d` is a scratch buffer nothing has been done to: no path, no edits
@@ -1968,13 +2003,31 @@ bool scratchEmpty(ref Document d)
 /// over atomically. The read-only source handle keeps referencing the original
 /// inode across that, so the editor and its undo history survive without a reopen.
 /// Returns false, and leaves the file untouched, if the write fails.
+///
+/// A disk or device is the exception: its own path is written in place, and any
+/// other is a copy taken of it, leaving its edits pending against the medium.
 bool saveTo(ref Document d, string path)
 {
     import std.stdio : File;
-    import std.file : rename, exists, remove;
+    import std.file : rename, exists, remove, isFile;
 
     if (d.editor is null)
         return false;
+
+    bool fixed = ui_fixed(&d);
+    if (fixed && path == d.path)
+        return saveInPlace(d);
+
+    // Renaming over a device node replaces the node rather than writing the device.
+    try
+    {
+        if (exists(path) && isFile(path) == false)
+        {
+            ui_status("%s is not a regular file", ui_clip(baseName(path), 40));
+            return false;
+        }
+    }
+    catch (Exception) {} // unreadable metadata: let the write report it
 
     IDocumentEditor editor = d.editor;
     long docsize = editor.size();
@@ -2006,8 +2059,56 @@ bool saveTo(ref Document d, string path)
         return false;
     }
 
-    editor.markSaved();
+    if (fixed == false)
+        editor.markSaved();
     logInfo("saved %s (%s bytes)", path, docsize);
+    return true;
+}
+
+/// Write `d`'s edits into its medium through the document's own handle, which
+/// after an elevated reopen is the only one holding write access.
+bool saveInPlace(ref Document d)
+{
+    import ddhx.editor.base : PieceInfo;
+    import std.algorithm.comparison : min;
+
+    FileDocument src = cast(FileDocument) d.editor.document();
+    if (src is null || src.writable() == false)
+    {
+        ui_status("%s is read-only; turn off Edit > Read-Only first", ui_clip(d.title, 32));
+        return false;
+    }
+
+    IDocumentEditor editor = d.editor;
+    try
+    {
+        // Read before preserving, which turns displaced pieces into buffered ones
+        // but leaves where they land alone.
+        PieceInfo[] pieces = editor.dirtyPieceInfos(true);
+        bool preserved = editor.prepareInplaceSave();
+        ubyte[] buf = new ubyte[64 * 1024];
+        foreach (ref PieceInfo piece; pieces)
+        {
+            for (long off; off < piece.size; off += buf.length)
+            {
+                size_t len = cast(size_t) min(piece.size - off, buf.length);
+                long at = piece.logicalPos + off;
+                src.writeAt(at, editor.view(at, buf[0 .. len]));
+            }
+        }
+        src.flush();
+        if (preserved)
+            editor.markSaved();
+        else
+            editor.open(src); // history pointed into what was just overwritten
+    }
+    catch (Exception e)
+    {
+        logWarn("save failed: %s", e.msg);
+        ui_status("cannot save %s: %s", ui_clip(d.title, 32), ui_clip(e.msg, 44));
+        return false;
+    }
+    logInfo("saved %s in place", d.path);
     return true;
 }
 
@@ -2027,6 +2128,124 @@ extern (C) void ui_on_save_picked(void* user, const(char*)* fileList, int filter
     pendingSavePath[n] = 0;
     atomicStore(pendingSaveReady, true);
     ui_wakeup();
+}
+
+/// Flip the focused document's read-only state. Turning it on only stops edits;
+/// turning it off on a disk opened without write access reopens it with that
+/// access first, the editor starting over on the new handle - which loses nothing,
+/// a handle without write access never having let an edit through.
+public void ui_toggle_readonly()
+{
+    Document* d = &doc();
+    if (d.restricted == false)
+    {
+        d.restricted = true;
+        ui_status("%s is read-only", ui_clip(d.title, 40));
+        return;
+    }
+    if (ui_refuse_busy(d))
+        return;
+
+    // A file saves by replacing it, so its own handle never needs write access.
+    FileDocument src = cast(FileDocument) d.editor.document();
+    if (ui_fixed(d) && src && src.writable() == false)
+    {
+        FileDocument rw;
+        try
+            rw = new FileDocument(d.path, OFlags.readWrite | OFlags.exists | OFlags.share);
+        catch (Exception e)
+        {
+            if (elevate_denied(e))
+            {
+                ui_elevate(d.path, true);
+                return;
+            }
+            logWarn("read-only off: %s", e.msg);
+            ui_status("cannot open %s for writing: %s", ui_clip(d.title, 32), ui_clip(e.msg, 44));
+            return;
+        }
+        ui_swap_source(d, rw);
+    }
+
+    d.restricted = false;
+    ui_status(ui_fixed(d) ? "%s is editable; Save writes into it directly" : "%s is editable",
+        ui_clip(d.title, 40));
+}
+
+/// Put up the system's prompt for opening `path` with the rights this process
+/// lacks; ui_elevated takes the handle once it is answered.
+void ui_elevate(string path, bool write)
+{
+    if (elevate_request(path, write, &ui_wakeup) == false)
+    {
+        ui_status("a permission prompt is already up");
+        return;
+    }
+    ui_status("asking for permission to %s %s", write ? "write" : "open",
+        ui_clip(baseName(path), 40));
+}
+
+/// Land an elevated open: a tab for a plain one, write access for the document
+/// that asked for it. A handle nothing wants any more is closed.
+void ui_elevated(ref Elevated answer)
+{
+    if (answer.error.length)
+    {
+        logWarn("elevated open of %s: %s", answer.path, answer.error);
+        ui_status("cannot open %s: %s", ui_clip(baseName(answer.path), 32),
+            ui_clip(answer.error, 44));
+        return;
+    }
+
+    OFlags flags = OFlags.exists | (answer.write ? OFlags.readWrite : OFlags.read);
+    FileDocument src;
+    try
+        src = new FileDocument(answer.handle, flags, answer.path);
+    catch (Exception e)
+    {
+        ui_status("cannot open %s: %s", ui_clip(baseName(answer.path), 32), ui_clip(e.msg, 44));
+        return;
+    }
+
+    Document* d = ui_find_document(answer.path);
+    if (answer.write)
+    {
+        // The tab could have closed, or taken edits, while the prompt was up.
+        if (d is null || d.restricted == false || ui_busy(d))
+        {
+            src.close();
+            return;
+        }
+        ui_swap_source(d, src);
+        d.restricted = false;
+        ui_status("%s is editable; Save writes into it directly", ui_clip(d.title, 40));
+        return;
+    }
+
+    if (d) // opened another way meanwhile
+    {
+        src.close();
+        cast(void) ui_show(d, false);
+        return;
+    }
+    try
+        d = ui_adopt(answer.path, src);
+    catch (Exception e)
+    {
+        src.close();
+        ui_status("cannot open %s: %s", ui_clip(baseName(answer.path), 32), ui_clip(e.msg, 44));
+        return;
+    }
+    cast(void) ui_show(d, false);
+}
+
+/// Put `d`'s editor on `src`, the same bytes through another handle.
+void ui_swap_source(Document* d, IDocument src)
+{
+    IDocument old = d.editor.document();
+    d.editor.open(src);
+    if (old)
+        old.close();
 }
 
 /// Save the open document. With a known path it writes in place and reports whether
@@ -2076,7 +2295,8 @@ void ui_save_pending(string dest)
             return;
         }
 
-        if (saveTo(*d, dest))
+        // A disk's copy is a snapshot: the tab stays on the disk.
+        if (saveTo(*d, dest) && ui_fixed(d) == false)
         {
             d.path  = dest;
             d.title = baseName(dest);
@@ -2230,7 +2450,7 @@ public void ui_cut_text()
 /// Ditto.
 void cutSelection(bool asText)
 {
-    if (ui_refuse_busy(&doc()))
+    if (ui_refuse_edit(&doc()))
         return;
     size_t low, high;
     if (ui_selection(view, low, high) == false)
@@ -2263,7 +2483,7 @@ void cutSelection(bool asText)
 /// A selection wider than one byte is what the paste replaces, in either mode.
 public void ui_paste()
 {
-    if (doc.editor is null || ui_refuse_busy(&doc()))
+    if (doc.editor is null || ui_refuse_edit(&doc()))
         return;
 
     char* clip = SDL_GetClipboardText(); // caller frees; an empty string on failure
@@ -2393,7 +2613,7 @@ unittest
 /// asked.
 public void ui_undo(bool redo)
 {
-    if (doc.editor is null || ui_refuse_busy(&doc()))
+    if (doc.editor is null || ui_refuse_edit(&doc()))
         return;
 
     void* user = cast(void*) &view();
@@ -2509,12 +2729,17 @@ struct Entry
     string keywords;
 }
 
+/// The disk list only exists where disks_list knows how to read it; elsewhere the
+/// same prompt takes a typed path alone.
+enum string OPEN_DEVICE_LABEL = DISKS_LISTED ? "Open Disk..." : "Open Path...";
+
 /// Commands the omnibar's '>' mode offers. The menus' own actions, so anything
 /// reachable by mouse is reachable by typing its name; ddhx's document-level
 /// commands (go to offset, search, ...) join this table as ddhx exposes them.
 enum
 {
-    CMD_NEW_TAB, CMD_OPEN, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS, CMD_CLOSE_TAB,
+    CMD_NEW_TAB, CMD_OPEN, CMD_OPEN_DEVICE, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS,
+    CMD_CLOSE_TAB, CMD_READONLY,
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE, CMD_GOTO,
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT, CMD_STRUCTURE,
     CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
@@ -2528,11 +2753,13 @@ enum
 immutable Entry[] COMMANDS = [
     Entry("New Tab",          "Ctrl+T",       CMD_NEW_TAB,      "create buffer"),
     Entry("Open File...",     "Ctrl+O",       CMD_OPEN,         "load edit read"),
+    Entry(OPEN_DEVICE_LABEL,  "",             CMD_OPEN_DEVICE,  "disk drive device volume partition physical raw block path type"),
     Entry("Compare With...",  "",             CMD_COMPARE,      "diff difference against versus changes"),
     Entry("Stop Comparing",   "",             CMD_COMPARE_STOP, "undiff end diff close comparison"),
     Entry("Save",             "Ctrl+S",       CMD_SAVE,         "write store commit"),
     Entry("Save As...",       "Ctrl+Shift+S", CMD_SAVE_AS,      "write export copy to"),
     Entry("Close Tab",        "Ctrl+W",       CMD_CLOSE_TAB,    "shut document"),
+    Entry("Toggle Read-Only", "",             CMD_READONLY,     "readonly lock unlock writable allow editing restricted protect elevate admin root"),
     Entry("Undo",             "Ctrl+Z",       CMD_UNDO,         "back revert history step"),
     Entry("Redo",             "Ctrl+Y",       CMD_REDO,         "forward again history step"),
     Entry("Cut",              "Ctrl+X",       CMD_CUT,          "clipboard remove delete"),
@@ -2850,6 +3077,9 @@ const(OmniItem)[] ui_omni_items()
             break;
         case PromptKind.charset:
             ui_charset_rows(&put);
+            break;
+        case PromptKind.openDevice:
+            ui_device_rows(&put);
             break;
         }
         break;
@@ -3449,6 +3679,9 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             if (id >= 0 && id < charsets.length)
                 ui_charset_set(charsets[id]);
             break;
+        case PromptKind.openDevice:
+            ui_device_commit(id);
+            return; // an opened tab took the focus already
         }
         view.hex.takeFocus = true;
         break;
@@ -3530,6 +3763,17 @@ bool ui_refuse_busy(const(Document)* d)
     if (ui_busy(d) == false)
         return false;
     ui_status("busy searching %s, Esc cancels", ui_clip(d.title, 32));
+    return true;
+}
+
+/// Ditto, for an edit, which a restricted document refuses as well.
+bool ui_refuse_edit(const(Document)* d)
+{
+    if (ui_refuse_busy(d))
+        return true;
+    if (d.restricted == false)
+        return false;
+    ui_status("%s is read-only; turn off Edit > Read-Only", ui_clip(d.title, 32));
     return true;
 }
 
@@ -3803,6 +4047,52 @@ public void ui_charset_prompt()
     omni_select(omni, ui_charset_index(doc.charset)); // the rows are ddhx's list, in its order
 }
 
+/// Ask for a disk to open, or a path typed out: the way to a device the native
+/// dialog will not show, and the only way on a system whose disks are not listed.
+public void ui_open_device_prompt()
+{
+    deviceRows = disks_list();
+    deviceLabels.length = deviceRows.length;
+    deviceDetails.length = deviceRows.length;
+    foreach (size_t i, ref const(Disk) disk; deviceRows)
+    {
+        string name = disk.name.length ? disk.name : baseName(disk.path);
+        deviceLabels[i] = disk.part ? "    " ~ name : name;
+        deviceDetails[i] = disk.size ? disk.path ~ "  " ~ disks_size(disk.size) : disk.path;
+    }
+    promptKind = PromptKind.openDevice;
+    omni_prompt(omni, DISKS_LISTED ? "pick a disk, or type a path" : "type a path to open");
+}
+
+/// What ui_open_device_prompt found, kept for as long as the box is up rather than
+/// asked for again every frame.
+__gshared Disk[] deviceRows;
+/// Ditto, as the rows show them.
+__gshared string[] deviceLabels, deviceDetails;
+
+/// The disks, plus the typed text as a path of its own once it looks like one: a
+/// model name typed to narrow the list is not a file to open.
+void ui_device_rows(scope void delegate(string, string, int, bool, bool, string) put)
+{
+    import std.string : indexOfAny;
+
+    const(char)[] query = omni_query(omni);
+    if (query.indexOfAny(`/\:`) >= 0)
+        put(ui_row_text(query), "open this path", cast(int) deviceRows.length, false, true, null);
+    foreach (size_t i, ref const(Disk) disk; deviceRows)
+        put(deviceLabels[i], deviceDetails[i], cast(int) i, false, false, disk.path);
+}
+
+/// Open the disk at row `id`, or the typed path for the row past the last disk.
+void ui_device_commit(int id)
+{
+    if (id >= 0 && id < deviceRows.length)
+        cast(void) ui_open(deviceRows[id].path);
+    else if (id == deviceRows.length)
+        cast(void) ui_open(omni_query(omni).idup);
+    view.hex.takeFocus = true;
+}
+
 /// The widths the columns prompt suggests: the conventional 16, its halves and
 /// doubles, and auto. Anything else is typed.
 immutable int[5] COLUMN_SUGGESTED = [ 8, 16, 24, 32, 0 ];
@@ -3977,7 +4267,7 @@ __gshared SettingPreview settingPreview;
 void ui_setting_preview(OmniMode mode)
 {
     if (mode != OmniMode.prompt || ui_omni_active() == false
-        || promptKind == PromptKind.markName)
+        || promptKind == PromptKind.markName || promptKind == PromptKind.openDevice)
     {
         ui_setting_restore(); // the box moved on, or the question was another one
         return;
@@ -4134,6 +4424,7 @@ void ui_omni_run(int id)
     switch (id) {
     case CMD_NEW_TAB:   ui_new_tab();          break;
     case CMD_OPEN:      ui_open_dialog();      break;
+    case CMD_READONLY:  ui_toggle_readonly();  break;
     case CMD_COMPARE:   ui_compare_dialog();   break;
     case CMD_COMPARE_STOP: ui_compare_stop();  break;
     case CMD_SAVE:      cast(void)ui_save();             break;
@@ -4174,6 +4465,7 @@ void ui_omni_run(int id)
     case CMD_MARK_NAME: ui_mark_name();              return;
     case CMD_COLUMNS:   ui_columns_prompt();         return;
     case CMD_CHARSET:   ui_charset_prompt();         return;
+    case CMD_OPEN_DEVICE: ui_open_device_prompt();   return;
     case CMD_KEYS:      ui_omni_open(OMNI_HELP);     return;
     case CMD_ABOUT:     about_open();          break;
     case CMD_QUIT:
@@ -4244,6 +4536,10 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             else
                 cast(void) ui_open(picked);
         }
+
+        Elevated answer;
+        if (elevate_poll(answer))
+            ui_elevated(answer);
 
         // Likewise a Save As destination, adopted as the document's home so later
         // saves land in place without asking again.
@@ -4781,7 +5077,7 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
         p.items.length = p.views.length;
     foreach (size_t i, View* v; p.views)
         p.items[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited(),
-            cast(int) ui_view_count(v.doc), ui_job_progress(v));
+            cast(int) ui_view_count(v.doc), ui_job_progress(v), v.doc.restricted);
 
     // Only the pane taking keys lights its accent, so with several panes open it
     // is never a guess which one a keystroke lands in.
@@ -4826,8 +5122,10 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
 
     // Every view of a document being walked reads on; only the one waiting on the
     // walk stops taking input, since the answer is about to move its caret.
-    v.hex.readOnly = ui_busy(v.doc);
+    v.hex.readOnly = ui_busy(v.doc) || v.doc.restricted;
     v.hex.locked   = ui_locked(v);
+    if (ui_fixed(v.doc))
+        v.hex.insertMode = false; // the extent cannot grow or shrink
 
     // Under the tab and over the grid, where VS Code puts it: the trail belongs to
     // the view, so it goes inside the pane rather than on any window-wide bar, and
@@ -5067,6 +5365,7 @@ void ui_menubar(mu_Context* ctx)
         // anything, the way every desktop toolkit marks them.
         if (mu_menu_item_ex(ctx, "New Tab",    "Ctrl+T",       0, 0)) ui_new_tab();
         if (mu_menu_item_ex(ctx, "Open...",    "Ctrl+O",       0, 0)) ui_open_dialog();
+        if (mu_menu_item_ex(ctx, OPEN_DEVICE_LABEL.ptr, "",    0, 0)) ui_open_device_prompt();
         mu_menu_separator(ctx);
         // The pair reads as one thing, so the end of a comparison sits with its
         // start rather than being hunted for in another menu.
@@ -5091,6 +5390,8 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "Edit"))
     {
         ctx.style.padding = itemPadding;
+        if (mu_menu_item_ex(ctx, "Read-Only", doc.restricted ? "On" : "Off", 0, 0)) ui_toggle_readonly();
+        mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Undo",  "Ctrl+Z", 0, 0)) ui_undo(false);
         if (mu_menu_item_ex(ctx, "Redo",  "Ctrl+Y", 0, 0)) ui_undo(true);
         mu_menu_separator(ctx);

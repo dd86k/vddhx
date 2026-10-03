@@ -529,6 +529,12 @@ int screenshot_run(string[] args)
     frame();
     shot("tabs-select.bmp");
 
+    // A read-only document says so on its tab.
+    ui_toggle_readonly();
+    frame();
+    shot("tab-readonly.bmp");
+    ui_toggle_readonly();
+
     // The pointer resting on a tab puts the document's full path up, which is what
     // the tab has no room for. Real time has to pass: the tip is on a delay, and a
     // scripted run draws its frames faster than a hand can hold still.

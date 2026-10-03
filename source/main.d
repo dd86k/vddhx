@@ -7,6 +7,7 @@ import ddlogger;
 import bindbc.sdl;
 import ddui;
 import hexview;
+import elevate : ELEVATE_ARG, elevate_helper;
 import icon : icon_apply;
 import loader;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
@@ -17,6 +18,10 @@ version (Screenshots) import screenshots;
 
 int main(string[] args)
 {
+    // The elevated copy elevate.d starts: one open, no window.
+    if (args.length > 1 && args[1] == ELEVATE_ARG)
+        return elevate_helper(args[2 .. $]);
+
     // Ideally, should be logging to a file (appdata etc.),
     // but this is a stopgap to see if loader loads proper
     logAddAppender(new ConsoleAppender());
