@@ -1,7 +1,7 @@
 /// Per-second frame timings, to judge whether skipping unchanged frames pays.
 ///
-/// Observes only: every frame is still drawn and presented, the hash is taken to
-/// count the ones mu_frame_dirty would have skipped.
+/// Build and hash average over every frame built, render and present over the
+/// ones mu_frame_dirty let through.
 module framestats;
 
 version (FrameStats):
@@ -18,9 +18,7 @@ private __gshared
     MonoTime phaseStart;
     Duration[Phase.max + 1] spent;
     Duration[Phase.max + 1] worst;
-    size_t events, frames, unchanged, commands;
-    mu_Id lastHash;
-    bool haveHash;
+    size_t events, frames, skipped, commands;
 }
 
 void stats_event()
@@ -46,19 +44,17 @@ void stats_end(Phase phase)
     phaseStart = now;
 }
 
-/// Times the hash and counts the frame as one a skip would have dropped.
-void stats_hash(mu_Context* ctx)
+/// Closes the hash phase, timing mu_frame_dirty.
+void stats_dirty(mu_Context* ctx, bool dirty)
 {
-    mu_Id h = mu_frame_hash(ctx);
-    if (haveHash && h == lastHash)
-        ++unchanged;
-    lastHash = h;
-    haveHash = true;
+    if (dirty == false)
+        ++skipped;
     commands += ctx.command_list.idx;
     stats_end(Phase.hash);
 }
 
-/// Logs and resets once a second has passed, and only if frames were built.
+/// Call once per frame built, skipped or not. Logs and resets once a second has
+/// passed.
 void stats_frame_done()
 {
     ++frames;
@@ -68,16 +64,17 @@ void stats_frame_done()
 
     static double us(Duration d) { return d.total!"hnsecs" / 10.0; }
     double n = frames;
-    logInfo("frames %u (unchanged %u) events %u cmds/frame %.0f | avg/max us: "~
+    double p = frames > skipped ? frames - skipped : 1;
+    logInfo("frames %u (skipped %u) events %u cmds/frame %.0f | avg/max us: "~
         "build %.0f/%.0f hash %.0f/%.0f render %.0f/%.0f present %.0f/%.0f",
-        frames, unchanged, events, commands / n,
+        frames, skipped, events, commands / n,
         us(spent[Phase.build])   / n, us(worst[Phase.build]),
         us(spent[Phase.hash])    / n, us(worst[Phase.hash]),
-        us(spent[Phase.render])  / n, us(worst[Phase.render]),
-        us(spent[Phase.present]) / n, us(worst[Phase.present]));
+        us(spent[Phase.render])  / p, us(worst[Phase.render]),
+        us(spent[Phase.present]) / p, us(worst[Phase.present]));
 
     spent[] = Duration.zero;
     worst[] = Duration.zero;
-    events = frames = unchanged = commands = 0;
+    events = frames = skipped = commands = 0;
     windowStart = now;
 }

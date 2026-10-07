@@ -152,6 +152,11 @@ int main(string[] args)
                 if (ui_may_quit())
                     running = false;
                 break;
+            case SDL_EVENT_WINDOW_FIRST: .. case SDL_EVENT_WINDOW_LAST:
+            case SDL_EVENT_RENDER_TARGETS_RESET, SDL_EVENT_RENDER_DEVICE_RESET:
+                // The back buffer is stale or gone, whatever ddui thinks of it.
+                mu_invalidate(ctx);
+                break;
             case SDL_EVENT_MOUSE_MOTION:
                 mu_input_mousemove(ctx, cast(int) event.motion.x, cast(int) event.motion.y);
                 break;
@@ -217,6 +222,7 @@ int main(string[] args)
                         event.key.mod & SDL_KMOD_SHIFT)
                     {
                         wantShot = true;
+                        mu_invalidate(ctx);
                         break;
                     }
                 }
@@ -415,10 +421,19 @@ int main(string[] args)
         mu_begin(ctx);
         ui_frame(ctx, width, height);
         mu_end(ctx);
-        version (FrameStats)
+        version (FrameStats) stats_end(Phase.build);
+
+        bool dirty = mu_frame_dirty(ctx);
+        version (FrameStats) stats_dirty(ctx, dirty);
+        if (dirty == false)
         {
-            stats_end(Phase.build);
-            stats_hash(ctx);
+            --frames;
+            // No present to wait on vsync, so pace a pending tooltip here
+            // rather than spin on it.
+            if (ui_animating())
+                SDL_WaitEventTimeout(null, 1000 / 60);
+            version (FrameStats) stats_frame_done();
+            continue;
         }
 
         SDL_SetRenderDrawColor(renderer, 30, 30, 46, 255);

@@ -188,6 +188,8 @@ void elite_frame(mu_Context* ctx, int width, int height)
     mu_draw_rect(ctx, r, PANEL_COLOR);
     mu_Command* cmd = mu_push_command(ctx, MU_COMMAND_SHIP);
     cmd.rect.rect = r;
+    // ddui hashes only its own commands, and the ship moves every frame.
+    mu_invalidate(ctx);
 
     // ddui has no centred mu_label, so draw into the cell with the alignment bit.
     mu_layout_row(ctx, 1, full.ptr, 0);
