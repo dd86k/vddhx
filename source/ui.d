@@ -783,7 +783,14 @@ void ui_drop_document(Document* d)
     if (d.job)
         d.job.abandon(); // before the editor it reads through goes
     if (d.editor)
+    {
+        import core.memory : GC;
+        // Close, destroy object (which closes underlaying handles),
+        // and force a collection to push it through (destroy doesn't collect).
         d.editor.close();
+        destroy( d.editor );
+        GC.collect();
+    }
     foreach (size_t i, Document* other; docs)
     {
         if (other !is d)
