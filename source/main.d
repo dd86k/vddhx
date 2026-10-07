@@ -1,6 +1,7 @@
 /// Main loop.
 module main;
 
+import core.time : MonoTime, Duration, nsecs;
 import std.format : format;
 import std.string : fromStringz, toStringz;
 import ddlogger;
@@ -112,6 +113,9 @@ int main(string[] args)
 
     bool running = true;
     int frames = FRAMES_PER_INPUT; // the first frame is owed to nothing: draw it
+    Duration interval = frameInterval(window);
+    MonoTime frameStart;
+    bool skipped;
     version (Screenshots) bool wantShot;
     while (running)
     {
@@ -128,6 +132,16 @@ int main(string[] args)
             // back to sleep on it would spin the loop at full speed instead.
             logCritical("SDL_WaitEvent: %s", SDL_GetError().fromStringz);
             break;
+        }
+
+        // Nothing was presented last frame, so nothing waited on vsync: hold the
+        // loop to the refresh rate, or motion would build frames nobody sees.
+        // Before the drain, so whatever arrives while waiting makes this frame.
+        if (skipped)
+        {
+            Duration left = interval - (MonoTime.currTime - frameStart);
+            if (left > Duration.zero)
+                SDL_DelayPrecise(left.total!"nsecs");
         }
 
         SDL_Event event = void;
@@ -156,6 +170,8 @@ int main(string[] args)
             case SDL_EVENT_RENDER_TARGETS_RESET, SDL_EVENT_RENDER_DEVICE_RESET:
                 // The back buffer is stale or gone, whatever ddui thinks of it.
                 mu_invalidate(ctx);
+                if (event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED)
+                    interval = frameInterval(window);
                 break;
             case SDL_EVENT_MOUSE_MOTION:
                 mu_input_mousemove(ctx, cast(int) event.motion.x, cast(int) event.motion.y);
@@ -417,6 +433,7 @@ int main(string[] args)
 
         int width, height;
         SDL_GetWindowSize(window, &width, &height);
+        frameStart = MonoTime.currTime;
         version (FrameStats) stats_begin();
         mu_begin(ctx);
         ui_frame(ctx, width, height);
@@ -424,14 +441,11 @@ int main(string[] args)
         version (FrameStats) stats_end(Phase.build);
 
         bool dirty = mu_frame_dirty(ctx);
+        skipped = dirty == false;
         version (FrameStats) stats_dirty(ctx, dirty);
         if (dirty == false)
         {
             --frames;
-            // No present to wait on vsync, so pace a pending tooltip here
-            // rather than spin on it.
-            if (ui_animating())
-                SDL_WaitEventTimeout(null, 1000 / 60);
             version (FrameStats) stats_frame_done();
             continue;
         }
@@ -467,6 +481,14 @@ int main(string[] args)
     }
 
     return 0;
+}
+
+/// One refresh of the display the window is on, 60 Hz when it will not say.
+Duration frameInterval(SDL_Window* window)
+{
+    const(SDL_DisplayMode)* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+    float hz = mode && mode.refresh_rate > 0 ? mode.refresh_rate : 60;
+    return nsecs(cast(long)(1_000_000_000 / hz));
 }
 
 // Startup gives out before there is a window to draw the reason into, and a
