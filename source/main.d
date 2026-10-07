@@ -15,6 +15,7 @@ import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
 import render;
 import ui;
 version (Screenshots) import screenshots;
+version (FrameStats) import framestats;
 
 int main(string[] args)
 {
@@ -133,6 +134,7 @@ int main(string[] args)
         while (SDL_PollEvent(&event))
         {
             frames = FRAMES_PER_INPUT;
+            version (FrameStats) stats_event();
 
             // Before the dispatch below, so an event that has something to say
             // still leaves its own message up. Modifiers alone are not an
@@ -409,13 +411,20 @@ int main(string[] args)
 
         int width, height;
         SDL_GetWindowSize(window, &width, &height);
+        version (FrameStats) stats_begin();
         mu_begin(ctx);
         ui_frame(ctx, width, height);
         mu_end(ctx);
+        version (FrameStats)
+        {
+            stats_end(Phase.build);
+            stats_hash(ctx);
+        }
 
         SDL_SetRenderDrawColor(renderer, 30, 30, 46, 255);
         SDL_RenderClear(renderer);
         render_commands(renderer, ctx);
+        version (FrameStats) stats_end(Phase.render);
 
         // Capture from the finished backbuffer, before present.
         version (Screenshots)
@@ -434,6 +443,11 @@ int main(string[] args)
         }
 
         SDL_RenderPresent(renderer);
+        version (FrameStats)
+        {
+            stats_end(Phase.present);
+            stats_frame_done();
+        }
         --frames;
     }
 
