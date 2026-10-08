@@ -1107,6 +1107,47 @@ long hex_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
     return -1;
 }
 
+// hex_hit for a drag, which must not miss anywhere across the rows: a hand moving
+// up and down drifts into the gaps, and a miss there froze the selection until it
+// drifted back. A gap takes the byte to its left, the strip before the ASCII column
+// the last pair, and anything past EOF the last byte.
+long hex_drag_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
+    int cols, size_t total, int mx, int my)
+{
+    int localY = my - body.y;
+    if (localY < 0 || total == 0)
+        return -1;
+
+    long row = topRow + localY / rowH;
+    int col = (mx - body.x) / lay.charW;
+
+    int i;
+    if (col >= lay.asciiStart)
+        i = col - lay.asciiStart < cols ? col - lay.asciiStart : cols - 1;
+    else
+        while (i + 1 < cols && col >= hex_col_for(lay, i + 1))
+            ++i;
+
+    long idx = row * cols + i;
+    return idx < cast(long) total ? idx : cast(long) total - 1;
+}
+
+unittest
+{
+    HexLayout lay = hex_layout(8, 16, 1);
+    mu_Rect body = mu_Rect(0, 0, 200, 100);
+    int gap = hex_col_for(lay, 3) + 2; // the blank after pair 3
+    assert(hex_hit(lay, body, 0, 1, 16, 100, gap, 2) == -1);
+    assert(hex_drag_hit(lay, body, 0, 1, 16, 100, gap, 2) == 2 * 16 + 3);
+    int group = hex_col_for(lay, 8) - 1; // the extra blank after every 8
+    assert(hex_drag_hit(lay, body, 0, 1, 16, 100, group, 0) == 7);
+    assert(hex_drag_hit(lay, body, 0, 1, 16, 100, 0, 0) == 0);              // offset column
+    assert(hex_drag_hit(lay, body, 0, 1, 16, 100, lay.asciiStart - 1, 0) == 15);
+    assert(hex_drag_hit(lay, body, 0, 1, 16, 100, lay.asciiStart + 99, 0) == 15);
+    assert(hex_drag_hit(lay, body, 0, 1, 16, 100, gap, 50) == 99);          // past EOF
+    assert(hex_drag_hit(lay, body, 0, 1, 16, 100, gap, -1) == -1);          // above
+}
+
 long hex_index(long row, int cols, int i, size_t total)
 {
     if (row < 0)
@@ -1194,7 +1235,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     }
     else if (v.dragSel && (ctx.mouse_down & MU_MOUSE_LEFT) && v.active)
     {
-        long hit = hex_hit(lay, body, v.topRow, rowH, cols, total,
+        long hit = hex_drag_hit(lay, body, v.topRow, rowH, cols, total,
             ctx.mouse_pos.x, ctx.mouse_pos.y);
         if (hit >= 0 && cast(size_t) hit != v.cursor)
         {
