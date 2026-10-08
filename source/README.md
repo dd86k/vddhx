@@ -7,7 +7,9 @@ this is the map and the handful of things that span modules.
 
 | File | What it holds |
 | --- | --- |
-| `main.d` | SDL setup, event loop, key routing |
+| `main.d` | SDL setup, event loop |
+| `input.d` | SDL input routing: every key binding |
+| `keys.d` | key binding checks through `input.d` (`--screenshot --keys`) |
 | `ui.d` | documents, views, panes, tabs, and every command |
 | `hexview.d` | the hex panel widget: grid, caret, minimap, edit hooks |
 | `split.d` | pane layout arithmetic |
@@ -151,7 +153,7 @@ pointers, so the caller must repoint them before the new panel draws.
 ## Keys
 
 ddui's `MU_KEY_*` bits stop at `1 << 5`; `hexview.d` continues from `1 << 6`
-(`HEX_KEY_*`) so caret keys ride the same `ctx.key_down` bitmask. `main.d` does
+(`HEX_KEY_*`) so caret keys ride the same `ctx.key_down` bitmask. `input.d` does
 the mapping.
 
 Two rules in the routing:

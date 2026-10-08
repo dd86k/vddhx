@@ -147,7 +147,7 @@ struct Omnibar
     string hint;
     // Set the frame the box is raised, so it takes the keyboard without a click.
     bool focusWanted;
-    // Set by omni_refill: the text grew under ddui, which would leave the caret
+    // Set whenever the text is written behind ddui, which would leave the caret
     // sitting where it was in the middle of it.
     bool recaret;
     // The query, NUL-terminated, prefix character and all. ddui's textbox owns the
@@ -184,6 +184,7 @@ void omni_show(ref Omnibar o, char prefix = 0)
     o.shown = true;
     o.prompting = false;
     o.focusWanted = true;
+    o.recaret = true;
     o.selected = 0;
     o.scroll = 0;
     o.wheelAccum = 0;

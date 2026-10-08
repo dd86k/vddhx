@@ -14,6 +14,8 @@
 ///     `rdmd tools/bmp2png.d x.bmp x.png` (or ffmpeg, if it is around).
 ///     Adding `--readme` runs one posed scenario instead of the regression set,
 ///     which is where assets/screenshot.png comes from.
+///     `--keys` runs the key binding checks instead (keys.d), exiting 1 on a
+///     failure. `--all` runs every set.
 /// Authors: dd86k <dd@dax.moe>
 module screenshots;
 
@@ -31,6 +33,7 @@ import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
 import render;
 import ui;
 import ddhx.charset : ASCII;
+import keys : keys_run;
 
 /// Default output directory, relative to the working directory.
 enum SCREENSHOT_DIR = "screenshots";
@@ -114,10 +117,10 @@ private Fixtures screenshot_fixtures()
     return f;
 }
 
-/// Run both sets, one child process each. They cannot share a process: the two
-/// want different window sizes, and ui.d's module state (docs, columns, panes)
-/// has no teardown, so the second set would start on whatever the first left
-/// behind. Re-running the executable is the prototype's way out of both.
+/// Run every set, one child process each. They cannot share a process: the
+/// readme wants a different window size, and ui.d's module state (docs,
+/// columns, panes) has no teardown, so each set would start on whatever the last
+/// left behind. Re-running the executable is the prototype's way out of both.
 private int screenshot_all(string[] args)
 {
     import std.algorithm.iteration : filter;
@@ -127,10 +130,10 @@ private int screenshot_all(string[] args)
 
     // Everything but the set selectors, which this adds back one at a time.
     string[] base = args[1 .. $]
-        .filter!(a => a != "--all" && a != "--readme")
+        .filter!(a => a != "--all" && a != "--readme" && a != "--keys")
         .array;
 
-    foreach (string set; ["", "--readme"])
+    foreach (string set; ["", "--readme", "--keys"])
     {
         string[] argv = thisExePath ~ base;
         if (set.length)
@@ -151,7 +154,7 @@ private int screenshot_all(string[] args)
 int screenshot_run(string[] args)
 {
     // `--readme` poses one showcase frame for the project page instead of running
-    // the regression scenarios: a wider window and real files. `--all` is both.
+    // the regression scenarios: a wider window and real files. `--all` runs every set.
     import std.algorithm.searching : canFind, startsWith;
     if (args.canFind("--all"))
         return screenshot_all(args);
@@ -320,6 +323,9 @@ int screenshot_run(string[] args)
     }
 
     Fixtures fix = screenshot_fixtures();
+
+    if (args.canFind("--keys"))
+        return keys_run(&ctx, &frame, fix.mid);
 
     // Scenario 0 (debug): open a multi-row file so offsets past 0x0F appear.
     ui_open(fix.mid);

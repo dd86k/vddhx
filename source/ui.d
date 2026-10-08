@@ -5509,3 +5509,36 @@ void ui_menubar(mu_Context* ctx)
 
     mu_end_menubar(ctx);
 }
+
+version (Screenshots)
+{
+    /// What a key binding can move, read back by the key driver (keys.d).
+    public struct Probe
+    {
+        bool omni;
+        OmniMode mode;
+        string query;
+        size_t panes, pane, tabs, tab, docs, marks;
+        size_t cursor, anchor;
+        long size;
+    }
+
+    /// Ditto.
+    public Probe ui_probe()
+    {
+        Probe p;
+        p.omni   = omni_shown(omni);
+        p.mode   = omni_mode(omni);
+        p.query  = omni_query(omni).idup;
+        p.panes  = ui_pane_count();
+        p.pane   = ui_pane_index(focused);
+        p.tabs   = pane.views.length;
+        p.tab    = pane.current;
+        p.docs   = docs.length;
+        p.marks  = doc.marks.length;
+        p.cursor = view.hex.cursor;
+        p.anchor = view.hex.anchor;
+        p.size   = doc.editor.size();
+        return p;
+    }
+}
