@@ -719,7 +719,10 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
 
         int visibleRows = body_.h / rowH;
         if (visibleRows < 1) visibleRows = 1;
-        long maxTop = rows > visibleRows ? rows - visibleRows : 0;
+        // An editable full last row pushes the append slot onto a row of its own,
+        // which has to be reachable or the caret parks out of view.
+        long scrollRows = hex_editable(v) ? cast(long) total / cols + 1 : rows;
+        long maxTop = scrollRows > visibleRows ? scrollRows - visibleRows : 0;
         v.visRows = visibleRows; // for hex_set_caret, between frames
         v.bodyY = body_.y;
         v.rowHeight = rowH;
