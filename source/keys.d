@@ -8,6 +8,8 @@ module keys;
 
 version (Screenshots):
 
+import std.file : exists, read, remove, write;
+import std.path : buildPath;
 import std.string : toStringz;
 import bindbc.sdl;
 import ddlogger;
@@ -38,6 +40,13 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     keys_caret();
     keys_edit();
     keys_marks();
+
+    Files files = keys_files();
+    keys_open(files);
+    keys_navigate();
+    keys_write(files);
+    uiPickAuto = null;
+
     keys_quit();
 
     if (failures)
@@ -275,4 +284,154 @@ void keys_quit()
     press(SDLK_Q, CTRL);
     expect(SDL_HasEvent(SDL_EVENT_QUIT), "Ctrl+Q queues a quit");
     SDL_FlushEvent(SDL_EVENT_QUIT);
+}
+
+/// `nav` is zeros but for a needle at NEEDLE_A and NEEDLE_B, so finds and skips
+/// have known answers; `drop` and `edit` are copies of it to open beside, `saved`
+/// a destination that does not exist yet.
+struct Files
+{
+    string nav, drop, edit, saved, fresh;
+}
+
+enum size_t NAV_SIZE = 0x1000;
+enum size_t NEEDLE_A = 0x100;
+enum size_t NEEDLE_B = 0x300;
+
+Files keys_files()
+{
+    import std.file : mkdirRecurse, tempDir;
+
+    string dir = buildPath(tempDir, "vddhx-keys");
+    mkdirRecurse(dir);
+
+    ubyte[] bytes = new ubyte[NAV_SIZE];
+    static immutable ubyte[4] NEEDLE = [ 0xca, 0xfe, 0xba, 0xbe ];
+    bytes[NEEDLE_A .. NEEDLE_A + 4] = NEEDLE;
+    bytes[NEEDLE_B .. NEEDLE_B + 4] = NEEDLE;
+
+    Files f;
+    f.nav   = buildPath(dir, "nav.bin");
+    f.drop  = buildPath(dir, "drop.bin");
+    f.edit  = buildPath(dir, "edit.bin");
+    f.saved = buildPath(dir, "saved.bin");
+    f.fresh = buildPath(dir, "fresh.bin");
+    write(f.nav, bytes);
+    write(f.drop, bytes);
+    write(f.edit, bytes);
+    foreach (string gone; [ f.saved, f.fresh ])
+        if (exists(gone))
+            remove(gone);
+    return f;
+}
+
+void keys_open(ref const(Files) f)
+{
+    size_t docs = ui_probe().docs;
+
+    SDL_Event event;
+    event.type = SDL_EVENT_DROP_FILE;
+    event.drop.x = 400;
+    event.drop.y = 300;
+    event.drop.data = f.drop.toStringz;
+    input_event(ctx, event);
+    frame(); frame();
+    Probe p = ui_probe();
+    expect(p.path == f.drop && p.docs == docs + 1, "a dropped file opens");
+
+    uiPickAuto = f.nav;
+    press(SDLK_O, CTRL);
+    frame();
+    p = ui_probe();
+    expect(p.path == f.nav && p.docs == docs + 2 && p.size == NAV_SIZE, "Ctrl+O opens the picked file");
+    press(SDLK_O, CTRL);
+    frame();
+    p = ui_probe();
+    expect(p.path == f.nav && p.docs == docs + 2, "opening it again reuses its document");
+}
+
+void keys_navigate()
+{
+    void goto_(string where)
+    {
+        press(SDLK_G, CTRL);
+        type(where);
+        press(SDLK_RETURN);
+    }
+
+    goto_("0x40");
+    expect(ui_probe().cursor == 0x40, "Ctrl+G goes to an offset");
+    goto_("+0x10");
+    expect(ui_probe().cursor == 0x50, "...or relative to the caret");
+
+    press(SDLK_END, CTRL);
+    expect(ui_probe().cursor == NAV_SIZE, "Ctrl+End goes to the append slot");
+    press(SDLK_HOME, CTRL);
+    press(SDLK_END);
+    size_t cols = ui_probe().cursor + 1;
+    expect(cols > 1, "End goes to the row end");
+    press(SDLK_PAGEDOWN);
+    size_t page = ui_probe().cursor;
+    expect(page > cols && page % cols == cols - 1, "PgDn goes down a page, same column");
+    press(SDLK_PAGEUP);
+    expect(ui_probe().cursor == cols - 1, "PgUp comes back");
+
+    press(SDLK_HOME, CTRL);
+    press(SDLK_RIGHT, CTRL);
+    expect(ui_probe().cursor == NEEDLE_A, "Ctrl+Right skips the run of zeros");
+    press(SDLK_LEFT, CTRL);
+    expect(ui_probe().cursor < NEEDLE_A, "Ctrl+Left skips back");
+
+    // Matches are selected; where the caret sits in one is the panel's business.
+    size_t low() { Probe p = ui_probe(); return p.cursor < p.anchor ? p.cursor : p.anchor; }
+    press(SDLK_HOME, CTRL);
+    press(SDLK_F, CTRL);
+    type("0xcafebabe");
+    press(SDLK_RETURN);
+    expect(ui_probe().omni == false && low() == NEEDLE_A, "Ctrl+F finds the first match");
+    press(SDLK_N, CTRL);
+    expect(low() == NEEDLE_B, "Ctrl+N finds the next");
+    press(SDLK_N, CTRL);
+    expect(low() == NEEDLE_A, "...wrapping round the end");
+    press(SDLK_N, CTRL | SHIFT);
+    expect(low() == NEEDLE_B, "Ctrl+Shift+N goes back, wrapping round the top");
+}
+
+void keys_write(ref const(Files) f)
+{
+    uiPickAuto = f.edit;
+    press(SDLK_O, CTRL);
+    frame();
+    press(SDLK_HOME, CTRL);
+    type("a");
+    type("b");
+    expect(ui_probe().edited, "typing marks the document edited");
+    press(SDLK_S, CTRL);
+    ubyte[] disk = cast(ubyte[]) read(f.edit);
+    expect(disk.length == NAV_SIZE && disk[0] == 0xab, "Ctrl+S writes in place");
+    expect(ui_probe().edited == false, "...and leaves it clean");
+
+    press(SDLK_INSERT);
+    type("c");
+    type("d");
+    press(SDLK_INSERT);
+    press(SDLK_S, CTRL);
+    disk = cast(ubyte[]) read(f.edit);
+    expect(disk.length == NAV_SIZE + 1 && disk[1] == 0xcd, "an insert saves grown");
+
+    uiPickAuto = f.saved;
+    press(SDLK_S, CTRL | SHIFT);
+    frame();
+    expect(exists(f.saved) && read(f.saved) == disk, "Ctrl+Shift+S writes the copy");
+    expect(ui_probe().path == f.saved, "...and the document moves to it");
+
+    // A scratch buffer has nowhere to save in place, so Ctrl+S asks.
+    press(SDLK_T, CTRL);
+    type("1");
+    type("2");
+    uiPickAuto = f.fresh;
+    press(SDLK_S, CTRL);
+    frame();
+    expect(exists(f.fresh) && cast(ubyte[]) read(f.fresh) == [ cast(ubyte) 0x12 ], "Ctrl+S on a scratch buffer saves as");
+    expect(ui_probe().path == f.fresh, "...and the tab adopts the path");
 }

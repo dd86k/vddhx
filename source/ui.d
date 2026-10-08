@@ -1747,12 +1747,30 @@ public void ui_drop_file(string path, int x, int y)
     cast(void)ui_open(path, true);
 }
 
+// Every native file dialog goes up through here, so a scripted run can answer it.
+void ui_file_dialog(SDL_DialogFileCallback picked, bool save)
+{
+    version (Screenshots)
+    {
+        if (uiPickAuto.length)
+        {
+            const(char)*[2] list = [ uiPickAuto.toStringz, null ];
+            picked(null, list.ptr, 0);
+            return;
+        }
+    }
+    if (save)
+        SDL_ShowSaveFileDialog(picked, null, uiWindow, null, 0, null);
+    else
+        SDL_ShowOpenFileDialog(picked, null, uiWindow, null, 0, null, false);
+}
+
 /// Put up the native Open dialog. It runs async: ui_on_file_picked stashes the
 /// chosen path and the next frame opens it. Null filters means "all files", and
 /// the trailing false keeps it single-select.
 public void ui_open_dialog()
 {
-    SDL_ShowOpenFileDialog(&ui_on_file_picked, null, uiWindow, null, 0, null, false);
+    ui_file_dialog(&ui_on_file_picked, false);
 }
 
 /// Put up the Open dialog to pick a file to compare the front tab against. The
@@ -1762,7 +1780,7 @@ public void ui_compare_dialog()
 {
     pendingCompare = true;
     compareFrom    = pane.views[pane.current];
-    SDL_ShowOpenFileDialog(&ui_on_file_picked, null, uiWindow, null, 0, null, false);
+    ui_file_dialog(&ui_on_file_picked, false);
 }
 
 /// Open `path` beside the tab the comparison was started from and pair the two
@@ -2289,7 +2307,7 @@ public bool ui_save()
 public void ui_save_as()
 {
     pendingSaveTarget = doc.editor;
-    SDL_ShowSaveFileDialog(&ui_on_save_picked, null, uiWindow, null, 0, null);
+    ui_file_dialog(&ui_on_save_picked, true);
 }
 
 /// Write the document the Save As dialog was raised for to `dest` and adopt it
@@ -2665,6 +2683,10 @@ version (Screenshots)
 
     /// Set by the headless driver before it starts posing scenarios.
     public __gshared ConfirmAuto uiConfirmAuto;
+
+    /// The path a scripted run answers every file dialog with, through the
+    /// dialog's own callback. Empty leaves the native dialog up.
+    public __gshared string uiPickAuto;
 }
 
 /// Resolve unsaved edits in `d` before an action that would discard them (closing
@@ -3905,7 +3927,11 @@ void ui_find_step(ref View v, bool backward, long from)
 /// what keeps a repeat moving instead of finding the same match again.
 public void ui_find_repeat(bool backward)
 {
-    long from = cast(long) view.hex.cursor + (backward ? -1 : 1);
+    // A match leaves the caret on its last byte, so stepping back from the caret
+    // would land inside the match and find it again.
+    long from = backward
+        ? cast(long) hex_sel_low(view.hex) - 1
+        : cast(long) view.hex.cursor + 1;
     ui_find_step(view, backward, from);
 }
 
@@ -5521,6 +5547,8 @@ version (Screenshots)
         size_t panes, pane, tabs, tab, docs, marks;
         size_t cursor, anchor;
         long size;
+        string path;
+        bool edited;
     }
 
     /// Ditto.
@@ -5539,6 +5567,8 @@ version (Screenshots)
         p.cursor = view.hex.cursor;
         p.anchor = view.hex.anchor;
         p.size   = doc.editor.size();
+        p.path   = doc.path;
+        p.edited = doc.editor.edited();
         return p;
     }
 }
