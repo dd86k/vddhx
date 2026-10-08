@@ -48,6 +48,10 @@ struct Document
     /// reads through it.
     IDocumentEditor editor;
 
+    /// Bumped on every change to the bytes, for the views caching them. See
+    /// HexView.revision.
+    uint revision;
+
     /// Disk path, empty for an in-memory scratch buffer. Set on Open and on a
     /// first Save As, it is the target an in-place Save writes to.
     string path;
@@ -1396,6 +1400,12 @@ bool viewByte(View* v, size_t at, out ubyte value)
     if (v.doc.editor is null || cast(long) at >= v.doc.editor.size())
         return false;
 
+    if (const(ubyte)[] cached = hex_cached(v.hex, at, 1))
+    {
+        value = cached[0];
+        return true;
+    }
+
     ubyte[1] one = void;
     ubyte[] got;
     try got = v.doc.editor.view(cast(long) at, one);
@@ -1534,6 +1544,7 @@ void hexReplace(long pos, ubyte value, void* user)
     try
     {
         v.doc.editor.replace(pos, &value, 1);
+        ++v.doc.revision;
         layoutEdited(v.doc, pos);
     }
     catch (Exception e)
@@ -1546,6 +1557,7 @@ void hexInsert(long pos, ubyte value, void* user)
     try
     {
         v.doc.editor.insert(pos, &value, 1);
+        ++v.doc.revision;
         bookmark_shift(v.doc.marks, pos, 1); // the bytes past it all moved up one
         layoutEdited(v.doc, pos);
     }
@@ -1559,6 +1571,7 @@ void hexRemove(long pos, long len, void* user)
     try
     {
         v.doc.editor.remove(pos, len);
+        ++v.doc.revision;
         bookmark_shift(v.doc.marks, pos, -len);
         layoutEdited(v.doc, pos);
     }
@@ -1579,6 +1592,7 @@ long hexUndo(void* user)
         at = v.doc.editor.undo();
     catch (Exception e)
         logWarn("undo failed: %s", e.msg);
+    ++v.doc.revision;
     v.hex.dataSize = v.doc.editor.size();
     layoutEdited(v.doc, at);
     return at;
@@ -1592,6 +1606,7 @@ long hexRedo(void* user)
         at = v.doc.editor.redo();
     catch (Exception e)
         logWarn("redo failed: %s", e.msg);
+    ++v.doc.revision;
     v.hex.dataSize = v.doc.editor.size();
     layoutEdited(v.doc, at);
     return at;
@@ -1608,6 +1623,7 @@ void wireView(View* v)
     IDocumentEditor ed = v.doc.editor;
     v.hex.readFn    = &hexRead;
     v.hex.readUser  = cast(void*) ed;
+    v.hex.revision  = &v.doc.revision;
     v.hex.replaceFn = &hexReplace;
     v.hex.insertFn  = &hexInsert;
     v.hex.removeFn  = &hexRemove;
@@ -2471,6 +2487,7 @@ void cutSelection(bool asText)
         logWarn("cut failed: %s", e.msg);
         return;
     }
+    ++doc.revision;
     bookmark_shift(doc.marks, cast(long) low, -cast(long)(high - low + 1));
 
     view.hex.dataSize = doc.editor.size();
@@ -2548,6 +2565,7 @@ public void ui_paste()
 
     // The document may have moved even on a failed insert-after-remove, so the
     // panel is refreshed either way.
+    ++doc.revision;
     view.hex.dataSize = editor.size();
     hex_set_caret(view.hex, ok ? low + bytes.length : low);
     if (ok)
@@ -3547,6 +3565,12 @@ ubyte[] ui_inspect_bytes(ubyte[] buf)
     long at = cast(long) hex_sel_low(view.hex);
     if (at >= total)
         return null;
+    // Only whole: a short read near EOF has to come from the editor to say so.
+    if (const(ubyte)[] cached = hex_cached(view.hex, cast(size_t) at, buf.length))
+    {
+        buf[] = cached[];
+        return buf;
+    }
     return doc.editor.view(at, buf);
 }
 

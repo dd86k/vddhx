@@ -213,6 +213,10 @@ struct HexView
     HexReadFn readFn;
     /// Opaque pointer forwarded to readFn.
     void* readUser;
+    /// The owner's count of changes to the bytes behind readFn, bumped on every
+    /// edit: the cached window is only read again when it moves or this does.
+    /// Null reads every frame.
+    const(uint)* revision;
     /// Total document size in bytes. Only consulted when readFn is set. The panel
     /// keeps it in step with its own edits so a growing or shrinking file stays
     /// consistent within the frame that changed it.
@@ -296,6 +300,8 @@ struct HexView
     ubyte[] windowBuf;   // capacity, kept across frames
     size_t windowStart;  // document offset of windowBuf[0]
     size_t windowLen;    // valid bytes currently in windowBuf
+    uint windowRev;      // *revision when windowBuf was filled
+    void* windowUser;    // readUser it was filled from
 
     // One colour per vertical minimap cell, each the dominant class of the file
     // segment it covers. Rebuilt only when the document size or the cell count
@@ -1472,8 +1478,23 @@ void hex_reveal(ref HexView v, size_t cursor, int cols, int visibleRows)
         v.topRow = row - visibleRows + 1;
 }
 
-// Refill the window scratch with the rows currently on screen, so painting reads
-// only the visible slice from the editor. No-op for the in-memory data path.
+/// Bytes `at .. at + len` from the panel's cached window, or null when the window
+/// does not hold all of them; the caller then reads the document itself.
+public const(ubyte)[] hex_cached(ref const(HexView) v, size_t at, size_t len)
+{
+    if (v.readFn is null)
+        return at + len <= v.data.length ? v.data[at .. at + len] : null;
+    if (at < v.windowStart || at + len > v.windowStart + v.windowLen ||
+        v.revision is null || v.windowRev != *v.revision || v.windowUser != v.readUser)
+        return null;
+    return v.windowBuf[at - v.windowStart .. at - v.windowStart + len];
+}
+
+// Keep the window scratch covering the rows on screen, so painting reads only the
+// visible slice from the editor. It spans a screenful of slack either side,
+// page-aligned, and is read again only when the visible rows leave it or the
+// document's revision moves: a drag or a small scroll then reads nothing, and a
+// refill is one aligned read. No-op for the in-memory data path.
 void hex_fill_window(ref HexView v, mu_Rect body, long topRow, int rowH, int cols)
 {
     if (v.readFn is null)
@@ -1494,12 +1515,60 @@ void hex_fill_window(ref HexView v, mu_Rect body, long topRow, int rowH, int col
 
     size_t start = cast(size_t)(firstRow * cols);
     size_t need  = cast(size_t)((lastRow - firstRow + 1) * cols);
-    if (v.windowBuf.length < need)
-        v.windowBuf.length = need;
+    size_t end   = start + need < total ? start + need : total;
 
-    ubyte[] got = v.readFn(cast(long) start, v.windowBuf[0 .. need], v.readUser);
-    v.windowStart = start;
+    if (v.revision && v.windowRev == *v.revision && v.windowUser == v.readUser &&
+        start >= v.windowStart && end <= v.windowStart + v.windowLen)
+        return;
+
+    enum size_t ALIGN = 4096;
+    size_t lo = (start > need ? start - need : 0) & ~(ALIGN - 1);
+    size_t hi = (end + need + ALIGN - 1) & ~(ALIGN - 1);
+    if (hi > total)
+        hi = total;
+    if (v.windowBuf.length < hi - lo)
+        v.windowBuf.length = hi - lo;
+
+    ubyte[] got = v.readFn(cast(long) lo, v.windowBuf[0 .. hi - lo], v.readUser);
+    v.windowStart = lo;
     v.windowLen   = got.length;
+    v.windowRev   = v.revision ? *v.revision : 0;
+    v.windowUser  = v.readUser;
+}
+
+unittest
+{
+    static int reads;
+    static ubyte[] fill(long pos, ubyte[] buf, void*)
+    {
+        ++reads;
+        foreach (i, ref ubyte b; buf)
+            b = cast(ubyte)(pos + i);
+        return buf;
+    }
+
+    uint rev;
+    HexView v;
+    v.readFn   = &fill;
+    v.revision = &rev;
+    v.dataSize = 1 << 20;
+    mu_Rect body = mu_Rect(0, 0, 100, 10 * 16); // ten rows of 16
+
+    hex_fill_window(v, body, 1000, 16, 16);
+    assert(reads == 1);
+    assert(v.windowStart % 4096 == 0);
+    hex_fill_window(v, body, 1001, 16, 16); // a row's scroll stays inside
+    assert(reads == 1);
+    assert(hex_cached(v, 1001 * 16, 4) == [0x90, 0x91, 0x92, 0x93]); // 1001 * 16 = 0x3e90
+
+    ++rev; // an edit
+    assert(hex_cached(v, 1001 * 16, 1) is null);
+    hex_fill_window(v, body, 1001, 16, 16);
+    assert(reads == 2);
+
+    hex_fill_window(v, body, 50_000, 16, 16); // far off
+    assert(reads == 3);
+    assert(hex_cached(v, 0, 1) is null);
 }
 
 // Draw the minimap ribbon and let it drive the scroll position. It maps the whole
