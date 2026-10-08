@@ -18,15 +18,26 @@ import ui;
 version (Screenshots) import screenshots;
 version (FrameStats) import framestats;
 
+enum CONSOLE_ARG = "--console";
+
 int main(string[] args)
 {
     // The elevated copy elevate.d starts: one open, no window.
     if (args.length > 1 && args[1] == ELEVATE_ARG)
         return elevate_helper(args[2 .. $]);
 
+    import std.algorithm.searching : canFind;
+
     // Ideally, should be logging to a file (appdata etc.),
     // but this is a stopgap to see if loader loads proper
-    logAddAppender(new ConsoleAppender());
+    version (Windows)
+    {
+        // The GUI subsystem starts without stderr; only borrow a console on request.
+        if (args[1 .. $].canFind(CONSOLE_ARG) && console_attach())
+            logAddAppender(new ConsoleAppender());
+    }
+    else
+        logAddAppender(new ConsoleAppender());
     logSetLevel(LogLevel.debugging);
 
     // Under the dynamic configuration nothing may touch SDL_* or TTF_* before
@@ -37,7 +48,6 @@ int main(string[] args)
 
     version (Screenshots)
     {
-        import std.algorithm.searching : canFind;
         if (args.canFind("--screenshot"))
             return screenshot_run(args);
     }
@@ -103,7 +113,11 @@ int main(string[] args)
     // One tab each, the first taking over the blank one we start on. A failure
     // just leaves the tab out (ui_open logs the reason).
     foreach (string path; args[1 .. $])
+    {
+        if (path == CONSOLE_ARG)
+            continue;
         ui_open(path);
+    }
 
     logDebugging("Starting loop");
 
@@ -631,4 +645,24 @@ private int muiKey(SDL_KeyCode key)
     case SDLK_Y:                     return HEX_KEY_REDO; // redo when Ctrl is held
     default:                         return 0;
     }
+}
+
+version (Windows)
+private bool console_attach()
+{
+    import core.sys.windows.windef : FALSE;
+    import core.sys.windows.wincon : AttachConsole, AllocConsole, ATTACH_PARENT_PROCESS;
+    import std.stdio : stdout, stderr;
+
+    // Allocating covers a shortcut launch, where there is no parent console.
+    if (AttachConsole(ATTACH_PARENT_PROCESS) == FALSE && AllocConsole() == FALSE)
+        return false;
+    try
+    {
+        stdout.reopen("CONOUT$", "w");
+        stderr.reopen("CONOUT$", "w");
+    }
+    catch (Exception)
+        return false;
+    return true;
 }

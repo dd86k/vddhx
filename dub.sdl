@@ -9,6 +9,12 @@ dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="54
 dependency "ddlogger" repository="git+https://github.com/dd86k/ddlogger.git" version="4397d8e57a88bd6b3a3e5e4c846ba97ac3bfd364"
 dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="63428e6b90dc38529b2662932e2fb69458b22dcd"
 
+# Windows: no console window; --console attaches one for logs (source/main.d).
+# The entry keeps D main, which LDC emits as C wmain and DMD as C main.
+lflags "/SUBSYSTEM:WINDOWS" platform="windows"
+lflags "/ENTRY:wmainCRTStartup" platform="windows-ldc"
+lflags "/ENTRY:mainCRTStartup" platform="windows-dmd"
+
 # bindbc-sdl baselines at SDL 3.2.0
 versions "SDL_TTF_3_2_2"
 
