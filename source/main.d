@@ -56,7 +56,7 @@ int main(string[] args)
         return fatal(null, format("SDL_Init: %s", SDL_GetError().fromStringz));
     scope(exit) SDL_Quit();
 
-    SDL_Window* window = SDL_CreateWindow("vddhx", 800, 600, SDL_WINDOW_RESIZABLE);
+    SDL_Window* window = SDL_CreateWindow("vddhx", 800, 600, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (window is null)
         return fatal(null, format("SDL_CreateWindow: %s", SDL_GetError().fromStringz));
     scope(exit) SDL_DestroyWindow(window);
@@ -83,6 +83,7 @@ int main(string[] args)
     if (reason.length)
         return fatal(window, reason);
     scope(exit) render_quit();
+    render_set_density(SDL_GetWindowPixelDensity(window));
 
     SDL_StartTextInput(window);
 
@@ -186,6 +187,8 @@ int main(string[] args)
                 mu_invalidate(ctx);
                 if (event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED)
                     interval = frameInterval(window);
+                if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
+                    render_set_density(SDL_GetWindowPixelDensity(window));
                 break;
             case SDL_EVENT_MOUSE_MOTION:
                 mu_input_mousemove(ctx, cast(int) event.motion.x, cast(int) event.motion.y);

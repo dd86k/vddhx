@@ -10,6 +10,7 @@ module render;
 import core.stdc.string : strlen;
 import std.file : exists;
 import std.format : format;
+import std.math : ceil, lround;
 import std.path : baseName, buildPath;
 import std.string : fromStringz, toStringz;
 import bindbc.sdl; // publicly re-exports SDL3_ttf (TTF_*) under the static config
@@ -21,6 +22,11 @@ import icon : exeDir;
 // Point size the faces are opened at. render_text_height reports the real TTF
 // line height of whichever face a command used, so this only sets the scale.
 private enum float FONT_SIZE = 14.0f;
+
+// Output pixels per window point. ddui lays out in points, so this is applied only
+// here: geometry is mapped on the way out and the faces are sized up to match,
+// rasterising glyphs at the output resolution rather than upscaling them.
+private __gshared float density = 1;
 
 // The renderer text engine caches rasterised glyphs across every open face.
 private __gshared TTF_TextEngine* engine;
@@ -295,6 +301,26 @@ TTF_Font* render_font_ui() => fontUI;
 /// ctx.style.font around that component, then restore the UI face.
 TTF_Font* render_font_mono() => fontMono;
 
+/// Follow the window's pixel density (SDL_GetWindowPixelDensity); 0, its
+/// failure value, is ignored.
+void render_set_density(float d)
+{
+    if (d <= 0 || d == density)
+        return;
+    logInfo("pixel density: %g", d);
+    density = d;
+
+    TTF_SetFontSize(fontUI, FONT_SIZE * d);
+    if (fontMono !is fontUI)
+        TTF_SetFontSize(fontMono, FONT_SIZE * d);
+    foreach (TTF_Font* f; fallbacks[0 .. fallbackCount])
+        TTF_SetFontSize(f, FONT_SIZE * d);
+
+    foreach (ref TextEntry e; textCache)
+        TTF_DestroyText(e.text);
+    textCache = null;
+}
+
 /// Text measuring callbacks, handed to mu_Context. The font handle is a
 /// TTF_Font*, so measurement follows whichever face the widget selected.
 extern (C) int render_text_width(mu_Font font, const(char)* str, int len)
@@ -309,7 +335,7 @@ extern (C) int render_text_width(mu_Font font, const(char)* str, int len)
         return 0;
     int w;
     TTF_GetTextSize(text, &w, null);
-    return w;
+    return toPoints(w);
 }
 
 /// ditto
@@ -317,7 +343,7 @@ extern (C) int render_text_height(mu_Font font)
 {
     TTF_Font* f = cast(TTF_Font*) font;
     if (f is null) f = fontUI;
-    return TTF_GetFontHeight(f);
+    return toPoints(TTF_GetFontHeight(f));
 }
 
 /// Replay every ddui draw command onto the renderer for this frame.
@@ -334,20 +360,20 @@ void render_commands(SDL_Renderer* renderer, mu_Context* ctx)
         switch (cmd.type)
         {
         case MU_COMMAND_RECT:
-            draw_rect(renderer, cmd.rect.rect, cmd.rect.color);
+            draw_rect(renderer, toPixels(cmd.rect.rect), cmd.rect.color);
             break;
         case MU_COMMAND_TEXT:
             draw_text(cmd.text.font, mu_command_text(ctx, cmd), cmd.text.pos, cmd.text.color);
             break;
         case MU_COMMAND_ICON:
-            draw_icon(cmd.icon.id, cmd.icon.rect, cmd.icon.color);
+            draw_icon(cmd.icon.id, toPixels(cmd.icon.rect), cmd.icon.color);
             break;
         case MU_COMMAND_SHIP: // The secret!
-            elite_draw(renderer, cmd.rect.rect);
+            elite_draw(renderer, toPixels(cmd.rect.rect));
             break;
         case MU_COMMAND_CLIP:
-            SDL_Rect clip = SDL_Rect(cmd.clip.rect.x, cmd.clip.rect.y,
-                cmd.clip.rect.w, cmd.clip.rect.h);
+            mu_Rect r = toPixels(cmd.clip.rect);
+            SDL_Rect clip = SDL_Rect(r.x, r.y, r.w, r.h);
             SDL_SetRenderClipRect(renderer, &clip);
             break;
         default:
@@ -359,6 +385,18 @@ void render_commands(SDL_Renderer* renderer, mu_Context* ctx)
 }
 
 private:
+
+// Edges are mapped rather than sizes, so neighbouring rects still meet at a
+// fractional density.
+mu_Rect toPixels(mu_Rect r)
+{
+    int x = toPixels(r.x), y = toPixels(r.y);
+    return mu_Rect(x, y, toPixels(r.x + r.w) - x, toPixels(r.y + r.h) - y);
+}
+int toPixels(int v) => cast(int) lround(v * density);
+
+// Rounded up, so a box sized to its text never clips it.
+int toPoints(int v) => cast(int) ceil(v / density);
 
 // Only for the message above, so nothing caches it.
 string[] driverNames()
@@ -603,7 +641,7 @@ void draw_text(mu_Font font, const(char)* str, mu_Vec2 pos, mu_Color color)
         return;
 
     TTF_SetTextColor(text, color.r, color.g, color.b, color.a);
-    TTF_DrawRendererText(text, pos.x, pos.y);
+    TTF_DrawRendererText(text, toPixels(pos.x), toPixels(pos.y));
 }
 
 void draw_icon(int id, mu_Rect rect, mu_Color color)
