@@ -40,6 +40,7 @@ int main(string[] args)
         return elevate_helper(args[2 .. $]);
 
     bool console;
+    LogLevel loglevel = LogLevel.info;
     string[] paths;
     foreach (string arg; args[1 .. $])
     {
@@ -48,6 +49,7 @@ int main(string[] args)
         case "-h", "--help":    return cli_print(HELP);
         case "--version":       return cli_print(VERSION_TEXT);
         case "--console":       console = true; break;
+        case "--verbose":       loglevel = LogLevel.debugging; break;
         default:                paths ~= arg;
         }
     }
@@ -62,7 +64,8 @@ int main(string[] args)
     }
     else
         logAddAppender(new ConsoleAppender());
-    logSetLevel(LogLevel.debugging);
+
+    logSetLevel(loglevel);
 
     // Under the dynamic configuration nothing may touch SDL_* or TTF_* before
     // this, the screenshot driver included.
