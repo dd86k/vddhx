@@ -1096,10 +1096,9 @@ unittest
 // Map a mouse position (screen space) to a byte index, or -1 if it misses a
 // cell. Both the hex pairs and the ASCII column are hittable.
 //
-// `snap` takes the gap after a hex pair as part of that pair. A click wants the
-// strict reading, landing the caret only where a byte was actually pointed at, but
-// anything tracking the pointer as it moves wants the forgiving one: a third of the
-// hex lane is gaps, and a hover that drops out in each of them never settles.
+// `snap` takes the gap after a hex pair as part of that pair, for anything tracking
+// the pointer as it moves: a third of the hex lane is gaps, and a hover that drops
+// out in each of them never settles.
 long hex_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
     int cols, size_t total, int mx, int my, bool snap = false)
 {
@@ -1126,10 +1125,11 @@ long hex_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
     return -1;
 }
 
-// hex_hit for a drag, which must not miss anywhere across the rows: a hand moving
-// up and down drifts into the gaps, and a miss there froze the selection until it
-// drifted back. A gap takes the byte to its left, the strip before the ASCII column
-// the last pair, and anything past EOF the last byte.
+// hex_hit for a click or drag, which must not miss anywhere across the rows: a
+// click in a gap otherwise left the old selection standing, and a drag drifting
+// through one froze it until it drifted back. A gap takes the byte to its left,
+// the strip before the ASCII column the last pair, and anything past EOF the last
+// byte.
 long hex_drag_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
     int cols, size_t total, int mx, int my)
 {
@@ -1293,7 +1293,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     {
         v.dragSel = true; // this panel owns the drag until the button comes up
 
-        long hit = hex_hit(lay, body, v.topRow, rowH, cols, total,
+        long hit = hex_drag_hit(lay, body, v.topRow, rowH, cols, total,
             ctx.mouse_pos.x, ctx.mouse_pos.y);
         if (hit >= 0)
         {
