@@ -6,6 +6,7 @@ import std.format : format;
 import std.string : fromStringz, toStringz;
 import ddlogger;
 import bindbc.sdl;
+import about : VERSION, COMPILER, HOMEPAGE, LICENSE;
 import ddui;
 import elevate : ELEVATE_ARG, elevate_helper;
 import icon : icon_apply;
@@ -16,7 +17,21 @@ import ui;
 version (Screenshots) import screenshots;
 version (FrameStats) import framestats;
 
-enum CONSOLE_ARG = "--console";
+private enum VERSION_TEXT =
+    "vddhx " ~ VERSION ~ "\n" ~
+    "Built with " ~ COMPILER ~ "\n" ~
+    "License: " ~ LICENSE ~ "\n" ~
+    HOMEPAGE ~ "\n";
+
+private enum HELP =
+    "Graphical hex editor\n" ~
+    "\n" ~
+    "Usage: vddhx [OPTIONS] [FILE...]\n" ~
+    "\n" ~
+    "Options:\n" ~
+    "  --console     Windows: attach a console for logs\n" ~
+    "  -h, --help    Print this help and exit\n" ~
+    "  --version     Print version information and exit\n";
 
 int main(string[] args)
 {
@@ -24,14 +39,25 @@ int main(string[] args)
     if (args.length > 1 && args[1] == ELEVATE_ARG)
         return elevate_helper(args[2 .. $]);
 
-    import std.algorithm.searching : canFind;
+    bool console;
+    string[] paths;
+    foreach (string arg; args[1 .. $])
+    {
+        switch (arg)
+        {
+        case "-h", "--help":    return cli_print(HELP);
+        case "--version":       return cli_print(VERSION_TEXT);
+        case "--console":       console = true; break;
+        default:                paths ~= arg;
+        }
+    }
 
     // Ideally, should be logging to a file (appdata etc.),
     // but this is a stopgap to see if loader loads proper
     version (Windows)
     {
         // The GUI subsystem starts without stderr; only borrow a console on request.
-        if (args[1 .. $].canFind(CONSOLE_ARG) && console_attach())
+        if (console && console_attach())
             logAddAppender(new ConsoleAppender());
     }
     else
@@ -46,6 +72,7 @@ int main(string[] args)
 
     version (Screenshots)
     {
+        import std.algorithm.searching : canFind;
         if (args.canFind("--screenshot"))
             return screenshot_run(args);
     }
@@ -111,12 +138,8 @@ int main(string[] args)
 
     // One tab each, the first taking over the blank one we start on. A failure
     // just leaves the tab out (ui_open logs the reason).
-    foreach (string path; args[1 .. $])
-    {
-        if (path == CONSOLE_ARG)
-            continue;
+    foreach (string path; paths)
         ui_open(path);
-    }
 
     logDebugging("Starting loop");
 
@@ -325,4 +348,18 @@ private bool console_attach()
     catch (Exception)
         return false;
     return true;
+}
+
+// The Windows GUI subsystem starts with no stdout to print to.
+private int cli_print(string text)
+{
+    import std.stdio : write;
+
+    version (Windows)
+    {
+        if (console_attach() == false)
+            return 1;
+    }
+    write(text);
+    return 0;
 }
