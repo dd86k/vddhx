@@ -10,7 +10,6 @@ module render;
 import core.stdc.string : strlen;
 import std.file : exists;
 import std.format : format;
-import std.process : environment;
 import std.string : fromStringz, toStringz;
 import bindbc.sdl; // publicly re-exports SDL3_ttf (TTF_*) under the static config
 import ddlogger;
@@ -133,26 +132,23 @@ else
 
 /// Create the window's renderer.
 ///
-/// The `VDDHX_RENDERER` environment variable allows creation of another renderer
-/// for SDL.
-///
 /// Nothing forces a choice by default: SDL walks its driver list itself and ends
 /// on the software one, so a machine whose accelerated drivers all fail to
-/// create still gets a renderer.
+/// create still gets a renderer. `SDL_RENDER_DRIVER` replaces that list, so a
+/// value SDL cannot honor is warned about and dropped.
 ///
 /// Returns: null on failure, with the reason left in SDL_GetError.
 SDL_Renderer* render_create(SDL_Window* window)
 {
-    string wanted = environment.get("VDDHX_RENDERER", null);
-    const(char)* driver = wanted ? wanted.toStringz : null;
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, null);
 
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, driver);
-
-    // If renderer creation failed with a named renderer, retry with the default (auto: null).
-    if (renderer is null && driver)
+    const(char)* wanted = SDL_GetHint(SDL_HINT_RENDER_DRIVER);
+    if (renderer is null && wanted && *wanted)
     {
         logWarn(`renderer "%s" unavailable: %s (have: %-(%s, %)); letting SDL choose`,
-            wanted, SDL_GetError().fromStringz, driverNames());
+            fromStringz(wanted), SDL_GetError().fromStringz, driverNames());
+        // Empty, not reset: a reset falls back to the environment variable.
+        SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "", SDL_HINT_OVERRIDE);
         renderer = SDL_CreateRenderer(window, null);
     }
 

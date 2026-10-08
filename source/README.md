@@ -51,7 +51,7 @@ loop:
 - **Nothing picks the renderer.** `render_create` names no driver, because SDL's
   own list ends on the software one: a machine where every accelerated driver
   fails to create still gets a renderer rather than the startup box. A name is
-  where that stops applying - SDL takes `VDDHX_RENDERER` as the whole list and
+  where that stops applying - SDL takes `SDL_RENDER_DRIVER` as the whole list and
   fails outright - so a name it cannot honour is warned about and dropped.
 - **The software renderer still has vsync.** It presents by handing the window
   surface back to the platform, so it has none of its own, but the loop needs no

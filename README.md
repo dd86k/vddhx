@@ -41,9 +41,13 @@ that fetches dependencies and SDL3, builds it, and installs it locally:
 
 ## Variables
 
-A few environment variables are available for diagnostic purposes.
+SDL reads a few environment variables of its own, useful for diagnostics or
+preference.
 
-- `VDDHX_RENDERER`: Force a renderer for SDL (`software`, `opengl`, `vulkan`, ...). Default: `auto` (accelerated if able).
+- `SDL_RENDER_DRIVER`: Renderer, or a comma-separated list to try in order
+  (`vulkan`, `opengl`, `software`, ...). Unset, SDL picks the first that works.
+  If none of the listed ones work, vddhx warns and lets SDL pick.
+- `SDL_VIDEO_DRIVER`: Video backend (`wayland`, `x11`, `windows`, ...).
 
 ## Hacking
 
