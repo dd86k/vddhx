@@ -10,11 +10,13 @@ module render;
 import core.stdc.string : strlen;
 import std.file : exists;
 import std.format : format;
+import std.path : baseName, buildPath;
 import std.string : fromStringz, toStringz;
 import bindbc.sdl; // publicly re-exports SDL3_ttf (TTF_*) under the static config
 import ddlogger;
 import ddui;
 import elite : MU_COMMAND_SHIP, elite_draw;
+import icon : exeDir;
 
 // Point size the faces are opened at. render_text_height reports the real TTF
 // line height of whichever face a command used, so this only sets the scale.
@@ -75,60 +77,96 @@ private __gshared TextEntry[TextKey] textCache;
 private __gshared TextKey[] textStale; // reused by the sweep
 private __gshared uint textFrame;
 
+// Font file names, tried in order against every directory font_dirs returns.
+// Names may carry a subdirectory.
 version (Windows)
 {
-    private immutable string[] uiPaths = [
-        `C:\Windows\Fonts\NotoSans-Regular.ttf`,
-        `C:\Windows\Fonts\segoeui.ttf`,
-        `C:\Windows\Fonts\arial.ttf`,
+    private immutable string[] uiNames = [
+        "NotoSans-Regular.ttf",
+        "segoeui.ttf",
+        "arial.ttf",
     ];
-    private immutable string[] monoPaths = [
-        `C:\Windows\Fonts\NotoSansMono-Regular.ttf`,
-        `C:\Windows\Fonts\consola.ttf`,
+    private immutable string[] monoNames = [
+        "NotoSansMono-Regular.ttf",
+        "consola.ttf",
     ];
-    private immutable string[] cjkPaths = [
-        `C:\Windows\Fonts\NotoSansCJKsc-Regular.otf`,
-        `C:\Windows\Fonts\msgothic.ttc`,
+    private immutable string[] cjkNames = [
+        "NotoSansCJKsc-Regular.otf",
+        "msgothic.ttc",
     ];
-    private immutable string[] symPaths = [
-        `C:\Windows\Fonts\NotoSansSymbols-Regular.ttf`,
-        `C:\Windows\Fonts\seguisym.ttf`,
+    private immutable string[] symNames = [
+        "NotoSansSymbols-Regular.ttf",
+        "seguisym.ttf",
+    ];
+}
+else version (OSX)
+{
+    private immutable string[] uiNames = [
+        "NotoSans-Regular.ttf",
+        "SFNS.ttf",
+        "Helvetica.ttc",
+    ];
+    private immutable string[] monoNames = [
+        "NotoSansMono-Regular.ttf",
+        "SFNSMono.ttf",
+        "Menlo.ttc",
+        "Monaco.ttf",
+    ];
+    private immutable string[] cjkNames = [
+        "NotoSansCJK-Regular.ttc",
+        "Hiragino Sans GB.ttc",
+        "Supplemental/Arial Unicode.ttf",
+    ];
+    private immutable string[] symNames = [
+        "NotoSansSymbols2-Regular.ttf",
+        "Apple Symbols.ttf",
+        "Supplemental/Arial Unicode.ttf",
     ];
 }
 else
 {
-    // In general: fontconfig first, these second
-    private immutable string[] uiPaths = [
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/TTF/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    // Only reached without fontconfig, so the layouts of the major distributions.
+    private immutable string[] uiNames = [
+        "truetype/noto/NotoSans-Regular.ttf",
+        "noto/NotoSans-Regular.ttf",
+        "TTF/NotoSans-Regular.ttf",
+        "truetype/dejavu/DejaVuSans.ttf",
+        "dejavu/DejaVuSans.ttf",
+        "TTF/DejaVuSans.ttf",
+        "truetype/liberation/LiberationSans-Regular.ttf",
+        "liberation/LiberationSans-Regular.ttf",
     ];
-    private immutable string[] monoPaths = [
-        "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/TTF/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+    private immutable string[] monoNames = [
+        "truetype/noto/NotoSansMono-Regular.ttf",
+        "noto/NotoSansMono-Regular.ttf",
+        "TTF/NotoSansMono-Regular.ttf",
+        "truetype/dejavu/DejaVuSansMono.ttf",
+        "dejavu/DejaVuSansMono.ttf",
+        "TTF/DejaVuSansMono.ttf",
+        "truetype/liberation/LiberationMono-Regular.ttf",
+        "liberation/LiberationMono-Regular.ttf",
     ];
-    private immutable string[] cjkPaths = [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    private immutable string[] cjkNames = [
+        "opentype/noto/NotoSansCJK-Regular.ttc",
+        "truetype/noto/NotoSansCJK-Regular.ttc",
+        "noto-cjk/NotoSansCJK-Regular.ttc",
     ];
-    private immutable string[] symPaths = [
-        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+    private immutable string[] symNames = [
+        "truetype/noto/NotoSansSymbols2-Regular.ttf",
+        "truetype/noto/NotoSansSymbols-Regular.ttf",
+        "noto/NotoSansSymbols2-Regular.ttf",
     ];
 }
+
+// Resolved by render_init, since on Windows and macOS they depend on the user.
+private __gshared string[] fontDirs;
+
+// Shipped next to the executable under the same file names, for a system that has
+// none of them. Never preferred over an installed font.
+private __gshared string bundledDir;
+
+version (OSX) {}
+else version (Posix) version = Fontconfig;
 
 /// Create the window's renderer.
 ///
@@ -175,21 +213,24 @@ string render_init(SDL_Renderer* renderer)
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
     // Nothing here consults SDL_GetError: a face is missing because nothing on
+    fontDirs = font_dirs();
+    bundledDir = buildPath(exeDir(), "assets", "fonts");
+
     // the machine matched, which SDL never saw.
-    fontUI = openFace("UI", "sans-serif", 0, uiPaths);
+    fontUI = openFace("UI", "sans-serif", 0, uiNames);
     if (fontUI is null)
     {
-        logCritical("no UI font; looked for %-(%s, %)", uiPaths);
+        logCritical("no UI font; looked for %-(%s, %) in %-(%s, %), %s", uiNames, fontDirs, bundledDir);
         return "No font found.\n\nInstall a TrueType font: fonts-noto or " ~
             "fonts-dejavu will do.";
     }
 
     // Missing the mono face is not fatal, the hex panel merely goes unaligned.
-    fontMono = openFace("mono", "monospace", 0, monoPaths);
+    fontMono = openFace("mono", "monospace", 0, monoNames);
     if (fontMono is null)
     {
         logWarn("no monospace font, falling back to the UI face (the hex grid " ~
-            "will not align); install one of: %s", monoPaths);
+            "will not align); install one of: %s", monoNames);
         fontMono = fontUI;
     }
 
@@ -197,10 +238,10 @@ string render_init(SDL_Renderer* renderer)
     // pattern nothing installed can satisfy, fontconfig still answers with its
     // best effort rather than nothing.
     // Attempt to match a glyph. fontconfig still answers
-    addFallback("CJK", ":lang=ja", '一', cjkPaths);
+    addFallback("CJK", ":lang=ja", '一', cjkNames);
     addFallback("symbol",
         format(":charset=%04X", cast(uint) icons[MU_ICON_CLOSE].code),
-        icons[MU_ICON_CLOSE].code, symPaths);
+        icons[MU_ICON_CLOSE].code, symNames);
 
     // Once the chain is complete: TTF_FontHasGlyph follows fallbacks, so this
     // asks the whole set at once.
@@ -329,18 +370,23 @@ string[] driverNames()
     return names;
 }
 
-// A face for one role: fontconfig's answer for the pattern, then the built-in
-// paths. `probe` is a codepoint the face has to carry, or 0 to take whatever
-// comes back.
-TTF_Font* openFace(string role, string pattern, dchar probe, const(string)[] paths)
+// A face for one role: fontconfig's answer for the pattern, then the known files,
+// installed before bundled. `probe` is a codepoint the face has to carry, or 0
+// to take whatever comes back.
+TTF_Font* openFace(string role, string pattern, dchar probe, const(string)[] names)
 {
     string matched = fc_match(pattern);
     if (matched.length)
         if (TTF_Font* f = openPath(role, matched, probe))
             return f;
 
-    foreach (string p; paths)
-        if (TTF_Font* f = openPath(role, p, probe))
+    foreach (string name; names)
+        foreach (string dir; fontDirs)
+            if (TTF_Font* f = openPath(role, buildPath(dir, name), probe))
+                return f;
+
+    foreach (string name; names)
+        if (TTF_Font* f = openPath(role, buildPath(bundledDir, baseName(name)), probe))
             return f;
 
     return null;
@@ -363,11 +409,11 @@ TTF_Font* openPath(string role, string path, dchar probe)
 }
 
 // Open one fallback face and register it on both primaries.
-void addFallback(string role, string pattern, dchar probe, const(string)[] paths)
+void addFallback(string role, string pattern, dchar probe, const(string)[] names)
 {
     if (fallbackCount >= fallbacks.length)
         return;
-    TTF_Font* f = openFace(role, pattern, probe, paths);
+    TTF_Font* f = openFace(role, pattern, probe, names);
     if (f is null)
     {
         logInfo("no %s face; those glyphs will draw blank", role);
@@ -381,7 +427,7 @@ void addFallback(string role, string pattern, dchar probe, const(string)[] paths
 
 // fontconfig, opened at runtime so that it stays a nicety rather than a link-time
 // dependency: SDL3_ttf does not pull it in, and a container may not have it.
-version (Posix)
+version (Fontconfig)
 {
     import core.sys.posix.dlfcn : RTLD_LAZY, dlopen, dlsym;
 
@@ -481,7 +527,64 @@ version (Posix)
 }
 else
 {
-    string fc_match(string pattern) => null; // Windows: the paths below are it
+    // Windows and macOS have no fontconfig to ask, so the file names are it.
+    string fc_match(string pattern) => null;
+}
+
+version (Windows)
+{
+    import core.sys.windows.basetyps : GUID;
+    import core.sys.windows.objbase : CoTaskMemFree;
+    import core.sys.windows.windef : DWORD, HANDLE, HRESULT;
+    import std.conv : to;
+
+    pragma(lib, "shell32");
+    pragma(lib, "ole32");
+
+    // Not in druntime.
+    extern (Windows) nothrow @nogc
+    HRESULT SHGetKnownFolderPath(const(GUID)* rfid, DWORD flags, HANDLE token, wchar** path);
+
+    private immutable GUID FOLDERID_Fonts =
+        { 0xFD228CB7, 0xAE11, 0x4AE3, [ 0x86, 0x4C, 0x16, 0xF3, 0x91, 0x0A, 0xB8, 0xFE ] };
+    private immutable GUID FOLDERID_LocalAppData =
+        { 0xF1B32785, 0x6FBA, 0x4FCF, [ 0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91 ] };
+
+    private string knownFolder(ref immutable(GUID) id)
+    {
+        wchar* path;
+        HRESULT hr = SHGetKnownFolderPath(&id, 0, null, &path);
+        scope(exit) CoTaskMemFree(path); // owed even on failure
+        return hr == 0 ? path.fromStringz.to!string : null;
+    }
+
+    // Fonts installed without admin rights (Windows 10 1809+) land in the user's
+    // own folder, not the system one.
+    string[] font_dirs()
+    {
+        string[] dirs;
+        if (string sys = knownFolder(FOLDERID_Fonts))
+            dirs ~= sys;
+        if (string local = knownFolder(FOLDERID_LocalAppData))
+            dirs ~= buildPath(local, `Microsoft\Windows\Fonts`);
+        return dirs;
+    }
+}
+else version (OSX)
+{
+    import std.process : environment;
+
+    string[] font_dirs()
+    {
+        string[] dirs = [ "/System/Library/Fonts", "/Library/Fonts" ];
+        if (string home = environment.get("HOME"))
+            dirs ~= buildPath(home, "Library/Fonts");
+        return dirs;
+    }
+}
+else
+{
+    string[] font_dirs() => [ "/usr/share/fonts", "/usr/local/share/fonts" ];
 }
 
 void draw_rect(SDL_Renderer* renderer, mu_Rect rect, mu_Color color)

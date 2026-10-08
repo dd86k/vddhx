@@ -106,7 +106,8 @@ string[] candidates(int size)
     return paths;
 }
 
-string exeDir()
+/// Directory holding the executable, where assets/ ships; "." if it cannot be told.
+public string exeDir()
 {
     try return thisExePath().dirName;
     catch (Exception e)
