@@ -4512,11 +4512,10 @@ void ui_omni_run(int id)
 }
 
 /// True while something on screen moves on its own and the loop has to keep
-/// drawing rather than sleeping until the next event. Nothing in the editor
-/// proper animates (for now), so this is only ever the easter egg.
+/// drawing rather than sleeping until the next event.
 public bool ui_animating()
 {
-    return elite_animating() || ui_tip_pending();
+    return elite_animating() || ui_tip_pending() || hex_edge_scrolling();
 }
 
 /// Build one frame of UI. Call between mu_begin and mu_end.

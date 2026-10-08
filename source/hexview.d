@@ -9,6 +9,7 @@
 module hexview;
 
 import ddui;
+import core.time : MonoTime, msecs;
 
 /// Extra ddui key bits for the hex panel's caret. ddui's own MU_KEY_* flags
 /// stop at (1 << 5); these carry on from there so both can share ctx.key_down.
@@ -294,6 +295,11 @@ struct HexView
     // between frames (see takeFocus), and a button held for something else - a tab
     // being dragged across the window - would then sweep out a selection.
     bool dragSel;
+    // Edge scrolling while that drag is held past the grid: whole rows owed so far,
+    // and when they were last counted, so the pace follows the clock and not the
+    // frame rate.
+    double edgeRows = 0;
+    MonoTime edgeAt;
 
     // Reused scratch for the visible window when reading through readFn, refilled
     // every frame, so a huge document costs only a screenful of bytes here.
@@ -370,6 +376,13 @@ unittest
     // ... and the source keeps its own.
     assert(a.windowBuf.length == 64);
     assert(a.mapCells.length == 8);
+}
+
+/// Whether a selection drag is running a panel past its edge. Nothing else moves
+/// while the pointer holds still out there, so the loop must keep drawing.
+bool hex_edge_scrolling()
+{
+    return edgeLast != MonoTime.init && MonoTime.currTime - edgeLast < 100.msecs;
 }
 
 /// Scroll the view back to the top. Call when a fresh document is loaded so the
@@ -1154,6 +1167,57 @@ unittest
     assert(hex_drag_hit(lay, body, 0, 1, 16, 100, gap, -1) == -1);          // above
 }
 
+// When any panel last edge-scrolled. A stamp rather than a flag, so a panel that
+// stops being drawn mid-drag cannot keep the loop free-running.
+MonoTime edgeLast;
+
+// Rows a second for a pointer `past` pixels beyond the grid, doubling every two
+// rows further out: a nudge creeps, a long pull crosses gigabytes in seconds.
+double hex_edge_rate(int past, int rowH)
+{
+    import std.math : exp2;
+
+    double rows = cast(double)(past < 0 ? -past : past) / rowH;
+    return exp2(rows < 74 ? 3 + rows / 2 : 40.0);
+}
+
+unittest
+{
+    assert(hex_edge_rate(1, 20) > 8 && hex_edge_rate(1, 20) < 9);
+    assert(hex_edge_rate(-40, 20) == 16);  // either direction alike
+    assert(hex_edge_rate(400, 20) == 8192);
+    assert(hex_edge_rate(int.max, 1) == hex_edge_rate(int.min + 1, 1)); // capped
+}
+
+// Whole rows to scroll this frame, signed like `past`. The first frame past the
+// edge only starts the clock.
+long hex_edge_scroll(ref HexView v, int past, int rowH)
+{
+    MonoTime now = MonoTime.currTime;
+    edgeLast = now;
+    if (v.edgeAt == MonoTime.init)
+    {
+        v.edgeAt = now;
+        return 0;
+    }
+    // A stall (a slow frame, the window dragged) is not owed in rows.
+    double dt = (now - v.edgeAt).total!"usecs" / 1e6;
+    if (dt > 0.1)
+        dt = 0.1;
+    v.edgeAt = now;
+
+    v.edgeRows += hex_edge_rate(past, rowH) * dt;
+    long n = cast(long) v.edgeRows;
+    v.edgeRows -= n;
+    return past < 0 ? -n : n;
+}
+
+void hex_edge_stop(ref HexView v)
+{
+    v.edgeAt = MonoTime.init;
+    v.edgeRows = 0;
+}
+
 long hex_index(long row, int cols, int i, size_t total)
 {
     if (row < 0)
@@ -1194,6 +1258,8 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     // the bail-outs below, so an empty read-only panel cannot leave it set.
     if ((ctx.mouse_down & MU_MOUSE_LEFT) == 0)
         v.dragSel = false;
+    if (v.dragSel == false)
+        hex_edge_stop(v);
 
     if (v.locked)
     {
@@ -1241,8 +1307,24 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     }
     else if (v.dragSel && (ctx.mouse_down & MU_MOUSE_LEFT) && v.active)
     {
+        // Held past the top or bottom row, the view runs that way and the caret
+        // rides the edge row, so the selection grows past what fits on screen.
+        int top = body.y;
+        int bottom = body.y + visibleRows * rowH - 1;
+        int my = ctx.mouse_pos.y;
+        int past = my < top ? my - top : my > bottom ? my - bottom : 0;
+        if (past != 0)
+        {
+            v.topRow += hex_edge_scroll(v, past, rowH);
+            if (v.topRow < 0)
+                v.topRow = 0;
+            my = mu_clamp(my, top, bottom);
+        }
+        else
+            hex_edge_stop(v);
+
         long hit = hex_drag_hit(lay, body, v.topRow, rowH, cols, total,
-            ctx.mouse_pos.x, ctx.mouse_pos.y);
+            ctx.mouse_pos.x, my);
         if (hit >= 0 && cast(size_t) hit != v.cursor)
         {
             v.cursor = cast(size_t) hit;
