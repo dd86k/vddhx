@@ -79,6 +79,17 @@ struct Document
     /// does not - the grid then colours bytes by class, as it always did.
     LayoutCache layout;
 
+    /// Read-ahead for the layout parser, which walks forward a few header bytes at a
+    /// time. Its length is the capacity.
+    ubyte[] layoutBuf;
+    /// Layout buffer starting position in document.
+    long layoutStart;
+    /// Layout buffer length that's valid to use, since last fill.
+    size_t layoutLen;
+    /// Layout buffer revision the buffer was filled at, taken from the document.
+    /// Used to invalidate the buffer for a fresh read.
+    uint layoutRev;
+
     /// Byte order multi-byte values are read and written in: the inspector's rows
     /// and the scalars of a find pattern (`u16:`, `f32:`, `utf16:`). Per document,
     /// because the order is a property of the format on disk - a big-endian file
@@ -1424,11 +1435,51 @@ LayoutReadFn documentReader(Document* d)
 {
     return delegate(long at, ubyte[] buf)
     {
+        if (at < 0 || buf.length == 0)
+            return buf[0 .. 0];
+
         try
-            return d.editor.view(at, buf);
+            return layoutBuffered(d, at, buf);
         catch (Exception e)
             return buf[0 .. 0];
     };
+}
+
+/// How much the layout buffer reads ahead at a time.
+enum size_t LAYOUT_BLOCK = 64 * 1024;
+
+/// Serve `buf` from `doc`'s layout buffer, refilling it from `at` on a miss. A
+/// request larger than the buffer goes straight to the editor.
+/// Throws: Whatever the editor does.
+ubyte[] layoutBuffered(Document* doc, long at, ubyte[] buf)
+{
+    if (buf.length > LAYOUT_BLOCK)
+        return doc.editor.view(at, buf);
+
+    bool fresh = doc.layoutRev == doc.revision && doc.layoutLen > 0 &&
+        at >= doc.layoutStart && at - doc.layoutStart < doc.layoutLen;
+    // A request straddling the end of a full buffer has more document after it, so
+    // it refills; one past the end of a short buffer is at EOF, so it is served short.
+    if (fresh && at + buf.length > doc.layoutStart + doc.layoutLen &&
+        doc.layoutLen == LAYOUT_BLOCK)
+        fresh = false;
+
+    if (fresh == false)
+    {
+        if (doc.layoutBuf.length < LAYOUT_BLOCK)
+            doc.layoutBuf.length = LAYOUT_BLOCK;
+        doc.layoutLen = 0; // a throwing read leaves nothing claimed
+        ubyte[] got = doc.editor.view(at, doc.layoutBuf);
+        doc.layoutStart = at;
+        doc.layoutLen   = got.length;
+        doc.layoutRev   = doc.revision;
+    }
+
+    size_t from = cast(size_t)(at - doc.layoutStart);
+    if (from >= doc.layoutLen)
+        return buf[0 .. 0];
+    size_t n = doc.layoutLen - from < buf.length ? doc.layoutLen - from : buf.length;
+    return buf[0 .. n] = doc.layoutBuf[from .. from + n];
 }
 
 /// Give `d` a layout when its opening bytes say what it is, and nothing when they do
@@ -1442,7 +1493,7 @@ void detectLayout(Document* d)
     ubyte[64] head = void;
     ubyte[] got;
     try
-        got = d.editor.view(0, head);
+        got = layoutBuffered(d, 0, head); // warms the buffer the parse starts in
     catch (Exception e)
         return;
 
@@ -2506,6 +2557,7 @@ void cutSelection(bool asText)
         return;
     }
     ++doc.revision;
+    layoutEdited(view.doc, cast(long) low);
     bookmark_shift(doc.marks, cast(long) low, -cast(long)(high - low + 1));
 
     view.hex.dataSize = doc.editor.size();
@@ -2584,6 +2636,7 @@ public void ui_paste()
     // The document may have moved even on a failed insert-after-remove, so the
     // panel is refreshed either way.
     ++doc.revision;
+    layoutEdited(view.doc, pos);
     view.hex.dataSize = editor.size();
     hex_set_caret(view.hex, ok ? low + bytes.length : low);
     if (ok)
