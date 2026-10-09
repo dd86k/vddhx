@@ -37,6 +37,9 @@ import std.array : Appender, appender;
 import std.format : format, sformat, formattedWrite;
 import std.path : baseName;
 
+// NOTE: ref local once DMD 2.111 is the minimum compiler version
+//       Otherwise, keep using local pointers
+
 private:
 
 /// One open document: the ddhx editor that owns the bytes, and where they live on
@@ -403,21 +406,21 @@ enum PromptKind
 __gshared PromptKind promptKind;
 
 /// The pane taking the keyboard, the view it has in front, and the document that
-/// view is showing: `pane` for the tabs, `view` for the caret and what is on
-/// screen, `doc` for the bytes themselves.
-ref Pane pane()
+/// view is showing: `focusedPane` for the tabs, `focusedView` for the caret and what
+/// is on screen, `focusedDoc` for the bytes themselves.
+ref Pane focusedPane()
 {
     return *focused;
 }
 /// Ditto.
-ref View view()
+ref View focusedView()
 {
     return *focused.views[focused.current];
 }
 /// Ditto.
-ref Document doc()
+ref Document focusedDoc()
 {
-    return *view().doc;
+    return *focusedView().doc;
 }
 
 /// Find `p` in the grid: which column it is in, and how far down that column.
@@ -885,7 +888,7 @@ void ui_drop_pane(Pane* p)
 /// position as a starting point and then moves on its own.
 View* ui_split_view()
 {
-    View* src = pane.views[pane.current];
+    View* src = focusedPane.views[focusedPane.current];
 
     View* v = new View;
     v.doc = src.doc;
@@ -1053,7 +1056,7 @@ public void ui_cycle_pane(int delta)
 /// Close the tab on screen. The Ctrl+W and File > Close Tab route.
 public void ui_close_current_tab()
 {
-    ui_close_tab(pane.current);
+    ui_close_tab(focusedPane.current);
 }
 
 /// The title text last handed to SDL, NUL-terminated, and its length. Kept so
@@ -1071,6 +1074,7 @@ void ui_window_title()
         return;
 
     char[512] buf = void;
+    Document* doc = &focusedDoc();
     char[] text = ui_title_text(buf, doc.title, doc.editor && doc.editor.edited());
     if (text.length == titleShownLen && text == titleShown[0 .. titleShownLen])
         return;
@@ -1306,17 +1310,17 @@ bool hexSpan(long pos, int level, ref HexSpan span, void* user)
 /// Read the way the grid is: the record, then what in it. Containers carry no name of
 /// their own to skip, so a format that boxes without naming leaves only the field.
 /// Returns: The used slice of `buf`, empty when no layout covers the offset.
-const(char)[] layoutLabel(Document* d, long at, char[] buf)
+const(char)[] layoutLabel(Document* doc, long at, char[] buf)
 {
     LayoutSpan inner;
-    if (layout_at(d.layout, at, inner) == false)
+    if (layout_at(doc.layout, at, inner) == false)
         return null;
 
     size_t n;
     for (int level; level <= inner.depth; ++level)
     {
         LayoutSpan s;
-        if (layout_level(d.layout, at, level, s) == false || s.name.length == 0)
+        if (layout_level(doc.layout, at, level, s) == false || s.name.length == 0)
             continue;
 
         if (n && n + SEP.length <= buf.length)
@@ -1508,12 +1512,12 @@ void detectLayout(Document* d)
 /// Drop the spans an edit at `pos` invalidated and tell the layout the new size.
 /// Cheap enough to call on every keystroke: the cache truncates rather than reparses,
 /// and the parse that follows is driven by what the next frame actually draws.
-void layoutEdited(Document* d, long pos)
+void layoutEdited(Document* doc, long pos)
 {
     if (pos < 0)
         pos = 0;
-    layout_resize(d.layout, d.editor.size());
-    layout_invalidate(d.layout, pos);
+    layout_resize(doc.layout, doc.editor.size());
+    layout_invalidate(doc.layout, pos);
 }
 
 /// Background hook for the grid: a wash behind the bookmarked bytes, nothing behind
@@ -1830,7 +1834,7 @@ public void ui_open_dialog()
 public void ui_compare_dialog()
 {
     pendingCompare = true;
-    compareFrom    = pane.views[pane.current];
+    compareFrom    = focusedPane.views[focusedPane.current];
     ui_file_dialog(&ui_on_file_picked, false);
 }
 
@@ -1852,7 +1856,7 @@ public void ui_compare_with(string path)
     View* left = compareFrom;
     compareFrom = null;
     if (left is null || ui_view_pane(left) is null)
-        left = pane.views[pane.current];
+        left = focusedPane.views[focusedPane.current];
 
     Document* d = ui_load(path);
     if (d is null)
@@ -1877,7 +1881,7 @@ public void ui_compare_with(string path)
 /// it is not in one.
 public void ui_compare_stop()
 {
-    View* v = pane.views[pane.current];
+    View* v = focusedPane.views[focusedPane.current];
     if (v.diff is null)
     {
         ui_status("not comparing");
@@ -1921,31 +1925,31 @@ public bool ui_open(string path, bool here = false)
 }
 
 /// Ditto, for a document already loaded.
-bool ui_show(Document* d, bool here)
+bool ui_show(Document* doc, bool here)
 {
     // The focused pane is where the user was working - or, on a drop, the pane the
     // file was let go over.
     Pane* p = focused;
 
-    if (ui_view_count(d) > 0)
+    if (ui_view_count(doc) > 0)
     {
         // Already up in this very pane: nothing to open either way, just come to it.
         foreach (size_t i, View* q; p.views)
         {
-            if (q.doc is d)
+            if (q.doc is doc)
             {
                 ui_select_tab_in(p, i);
-                ui_status("%s is already open here", ui_clip(d.title, 48));
+                ui_status("%s is already open here", ui_clip(doc.title, 48));
                 return true;
             }
         }
 
         if (here == false)
         {
-            ui_focus_document(d);
+            ui_focus_document(doc);
             Pane* at = focused;
             ui_status("%s is already open in pane %d",
-                ui_clip(d.title, 40), cast(int)(ui_pane_index(at) + 1));
+                ui_clip(doc.title, 40), cast(int)(ui_pane_index(at) + 1));
             return true;
         }
     }
@@ -1962,14 +1966,14 @@ bool ui_show(Document* d, bool here)
         // A different file in the same view, so any comparison it was part of was
         // about the bytes that just left.
         diff_unlink(v);
-        v.doc = d;
+        v.doc = doc;
         if (ui_view_count(scratch) == 0)
             ui_drop_document(scratch);
     }
     else
     {
         v = new View;
-        v.doc = d;
+        v.doc = doc;
         p.views ~= v; // .length updated
         p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     }
@@ -1981,7 +1985,7 @@ bool ui_show(Document* d, bool here)
     v.hex.cursor = 0;
     v.hex.anchor = 0;
     hex_reset_scroll(v.hex); // and scroll to the top so that first byte is visible
-    logInfo("opened %s (%s bytes)", d.path, v.hex.dataSize);
+    logInfo("opened %s (%s bytes)", doc.path, v.hex.dataSize);
     return true;
 }
 
@@ -2227,40 +2231,40 @@ extern (C) void ui_on_save_picked(void* user, const(char*)* fileList, int filter
 /// a handle without write access never having let an edit through.
 public void ui_toggle_readonly()
 {
-    Document* d = &doc();
-    if (d.restricted == false)
+    Document* doc = &focusedDoc();
+    if (doc.restricted == false)
     {
-        d.restricted = true;
-        ui_status("%s is read-only", ui_clip(d.title, 40));
+        doc.restricted = true;
+        ui_status("%s is read-only", ui_clip(doc.title, 40));
         return;
     }
-    if (ui_refuse_busy(d))
+    if (ui_refuse_busy(doc))
         return;
 
     // A file saves by replacing it, so its own handle never needs write access.
-    FileDocument src = cast(FileDocument) d.editor.document();
-    if (ui_fixed(d) && src && src.writable() == false)
+    FileDocument src = cast(FileDocument) doc.editor.document();
+    if (ui_fixed(doc) && src && src.writable() == false)
     {
         FileDocument rw;
         try
-            rw = new FileDocument(d.path, OFlags.readWrite | OFlags.exists | OFlags.share);
+            rw = new FileDocument(doc.path, OFlags.readWrite | OFlags.exists | OFlags.share);
         catch (Exception e)
         {
             if (elevate_denied(e))
             {
-                ui_elevate(d.path, true);
+                ui_elevate(doc.path, true);
                 return;
             }
             logWarn("read-only off: %s", e.msg);
-            ui_status("cannot open %s for writing: %s", ui_clip(d.title, 32), ui_clip(e.msg, 44));
+            ui_status("cannot open %s for writing: %s", ui_clip(doc.title, 32), ui_clip(e.msg, 44));
             return;
         }
-        ui_swap_source(d, rw);
+        ui_swap_source(doc, rw);
     }
 
-    d.restricted = false;
-    ui_status(ui_fixed(d) ? "%s is editable; Save writes into it directly" : "%s is editable",
-        ui_clip(d.title, 40));
+    doc.restricted = false;
+    ui_status(ui_fixed(doc) ? "%s is editable; Save writes into it directly" : "%s is editable",
+        ui_clip(doc.title, 40));
 }
 
 /// Put up the system's prompt for opening `path` with the rights this process
@@ -2331,10 +2335,10 @@ void ui_elevated(ref Elevated answer)
 }
 
 /// Put `d`'s editor on `src`, the same bytes through another handle.
-void ui_swap_source(Document* d, IDocument src)
+void ui_swap_source(Document* doc, IDocument src)
 {
-    IDocument old = d.editor.document();
-    d.editor.open(src);
+    IDocument old = doc.editor.document();
+    doc.editor.open(src);
     if (old)
         old.close();
 }
@@ -2344,6 +2348,7 @@ void ui_swap_source(Document* d, IDocument src)
 /// the write landing later on the main thread once a path is chosen.
 public bool ui_save()
 {
+    Document doc = focusedDoc();
     if (doc.path.length)
         return saveTo(doc, doc.path);
 
@@ -2357,7 +2362,7 @@ public bool ui_save()
 /// in-place Save follows it.
 public void ui_save_as()
 {
-    pendingSaveTarget = doc.editor;
+    pendingSaveTarget = focusedDoc.editor;
     ui_file_dialog(&ui_on_save_picked, true);
 }
 
@@ -2458,7 +2463,7 @@ public bool ui_copy_text()
 bool copySelection(bool asText)
 {
     size_t low, high;
-    if (ui_selection(view, low, high) == false)
+    if (ui_selection(focusedView, low, high) == false)
         return false;
 
     size_t len = high - low + 1;
@@ -2469,7 +2474,7 @@ bool copySelection(bool asText)
     }
 
     static immutable string digits = "0123456789abcdef";
-    int cols = view.hex.columns > 0 ? view.hex.columns : 16;
+    int cols = focusedView.hex.columns > 0 ? focusedView.hex.columns : 16;
     Appender!(char[]) text = appender!(char[]);
     text.reserve(len * 3 + 1); // plus the terminator; a character can be three too
 
@@ -2481,7 +2486,7 @@ bool copySelection(bool asText)
     {
         size_t want = len - done;
         if (want > buffer.length) want = buffer.length;
-        ubyte[] chunk = doc.editor.view(cast(long)(low + done), buffer[0 .. want]);
+        ubyte[] chunk = focusedDoc.editor.view(cast(long)(low + done), buffer[0 .. want]);
         if (chunk.length == 0)
             break; // nothing more readable; avoid spinning
         foreach (i, ubyte b; chunk)
@@ -2490,7 +2495,7 @@ bool copySelection(bool asText)
             {
                 // The lane as it is drawn, which is the document's set: what you
                 // see is what you get, dots and all.
-                const(char)[] glyph = doc.charset.glyph(b);
+                const(char)[] glyph = focusedDoc.charset.glyph(b);
                 if (glyph.length)
                     text.put(glyph);
                 else
@@ -2541,10 +2546,12 @@ public void ui_cut_text()
 /// Ditto.
 void cutSelection(bool asText)
 {
-    if (ui_refuse_edit(&doc()))
+    Document* doc = &focusedDoc();
+    View* view = &focusedView();
+    if (ui_refuse_edit(doc))
         return;
     size_t low, high;
-    if (ui_selection(view, low, high) == false)
+    if (ui_selection(*view, low, high) == false)
         return;
     if (copySelection(asText) == false)
         return;
@@ -2557,7 +2564,7 @@ void cutSelection(bool asText)
         return;
     }
     ++doc.revision;
-    layoutEdited(view.doc, cast(long) low);
+    layoutEdited(doc, cast(long) low);
     bookmark_shift(doc.marks, cast(long) low, -cast(long)(high - low + 1));
 
     view.hex.dataSize = doc.editor.size();
@@ -2576,7 +2583,9 @@ void cutSelection(bool asText)
 /// A selection wider than one byte is what the paste replaces, in either mode.
 public void ui_paste()
 {
-    if (doc.editor is null || ui_refuse_edit(&doc()))
+    Document* doc = &focusedDoc();
+    View* view = &focusedView();
+    if (doc.editor is null || ui_refuse_edit(doc))
         return;
 
     char* clip = SDL_GetClipboardText(); // caller frees; an empty string on failure
@@ -2636,7 +2645,7 @@ public void ui_paste()
     // The document may have moved even on a failed insert-after-remove, so the
     // panel is refreshed either way.
     ++doc.revision;
-    layoutEdited(view.doc, pos);
+    layoutEdited(doc, pos);
     view.hex.dataSize = editor.size();
     hex_set_caret(view.hex, ok ? low + bytes.length : low);
     if (ok)
@@ -2708,10 +2717,12 @@ unittest
 /// asked.
 public void ui_undo(bool redo)
 {
-    if (doc.editor is null || ui_refuse_edit(&doc()))
+    Document *doc = &focusedDoc();
+    if (doc.editor is null || ui_refuse_edit(doc))
         return;
 
-    void* user = cast(void*) &view();
+    View *view = &focusedView();
+    void* user = cast(void*) view;
     long at = redo ? hexRedo(user) : hexUndo(user);
     if (at < 0)
     {
@@ -2742,7 +2753,7 @@ version (Screenshots)
     public __gshared string uiPickAuto;
 }
 
-/// Resolve unsaved edits in `d` before an action that would discard them (closing
+/// Resolve unsaved edits in `doc` before an action that would discard them (closing
 /// the last view of it, or quitting). With no edits pending it proceeds silently;
 /// otherwise it brings a view of that document to the front - so the prompt is
 /// about what is on screen - and puts up a native Save / Don't Save / Cancel box
@@ -2750,14 +2761,14 @@ version (Screenshots)
 /// Returns: Confirm.proceed when the caller may go ahead, Confirm.cancel when the
 ///          user backed out, a chosen save has yet to finish, or the prompt itself
 ///          failed (fail safe: never lose data on an error).
-Confirm ui_confirm_discard(Document* d, const(char)* title)
+Confirm ui_confirm_discard(Document* doc, const(char)* title)
 {
-    if (d is null)
+    if (doc is null)
         return Confirm.proceed;
-    if ((d.editor && d.editor.edited()) == false)
+    if ((doc.editor && doc.editor.edited()) == false)
         return Confirm.proceed;
 
-    ui_focus_document(d);
+    ui_focus_document(doc);
 
     // The focus above still runs, so a scripted close leaves the same tab in
     // front a real one would; only the box itself is skipped. It is a native
@@ -2773,7 +2784,7 @@ Confirm ui_confirm_discard(Document* d, const(char)* title)
     ];
     // With several tabs open, "the document" is not enough to tell the user which
     // one they are about to lose.
-    string message = format("%s has unsaved changes.", d.title);
+    string message = format("%s has unsaved changes.", doc.title);
     SDL_MessageBoxData data = {
         flags:      SDL_MESSAGEBOX_WARNING,
         window:     uiWindow,
@@ -2966,7 +2977,7 @@ public void ui_omni_toggle(char prefix = 0)
 {
     omni_toggle(omni, prefix);
     if (omni_shown(omni) == false)
-        view.hex.takeFocus = true; // typing goes back to the bytes
+        focusedView.hex.takeFocus = true; // typing goes back to the bytes
 }
 
 /// Raise the omnibar on the mode `prefix` opens, leaving it up when it is already
@@ -2983,7 +2994,7 @@ public void ui_omni_close()
     if (omni_shown(omni) == false)
         return;
     omni_hide(omni);
-    view.hex.takeFocus = true;
+    focusedView.hex.takeFocus = true;
 }
 
 /// Fill the omnibar's row list for the mode it is currently in. Rebuilt every
@@ -3098,7 +3109,7 @@ const(OmniItem)[] ui_omni_items()
                 ui_row_text(ui_inspect_value(i, bytes, value)), i);
         break;
     case OmniMode.bookmark:
-        if (doc.marks.length == 0)
+        if (focusedDoc.marks.length == 0)
         {
             put("no bookmarks in this document", "Ctrl+B marks the selection",
                 -1, false, true);
@@ -3106,7 +3117,7 @@ const(OmniItem)[] ui_omni_items()
         }
         // The row's id is the mark's place in the list: an offset does not fit an
         // int on a document worth bookmarking.
-        foreach (size_t i, ref Bookmark mark; doc.marks)
+        foreach (size_t i, ref Bookmark mark; focusedDoc.marks)
         {
             char[48] head = void;
             size_t used = sformat(head, "0x%08x", mark.at).length;
@@ -3130,10 +3141,10 @@ const(OmniItem)[] ui_omni_items()
         break;
     case OmniMode.structure:
         bool whole;
-        const(LayoutSpan)[] spans = layout_spans(doc.layout, STRUCT_ROWS, whole);
+        const(LayoutSpan)[] spans = layout_spans(focusedDoc.layout, STRUCT_ROWS, whole);
         if (spans.length == 0)
         {
-            put(layout_name(doc.layout).length ?
+            put(layout_name(focusedDoc.layout).length ?
                     "nothing parsed in this document" : "no layout for this document",
                 "PNG is the only format read so far", -1, false, true);
             break;
@@ -3241,15 +3252,15 @@ void ui_struct_preview(OmniMode mode)
 
     int id = omni_current(omni);
     bool whole;
-    const(LayoutSpan)[] spans = layout_spans(doc.layout, STRUCT_ROWS, whole);
+    const(LayoutSpan)[] spans = layout_spans(focusedDoc.layout, STRUCT_ROWS, whole);
     if (id < 0 || id >= spans.length || spans[id].length <= 0)
         return;
 
     mu_Rect box = omni_rect(omni);
-    ui_select_range(view, cast(size_t) spans[id].at, cast(size_t) spans[id].length);
-    hex_center(view.hex, cast(size_t) spans[id].at, box.y + box.h);
-    preview.setCursor = view.hex.cursor;
-    preview.setAnchor = view.hex.anchor;
+    ui_select_range(focusedView, cast(size_t) spans[id].at, cast(size_t) spans[id].length);
+    hex_center(focusedView.hex, cast(size_t) spans[id].at, box.y + box.h);
+    preview.setCursor = focusedView.hex.cursor;
+    preview.setAnchor = focusedView.hex.anchor;
 }
 
 /// Put the caret back where the browse found it, unless something else has moved it
@@ -3280,8 +3291,8 @@ void ui_preview_drop()
 /// counts as an offset.
 Address ui_goto_target()
 {
-    return address_parse(omni_query(omni), cast(long) view.hex.cursor,
-        cast(long) hex_total(view.hex));
+    return address_parse(omni_query(omni), cast(long) focusedView.hex.cursor,
+        cast(long) hex_total(focusedView.hex));
 }
 
 /// Storage the omnibar's row text is composed into, and how much of it this frame
@@ -3317,7 +3328,7 @@ void ui_goto_preview(out string label, out string detail)
     }
 
     char[96] buf = void;
-    size_t total = hex_total(view.hex);
+    size_t total = hex_total(focusedView.hex);
     label = ui_row_text(sformat(buf, "Go to 0x%08x", a.pos));
 
     // The decimal count and how far in it lands, the whole point of "%50" being
@@ -3342,16 +3353,16 @@ bool ui_find_needle(out Needle needle)
     if (query.length > findText.length) // too long to remember: read it every time
     {
         findTextLen = size_t.max;
-        return search_parse(query, needle, doc.endian);
+        return search_parse(query, needle, focusedDoc.endian);
     }
 
     // The byte order is part of what the text came to, so a document read the
     // other way round - or a switch to one - re-reads it.
-    if (findTextLen != query.length || findEndian != doc.endian
+    if (findTextLen != query.length || findEndian != focusedDoc.endian
         || findText[0 .. findTextLen] != query)
     {
         findTextLen = query.length;
-        findEndian  = doc.endian;
+        findEndian  = focusedDoc.endian;
         findText[0 .. findTextLen] = query;
         findHave = search_parse(query, findNeedle, findEndian);
     }
@@ -3499,7 +3510,7 @@ static assert(INSPECT.length == INSPECT_SINGLES + 2 * INSPECT_ORDERED);
 /// carries the order, so the keystroke's result is already on screen.
 public void ui_endian_toggle()
 {
-    doc.endian = doc.endian == Endian.littleEndian
+    focusedDoc.endian = focusedDoc.endian == Endian.littleEndian
         ? Endian.bigEndian : Endian.littleEndian;
 }
 
@@ -3508,7 +3519,7 @@ public void ui_endian_toggle()
 /// bytes under it have just been redrawn through it.
 public void ui_charset_set(immutable(Charset)* set)
 {
-    doc.charset = set;
+    focusedDoc.charset = set;
 }
 
 /// What the panel reads a byte as, for its text lane. Bound per frame in ui_pane
@@ -3530,16 +3541,16 @@ public bool ui_columns_set(int cols)
     if (cols < 0 || cols > HEX_COLUMNS_MAX)
         return false;
 
-    view.hex.autoColumns = cols == 0;
+    focusedView.hex.autoColumns = cols == 0;
     if (cols > 0)
-        view.hex.columns = cols;
+        focusedView.hex.columns = cols;
     return true;
 }
 
 /// The focused view's width, 0 while it is fitting itself to the pane.
 int ui_columns()
 {
-    return view.hex.autoColumns ? 0 : view.hex.columns;
+    return focusedView.hex.autoColumns ? 0 : focusedView.hex.columns;
 }
 
 /// A width as the prompt's rows write it. Arena-backed, so it lives as long as the
@@ -3558,11 +3569,11 @@ string ui_columns_name(int cols)
 /// out from under it every frame, and NUL-terminated, ddui taking C strings.
 const(char)* ui_columns_label()
 {
-    if (view.hex.autoColumns)
+    if (focusedView.hex.autoColumns)
         return "auto";
 
     __gshared char[8] buf;
-    size_t n = sformat(buf[0 .. $ - 1], "%d", view.hex.columns).length;
+    size_t n = sformat(buf[0 .. $ - 1], "%d", focusedView.hex.columns).length;
     buf[n] = 0;
     return buf.ptr;
 }
@@ -3623,7 +3634,7 @@ unittest
 ref immutable(Inspect) ui_inspect_row(int index)
 {
     size_t at = index;
-    if (doc.endian == Endian.bigEndian && at >= INSPECT_SINGLES)
+    if (focusedDoc.endian == Endian.bigEndian && at >= INSPECT_SINGLES)
         at = at < INSPECT_SINGLES + INSPECT_ORDERED ? at + INSPECT_ORDERED : at - INSPECT_ORDERED;
     return INSPECT[at];
 }
@@ -3634,19 +3645,19 @@ ref immutable(Inspect) ui_inspect_row(int index)
 /// fits.
 ubyte[] ui_inspect_bytes(ubyte[] buf)
 {
-    if (doc.editor is null)
+    if (focusedDoc.editor is null)
         return null;
-    long total = cast(long) hex_total(view.hex);
-    long at = cast(long) hex_sel_low(view.hex);
+    long total = cast(long) hex_total(focusedView.hex);
+    long at = cast(long) hex_sel_low(focusedView.hex);
     if (at >= total)
         return null;
     // Only whole: a short read near EOF has to come from the editor to say so.
-    if (const(ubyte)[] cached = hex_cached(view.hex, cast(size_t) at, buf.length))
+    if (const(ubyte)[] cached = hex_cached(focusedView.hex, cast(size_t) at, buf.length))
     {
         buf[] = cached[];
         return buf;
     }
-    return doc.editor.view(at, buf);
+    return focusedDoc.editor.view(at, buf);
 }
 
 /// Format one inspector row's value into `buf`.
@@ -3716,10 +3727,10 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         Address a = ui_goto_target();
         if (a.ok)
         {
-            hex_set_caret(view.hex, cast(size_t) a.pos); // scrolls it into view
+            hex_set_caret(focusedView.hex, cast(size_t) a.pos); // scrolls it into view
             logInfo("went to %#x", a.pos);
         }
-        view.hex.takeFocus = true;
+        focusedView.hex.takeFocus = true;
         break;
     case OmniMode.find:
         // A vocabulary row is a word being picked, not a pattern being run, so
@@ -3733,9 +3744,9 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         {
             lastNeedle = needle;
             haveNeedle = true;
-            ui_find_step(view, false, cast(long) view.hex.cursor + 1);
+            ui_find_step(focusedView, false, cast(long) focusedView.hex.cursor + 1);
         }
-        view.hex.takeFocus = true;
+        focusedView.hex.takeFocus = true;
         break;
     case OmniMode.inspect:
         // Nothing to jump to: the reading itself is the answer, so it goes to the
@@ -3752,26 +3763,26 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             else
                 logWarn("copy failed: %s", SDL_GetError().fromStringz);
         }
-        view.hex.takeFocus = true;
+        focusedView.hex.takeFocus = true;
         break;
     case OmniMode.bookmark:
-        if (id >= 0 && id < doc.marks.length)
-            ui_mark_select(view, id);
-        view.hex.takeFocus = true;
+        if (id >= 0 && id < focusedDoc.marks.length)
+            ui_mark_select(focusedView, id);
+        focusedView.hex.takeFocus = true;
         break;
     case OmniMode.structure:
         // The id indexes the list the rows were built from, which is the cache's own
         // array: nothing has edited the document between building it and this.
         bool whole;
-        const(LayoutSpan)[] spans = layout_spans(doc.layout, STRUCT_ROWS, whole);
+        const(LayoutSpan)[] spans = layout_spans(focusedDoc.layout, STRUCT_ROWS, whole);
         if (id >= 0 && id < spans.length && spans[id].length > 0)
         {
             // Selected rather than jumped to: a field is a run of bytes, and the
             // status bar then says how long it is.
-            ui_select_range(view, cast(size_t) spans[id].at, cast(size_t) spans[id].length);
+            ui_select_range(focusedView, cast(size_t) spans[id].at, cast(size_t) spans[id].length);
             logInfo("went to %s at %#x", spans[id].name, spans[id].at);
         }
-        view.hex.takeFocus = true;
+        focusedView.hex.takeFocus = true;
         break;
     case OmniMode.prompt:
         // The name prompt's answer is the text; the two settings' is the row, which
@@ -3788,10 +3799,10 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             ui_device_commit(id);
             return; // an opened tab took the focus already
         }
-        view.hex.takeFocus = true;
+        focusedView.hex.takeFocus = true;
         break;
     case OmniMode.help:
-        view.hex.takeFocus = true; // nothing to run: the sheet is there to be read
+        focusedView.hex.takeFocus = true; // nothing to run: the sheet is there to be read
         break;
     }
 }
@@ -3801,11 +3812,11 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
 /// it when there is more than fits.
 string ui_bookmark_bytes(ref const(Bookmark) mark)
 {
-    if (doc.editor is null)
+    if (focusedDoc.editor is null)
         return null;
 
     ubyte[8] raw = void;
-    ubyte[] bytes = doc.editor.view(mark.at, raw);
+    ubyte[] bytes = focusedDoc.editor.view(mark.at, raw);
     if (bytes.length == 0)
         return "past the end of the document";
     if (bytes.length > mark.length)
@@ -3819,7 +3830,7 @@ string ui_bookmark_bytes(ref const(Bookmark) mark)
         n += sformat(buf[n .. $], "%02x ", b).length;
     foreach (ubyte b; bytes)
     {
-        const(char)[] glyph = doc.charset.glyph(b);
+        const(char)[] glyph = focusedDoc.charset.glyph(b);
         if (glyph.length == 0)
             glyph = ".";
         buf[n .. n + glyph.length] = glyph;
@@ -3936,9 +3947,9 @@ public bool ui_jobs_busy()
 /// so the key can mean something else.
 public bool ui_job_cancel()
 {
-    if (ui_locked(&view()) == false)
+    if (ui_locked(&focusedView()) == false)
         return false;
-    doc.job.cancel();
+    focusedDoc.job.cancel();
     return true;
 }
 
@@ -3983,9 +3994,9 @@ public void ui_find_repeat(bool backward)
     // A match leaves the caret on its last byte, so stepping back from the caret
     // would land inside the match and find it again.
     long from = backward
-        ? cast(long) hex_sel_low(view.hex) - 1
-        : cast(long) view.hex.cursor + 1;
-    ui_find_step(view, backward, from);
+        ? cast(long) hex_sel_low(focusedView.hex) - 1
+        : cast(long) focusedView.hex.cursor + 1;
+    ui_find_step(focusedView, backward, from);
 }
 
 /// Move past the run of identical elements at the caret, the way ddhx's skip-back
@@ -4006,17 +4017,17 @@ public void ui_find_repeat(bool backward)
 /// press stopped on would compare that press's run against itself and stall.
 public void ui_skip_element(bool backward, bool select = false)
 {
-    if (doc.editor is null || ui_refuse_busy(&doc()))
+    if (focusedDoc.editor is null || ui_refuse_busy(&focusedDoc()))
         return;
 
-    long total = cast(long) hex_total(view.hex);
+    long total = cast(long) hex_total(focusedView.hex);
     if (total <= 0)
         return;
 
     long from, len = 1;
     if (select)
     {
-        from = cast(long) view.hex.cursor + (backward ? -1 : 1);
+        from = cast(long) focusedView.hex.cursor + (backward ? -1 : 1);
         if (from < 0)
             return;
     }
@@ -4025,8 +4036,8 @@ public void ui_skip_element(bool backward, bool select = false)
         // Taken from the selection's low end, the way ddhx takes it, so both
         // directions step in the same lane. A selection can outlive the bytes it
         // covered (a delete under it), hence the clamp.
-        from = cast(long) hex_sel_low(view.hex);
-        long high = cast(long) hex_sel_high(view.hex);
+        from = cast(long) hex_sel_low(focusedView.hex);
+        long high = cast(long) hex_sel_high(focusedView.hex);
         if (high >= total)
             high = total - 1;
         if (high >= from)
@@ -4043,7 +4054,7 @@ public void ui_skip_element(bool backward, bool select = false)
         return;
 
     long at = -1;
-    ui_job(&view(), (ref SearchContext ctx) {
+    ui_job(&focusedView(), (ref SearchContext ctx) {
         at = search_skip(from, len, total, backward, ctx);
     }, (View* v) {
         if (at < 0)
@@ -4095,10 +4106,10 @@ void ui_select_range(ref View v, size_t start, size_t len)
 /// byte of it rarely is.
 public void ui_mark_toggle()
 {
-    long at  = cast(long) hex_sel_low(view.hex);
-    long len = cast(long) hex_sel_high(view.hex) - at + 1;
+    long at  = cast(long) hex_sel_low(focusedView.hex);
+    long len = cast(long) hex_sel_high(focusedView.hex) - at + 1;
 
-    bool set = bookmark_toggle(doc.marks, at, len);
+    bool set = bookmark_toggle(focusedDoc.marks, at, len);
     if (len > 1)
         ui_status(set ? "bookmarked %#x, %d byte(s)" : "cleared %#x, %d byte(s)",
             at, len);
@@ -4111,14 +4122,14 @@ public void ui_mark_toggle()
 /// Ctrl+Shift+B would make it two.
 public void ui_mark_name()
 {
-    long at = cast(long) hex_sel_low(view.hex);
-    if (bookmark_has(doc.marks, at) == false)
+    long at = cast(long) hex_sel_low(focusedView.hex);
+    if (bookmark_has(focusedDoc.marks, at) == false)
     {
-        long len = cast(long) hex_sel_high(view.hex) - at + 1;
-        bookmark_toggle(doc.marks, at, len);
+        long len = cast(long) hex_sel_high(focusedView.hex) - at + 1;
+        bookmark_toggle(focusedDoc.marks, at, len);
     }
 
-    ptrdiff_t index = bookmark_find(doc.marks, at);
+    ptrdiff_t index = bookmark_find(focusedDoc.marks, at);
     if (index < 0)
     {
         ui_status("nothing to name at %#x", at);
@@ -4127,9 +4138,9 @@ public void ui_mark_name()
 
     // The run holding the caret can start before it; the prompt is about the whole
     // of it, so it is that start the answer is applied to.
-    markPrompt = MarkPrompt(&doc(), doc.marks[index].at);
+    markPrompt = MarkPrompt(&focusedDoc(), focusedDoc.marks[index].at);
     promptKind = PromptKind.markName;
-    omni_prompt(omni, "name this run of bytes", doc.marks[index].name);
+    omni_prompt(omni, "name this run of bytes", focusedDoc.marks[index].name);
 }
 
 /// Ask how many bytes go on a row. A prompt rather than a menu that steps through
@@ -4138,8 +4149,8 @@ public void ui_mark_name()
 /// the list is the vocabulary and the box is the way past it.
 public void ui_columns_prompt()
 {
-    settingPreview = SettingPreview(&view(), &doc(), view.hex.columns,
-        view.hex.autoColumns, doc.charset, true);
+    settingPreview = SettingPreview(&focusedView(), &focusedDoc(), focusedView.hex.columns,
+        focusedView.hex.autoColumns, focusedDoc.charset, true);
     promptKind = PromptKind.columns;
     omni_prompt(omni, "count, or auto to fit the pane");
     omni_select(omni, ui_columns_index(ui_columns()));
@@ -4149,11 +4160,12 @@ public void ui_columns_prompt()
 /// the rows are the answer and typing narrows them; nothing here is free text.
 public void ui_charset_prompt()
 {
-    settingPreview = SettingPreview(&view(), &doc(), view.hex.columns,
-        view.hex.autoColumns, doc.charset, true);
+    settingPreview = SettingPreview(&focusedView(), &focusedDoc(), focusedView.hex.columns,
+        focusedView.hex.autoColumns, focusedDoc.charset, true);
     promptKind = PromptKind.charset;
     omni_prompt(omni, "ascii, cp437, ebcdic037, macroman, latin1, win1252");
-    omni_select(omni, ui_charset_index(doc.charset)); // the rows are ddhx's list, in its order
+    // The rows are ddhx's list, in its order.
+    omni_select(omni, ui_charset_index(focusedDoc.charset));
 }
 
 /// Ask for a disk to open, or a path typed out: the way to a device the native
@@ -4199,7 +4211,7 @@ void ui_device_commit(int id)
         cast(void) ui_open(deviceRows[id].path);
     else if (id == deviceRows.length)
         cast(void) ui_open(omni_query(omni).idup);
-    view.hex.takeFocus = true;
+    focusedView.hex.takeFocus = true;
 }
 
 /// The widths the columns prompt suggests: the conventional 16, its halves and
@@ -4270,7 +4282,7 @@ int ui_columns_baseline()
 /// Ditto, the set the character prompt was raised on.
 immutable(Charset)* ui_charset_baseline()
 {
-    return settingPreview.active ? settingPreview.charset : doc.charset;
+    return settingPreview.active ? settingPreview.charset : focusedDoc.charset;
 }
 
 /// Where a set sits in ddhx's list, which is the order the prompt rows follow.
@@ -4503,20 +4515,20 @@ string ui_mark_name_clean(const(char)[] typed)
 /// select the whole of what was marked there.
 public void ui_mark_step(int dir)
 {
-    ptrdiff_t index = bookmark_step(doc.marks, cast(long) hex_sel_low(view.hex), dir);
+    ptrdiff_t index = bookmark_step(focusedDoc.marks, cast(long) hex_sel_low(focusedView.hex), dir);
     if (index < 0)
     {
         ui_status("no bookmarks in this document");
         return;
     }
-    ui_mark_select(view, index);
+    ui_mark_select(focusedView, index);
 }
 
 /// Drop every bookmark on the focused document.
 public void ui_mark_clear()
 {
-    ui_status("cleared %u bookmark(s)", doc.marks.length);
-    doc.marks = null;
+    ui_status("cleared %u bookmark(s)", focusedDoc.marks.length);
+    focusedDoc.marks = null;
 }
 
 /// Put `v`'s selection over the bookmark at `index` in its document's list.
@@ -4587,7 +4599,7 @@ void ui_omni_run(int id)
     default:
         return;
     }
-    view.hex.takeFocus = true; // whatever it was, the bytes take keys again after
+    focusedView.hex.takeFocus = true; // whatever it was, the bytes take keys again after
 }
 
 /// True while something on screen moves on its own and the loop has to keep
@@ -4706,14 +4718,14 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         }
         else
         {
-            size_t selLen = hex_total(view.hex) ?
-                hex_sel_high(view.hex) - hex_sel_low(view.hex) + 1 : 0;
+            size_t selLen = hex_total(focusedView.hex) ?
+                hex_sel_high(focusedView.hex) - hex_sel_low(focusedView.hex) + 1 : 0;
             // The name of the run the caret is in: the wash says a byte is marked,
             // and this is the only place that says what it was marked as.
-            ptrdiff_t mark = bookmark_find(doc.marks, cast(long) view.hex.cursor);
+            ptrdiff_t mark = bookmark_find(focusedDoc.marks, cast(long) focusedView.hex.cursor);
             char[64] markbuf = void;
-            const(char)[] marked = mark >= 0 && doc.marks[mark].name.length ?
-                sformat(markbuf, "  [%s]", ui_clip(doc.marks[mark].name, 40)) : "";
+            const(char)[] marked = mark >= 0 && focusedDoc.marks[mark].name.length ?
+                sformat(markbuf, "  [%s]", ui_clip(focusedDoc.marks[mark].name, 40)) : "";
 
             // A bare caret selects the byte under it, so a cell that counted one
             // was in nearly every frame saying nothing; above one it is the only
@@ -4724,8 +4736,8 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 
             char[256] statusbuf = void;
             char[] status = sformat(statusbuf, "offset %08x  %s  %s%s%s",
-                view.hex.cursor, view.hex.insertMode ? "INS" : "OVR",
-                doc.endian == Endian.bigEndian ? "BE" : "LE", selected, marked);
+                focusedView.hex.cursor, focusedView.hex.insertMode ? "INS" : "OVR",
+                focusedDoc.endian == Endian.bigEndian ? "BE" : "LE", selected, marked);
             mu_draw_text(ctx, ctx.style.font, cast(string) status,
                 mu_Vec2(sr.x + 4, ty), mu_Color(170, 170, 185, 255));
         }
@@ -4765,7 +4777,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     case OmniAction.transfer: ui_preview_drop(); ui_setting_drop();
                               ui_omni_accept(mode, chosen, true); break;
     case OmniAction.dismiss:  ui_preview_restore(); ui_setting_restore();
-                              view.hex.takeFocus = true;          break;
+                              focusedView.hex.takeFocus = true;          break;
     }
 }
 
@@ -5498,7 +5510,7 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "Edit"))
     {
         ctx.style.padding = itemPadding;
-        if (mu_menu_item_ex(ctx, "Read-Only", doc.restricted ? "On" : "Off", 0, 0)) ui_toggle_readonly();
+        if (mu_menu_item_ex(ctx, "Read-Only", focusedDoc.restricted ? "On" : "Off", 0, 0)) ui_toggle_readonly();
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Undo",  "Ctrl+Z", 0, 0)) ui_undo(false);
         if (mu_menu_item_ex(ctx, "Redo",  "Ctrl+Y", 0, 0)) ui_undo(true);
@@ -5554,7 +5566,7 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Inspect Bytes...", "Alt+I", 0, 0)) ui_omni_open(OMNI_INSPECT);
         // Which order the document is read in rides in the same column as the
         // on/off states below it, being the same kind of fact about this tab.
-        if (mu_menu_item_ex(ctx, "Byte Order", doc.endian == Endian.bigEndian ? "Big" : "Little", 0, 0))
+        if (mu_menu_item_ex(ctx, "Byte Order", focusedDoc.endian == Endian.bigEndian ? "Big" : "Little", 0, 0))
             ui_endian_toggle();
         // The two settings the grid itself shows: what a row holds, and what the
         // text lane reads the bytes through. Both raise the box on a question -
@@ -5563,7 +5575,7 @@ void ui_menubar(mu_Context* ctx)
         // column, so the menu reads as the settings it is.
         if (mu_menu_item_ex(ctx, "Columns...", ui_columns_label(), 0, 0))
             ui_columns_prompt();
-        if (mu_menu_item_ex(ctx, "Character Set...", doc.charset.id.ptr, 0, 0))
+        if (mu_menu_item_ex(ctx, "Character Set...", focusedDoc.charset.id.ptr, 0, 0))
             ui_charset_prompt();
         mu_menu_separator(ctx);
         // No native checkmark on a ddui menu item, so the on/off state rides in the
@@ -5613,15 +5625,15 @@ version (Screenshots)
         p.query  = omni_query(omni).idup;
         p.panes  = ui_pane_count();
         p.pane   = ui_pane_index(focused);
-        p.tabs   = pane.views.length;
-        p.tab    = pane.current;
+        p.tabs   = focusedPane.views.length;
+        p.tab    = focusedPane.current;
         p.docs   = docs.length;
-        p.marks  = doc.marks.length;
-        p.cursor = view.hex.cursor;
-        p.anchor = view.hex.anchor;
-        p.size   = doc.editor.size();
-        p.path   = doc.path;
-        p.edited = doc.editor.edited();
+        p.marks  = focusedDoc.marks.length;
+        p.cursor = focusedView.hex.cursor;
+        p.anchor = focusedView.hex.anchor;
+        p.size   = focusedDoc.editor.size();
+        p.path   = focusedDoc.path;
+        p.edited = focusedDoc.editor.edited();
         return p;
     }
 }
