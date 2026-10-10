@@ -943,6 +943,30 @@ int screenshot_run(string[] args)
     frame(); frame();
     shot("columns-48.bmp");
 
+    // What the clip hides is a sideways wheel away, the header following the
+    // grid; End then brings the caret's pair in, and Home goes back to the far
+    // left, offsets and all. The selection over the first four bytes is put back
+    // after, the scenarios below being shot around it.
+    mu_input_mousemove(&ctx, 480, 300);
+    frame(); frame();
+    foreach (i; 0 .. 6)
+    {
+        mu_input_scroll(&ctx, 30, 0);
+        frame(); frame();
+    }
+    shot("columns-48-wheel.bmp");
+    tap(HEX_KEY_END);
+    frame(); frame();
+    shot("columns-48-end.bmp");
+    tap(HEX_KEY_HOME);
+    frame(); frame();
+    shot("columns-48-home.bmp");
+    mu_input_keydown(&ctx, MU_KEY_SHIFT);
+    foreach (i; 0 .. 3)
+        tap(HEX_KEY_RIGHT);
+    mu_input_keyup(&ctx, MU_KEY_SHIFT);
+    frame();
+
     // Typing what is not a count says so rather than emptying the list.
     ui_columns_prompt();
     frame();

@@ -4621,6 +4621,10 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     int padding = ctx.style.padding;
     ctx.style.padding = 0;
 
+    // ddui clamps only the vertical offset, so a sideways wheel over the window
+    // would slide its content off for good.
+    mu_get_container(ctx, "vddhx").scroll.x = 0;
+
     int opened = mu_begin_window_ex(ctx, "vddhx",
         mu_Rect(0, 0, width, height),
         MU_OPT_NOTITLE | MU_OPT_NORESIZE | MU_OPT_NOCLOSE);

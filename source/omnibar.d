@@ -353,6 +353,7 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
         o.wheelAccum += cnt.scroll.y;
         cnt.scroll.y = 0;
     }
+    cnt.scroll.x = 0; // the list has no sideways to go, and ddui leaves x unclamped
     int wheelRows = o.wheelAccum / rowH;
     if (wheelRows != 0)
     {

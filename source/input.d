@@ -27,7 +27,11 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
         mu_input_mousemove(ctx, cast(int) event.motion.x, cast(int) event.motion.y);
         break;
     case SDL_EVENT_MOUSE_WHEEL:
-        mu_input_scroll(ctx, 0, cast(int)(event.wheel.y * -30));
+        // Shift turns a plain wheel sideways, for mice without a tilt.
+        if (SDL_GetModState() & SDL_KMOD_SHIFT)
+            mu_input_scroll(ctx, cast(int)(event.wheel.y * -30), 0);
+        else
+            mu_input_scroll(ctx, cast(int)(event.wheel.x * 30), cast(int)(event.wheel.y * -30));
         break;
     case SDL_EVENT_TEXT_INPUT:
         // Bookmarks step on the bare brackets, as they do in ddhx, bound

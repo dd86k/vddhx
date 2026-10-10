@@ -271,6 +271,10 @@ struct HexView
     // Leftover wheel pixels below one row height, carried between frames so a slow
     // wheel still advances when a notch is shorter than a row.
     int wheelAccum;
+    // Glyph columns the grid is scrolled right by, for a pane narrower than its
+    // rows. In glyphs rather than pixels so the left edge never halves one.
+    int leftCol;
+    int wheelAccumX;
     // Rows that fit on screen, measured by hex_view each frame. Kept here so a
     // caret move driven from outside a frame (hex_set_caret) can scroll to it
     // without the caller knowing the panel's geometry.
@@ -280,6 +284,10 @@ struct HexView
     // covers, which it can only know in pixels.
     int bodyY;
     int rowHeight = 1;
+    // Ditto, sideways: glyph columns that fit, and the layout they were measured
+    // against, so hex_reveal can find the caret's pair between frames.
+    int visCols = int.max;
+    HexLayout gridLay;
     // Grid width the last frame had, minus the scroll strip: what an auto column
     // count is fitted to. Zero until the first frame measures one.
     int bodyW;
@@ -392,6 +400,8 @@ void hex_reset_scroll(ref HexView v)
 {
     v.topRow     = 0;
     v.wheelAccum = 0;
+    v.leftCol     = 0;
+    v.wheelAccumX = 0;
 }
 
 /// Document offset of the first byte on screen.
@@ -696,9 +706,16 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
 
     HexLayout lay = hex_layout(offsetDigits, cols, charW);
 
-    // Fixed above the scroll area, so it never scrolls away. The same strip the
-    // panel below carves off, so the two agree on the last usable column.
-    hex_header(ctx, v, lay, rowH, font, v.minimap ? MINIMAP_WIDTH : SCROLLBAR_WIDTH);
+    // Fixed above the scroll area, so it never scrolls away vertically. Filled
+    // here, ahead of the panel whose frame borders it from a pixel inside this
+    // rect, and labelled after it: input in there can scroll the grid sideways,
+    // and the labels have to follow within the same frame. The fill is the panel's
+    // canvas rather than the caller's window colour, a transparent one drawing
+    // nothing and leaving that colour showing anyway.
+    int head = -1;
+    mu_layout_row(ctx, 1, &head, rowH);
+    mu_Rect headRect = mu_layout_next(ctx);
+    mu_draw_rect(ctx, headRect, ctx.style.colors[MU_COLOR_PANELBG]);
 
     // A negative row height fills to the container floor; pushing it up by
     // reserveBottom plus a spacing gap leaves exactly that band free below, where
@@ -751,9 +768,23 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
         }
         v.topRow = mu_clamp(v.topRow, 0L, maxTop);
 
-        // Input can move the caret and reveal it, nudging topRow; re-clamp after.
+        if (cnt.scroll.x != 0)
+        {
+            v.wheelAccumX += cnt.scroll.x;
+            cnt.scroll.x = 0;
+        }
+        v.leftCol += v.wheelAccumX / charW;
+        v.wheelAccumX %= charW;
+        v.visCols = body_.w / charW;
+        v.gridLay = lay;
+        int maxLeft = mu_max(0, lay.totalCols - v.visCols);
+        v.leftCol = mu_clamp(v.leftCol, 0, maxLeft);
+
+        // Input can move the caret and reveal it, nudging topRow and leftCol;
+        // re-clamp after.
         res = hex_input(ctx, name, v, lay, body_, rowH, cols, visibleRows);
         v.topRow = mu_clamp(v.topRow, 0L, maxTop);
+        v.leftCol = mu_clamp(v.leftCol, 0, maxLeft);
 
         hex_fill_window(v, body_, v.topRow, rowH, cols);
         hex_paint(ctx, v, lay, body_, v.topRow, rowH, cols, font);
@@ -765,6 +796,10 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
 
         mu_end_panel(ctx);
     }
+
+    // The same strip the panel carves off, so the two agree on the last usable
+    // column.
+    hex_header(ctx, v, lay, headRect, font, v.minimap ? MINIMAP_WIDTH : SCROLLBAR_WIDTH);
 
     return res;
 }
@@ -928,58 +963,54 @@ unittest
     assert(buf[0 .. 4] == "0000"); // too narrow: only the low nibbles survive
 }
 
-// Whether `chars` glyphs starting at `x` end before `endX`. Text is clipped by
-// the pixel, so a label straddling a pane's edge comes out as half a glyph, which
-// reads as a digit rather than as nothing; a narrow pane stops on the last whole
-// one instead. Rects (washes, the caret) are left to the clip rect, having no
-// half-legible state to fall into.
-bool hex_fits(int x, int chars, int charW, int endX)
+// Whether `chars` glyphs starting at `x` lie within `startX .. endX`. Text is
+// clipped by the pixel, so a label straddling a pane's edge comes out as half a
+// glyph, which reads as a digit rather than as nothing; a narrow or scrolled
+// pane stops on the last whole one instead. Rects (washes, the caret) are left
+// to the clip rect, having no half-legible state to fall into.
+bool hex_fits(int x, int chars, int charW, int startX, int endX)
 {
-    return x + chars * charW <= endX;
+    return x >= startX && x + chars * charW <= endX;
 }
 
 unittest
 {
-    assert(hex_fits(0, 2, 8, 16));       // exactly reaches the edge
-    assert(hex_fits(0, 2, 8, 15) == false);
-    assert(hex_fits(100, 5, 8, 200));
-    assert(hex_fits(180, 5, 8, 200) == false); // straddles it
+    assert(hex_fits(0, 2, 8, 0, 16));       // exactly reaches the edge
+    assert(hex_fits(0, 2, 8, 0, 15) == false);
+    assert(hex_fits(100, 5, 8, 0, 200));
+    assert(hex_fits(180, 5, 8, 0, 200) == false); // straddles it
+    assert(hex_fits(-8, 2, 8, 0, 200) == false);  // half scrolled out the left
 }
 
 // Fixed column titles: the offset heading and the 00..0F byte-lane numbers,
-// drawn dim so they read as chrome rather than data.
+// drawn dim so they read as chrome rather than data, in `r`, a row laid out
+// above the grid and already filled in.
 //
 // `stripW` is the scroll strip the grid below gives up on its right edge; the
 // header row spans it, so without subtracting it a narrow pane labels one more
 // column than hex_paint has room to draw.
 void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
-    int rowH, mu_Font font, int stripW)
+    mu_Rect r, mu_Font font, int stripW)
 {
-    int head = -1;
-    mu_layout_row(ctx, 1, &head, rowH);
-    mu_Rect r = mu_layout_next(ctx);
-
-    // The header labels the grid, so it takes the same canvas the panel body gets
-    // rather than the caller's window colour. A transparent canvas draws nothing,
-    // leaving that colour showing anyway.
-    mu_draw_rect(ctx, r, ctx.style.colors[MU_COLOR_PANELBG]);
-
     mu_push_clip_rect(ctx, r);
 
     mu_Color dim = mu_Color(140, 140, 150, 255);
     int charW = lay.charW;
 
+    int originX = r.x - v.leftCol * charW;
     int endX = r.x + r.w - stripW;
-    if (hex_fits(r.x, 6, charW, endX))
-        mu_draw_text(ctx, font, "offset", 6, mu_Vec2(r.x, r.y), dim);
+    if (hex_fits(originX, 6, charW, r.x, endX))
+        mu_draw_text(ctx, font, "offset", 6, mu_Vec2(originX, r.y), dim);
 
     int cols = v.columns > 0 ? v.columns : 16;
     char[2] cell = void;
     for (int i; i < cols; ++i)
     {
-        int x = r.x + hex_col_for(lay, i) * charW;
-        if (hex_fits(x, 2, charW, endX) == false)
+        int x = originX + hex_col_for(lay, i) * charW;
+        if (x + 2 * charW > endX)
             break; // columns only go rightwards
+        if (hex_fits(x, 2, charW, r.x, endX) == false)
+            continue;
         hex_format(cell.ptr, i & 0xff, 2);
         mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(x, r.y), dim);
     }
@@ -987,8 +1018,8 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     // The lane's heading names the set it is decoded through, that being the only
     // place the setting shows: the bytes themselves are what changed.
     const(char)[] label = v.textLabel.length ? v.textLabel : "ascii";
-    int ax = r.x + lay.asciiStart * charW;
-    if (hex_fits(ax, cast(int) label.length, charW, endX))
+    int ax = originX + lay.asciiStart * charW;
+    if (hex_fits(ax, cast(int) label.length, charW, r.x, endX))
         mu_draw_text(ctx, font, label.ptr, cast(int) label.length, mu_Vec2(ax, r.y), dim);
 
     mu_pop_clip_rect(ctx);
@@ -1025,8 +1056,9 @@ unittest
 
     // Two-glyph draws on line `topY` are the header's column labels and the grid's
     // byte pairs; the offset (8) and "ascii" (5) are longer, the ASCII lane
-    // shorter. Returns how many, and checks none of the line crosses `endX`.
-    int columnsOn(int topY, int endX)
+    // shorter. Returns how many, and checks none of the line leaves
+    // `startX .. endX`.
+    int columnsOn(int topY, int startX, int endX)
     {
         int drawn, columns;
         mu_Command* cmd;
@@ -1036,37 +1068,38 @@ unittest
                 continue;
             ++drawn;
             int w = width(null, mu_command_text(&ctx, cmd), -1);
+            assert(cmd.text.pos.x >= startX);   // nor the scrolled-off one
             assert(cmd.text.pos.x + w <= endX); // no glyph crosses the edge
             if (w == 2 * CW && cmd.text.pos.y == topY)
                 ++columns;
         }
-        assert(drawn > 0); // or the bound above passes by drawing nothing
+        assert(drawn > 0); // or the bounds above pass by drawing nothing
         return columns;
     }
 
     // The header takes a full layout row, so its rect - not the window's - is what
-    // the grid has to be measured against. It is the panel background, the first
-    // rect the header emits.
+    // the grid has to be measured against.
     mu_Rect headerRect(int paneW)
     {
+        mu_Rect r;
         mu_begin(&ctx);
         if (mu_begin_window_ex(&ctx, "w", mu_Rect(0, 0, paneW, 400),
                 MU_OPT_NOTITLE | MU_OPT_NORESIZE | MU_OPT_NOSCROLL | MU_OPT_NOFRAME))
         {
-            hex_header(&ctx, v, lay, 16, null, STRIP);
+            int head = -1;
+            mu_layout_row(&ctx, 1, &head, 16);
+            r = mu_layout_next(&ctx);
             mu_end_window(&ctx);
         }
         mu_end(&ctx);
-
-        mu_Command* cmd;
-        while (mu_get_next_command(&ctx, &cmd))
-            if (cmd.type == MU_COMMAND_RECT)
-                return cmd.rect.rect;
-        assert(0, "header drew no background");
+        return r;
     }
 
+    // Scrolled sideways too, by whole pairs and to the middle of one.
+    foreach (int leftCol; [0, 11, 13, 30])
     foreach (int paneW; [180, 260, 337, 400, 512, 640])
     {
+        v.leftCol = leftCol;
         mu_Rect hr = headerRect(paneW);
         int endX = hr.x + hr.w - STRIP;
 
@@ -1074,11 +1107,11 @@ unittest
         if (mu_begin_window_ex(&ctx, "w", mu_Rect(0, 0, paneW, 400),
                 MU_OPT_NOTITLE | MU_OPT_NORESIZE | MU_OPT_NOSCROLL | MU_OPT_NOFRAME))
         {
-            hex_header(&ctx, v, lay, 16, null, STRIP);
+            hex_header(&ctx, v, lay, hr, null, STRIP);
             mu_end_window(&ctx);
         }
         mu_end(&ctx);
-        int headerCols = columnsOn(hr.y, endX);
+        int headerCols = columnsOn(hr.y, hr.x, endX);
 
         mu_begin(&ctx);
         if (mu_begin_window_ex(&ctx, "w2", mu_Rect(0, 0, paneW, 400),
@@ -1088,7 +1121,7 @@ unittest
             mu_end_window(&ctx);
         }
         mu_end(&ctx);
-        int gridCols = columnsOn(20, endX);
+        int gridCols = columnsOn(20, hr.x, endX);
 
         // The header must label exactly the columns the grid has room to draw.
         assert(headerCols > 0);
@@ -1288,15 +1321,19 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     // clip, so presses on the scrollbar or header do not land here, and the drag
     // arm asks whether the press landed in this grid rather than whether the panel
     // has focus. See HexView.dragSel.
+    //
+    // The hits measure from where the grid starts, scrolled out of view or not.
+    mu_Rect grid = body;
+    grid.x -= v.leftCol * lay.charW;
     v.hoverByte = mu_mouse_over(ctx, body) ?
-        hex_hit(lay, body, v.topRow, rowH, cols, total, ctx.mouse_pos.x, ctx.mouse_pos.y, true) :
+        hex_hit(lay, grid, v.topRow, rowH, cols, total, ctx.mouse_pos.x, ctx.mouse_pos.y, true) :
         -1;
 
     if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, body))
     {
         v.dragSel = true; // this panel owns the drag until the button comes up
 
-        long hit = hex_drag_hit(lay, body, v.topRow, rowH, cols, total,
+        long hit = hex_drag_hit(lay, grid, v.topRow, rowH, cols, total,
             ctx.mouse_pos.x, ctx.mouse_pos.y);
         if (hit >= 0)
         {
@@ -1326,7 +1363,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         else
             hex_edge_stop(v);
 
-        long hit = hex_drag_hit(lay, body, v.topRow, rowH, cols, total,
+        long hit = hex_drag_hit(lay, grid, v.topRow, rowH, cols, total,
             ctx.mouse_pos.x, my);
         if (hit >= 0 && cast(size_t) hit != v.cursor)
         {
@@ -1552,8 +1589,11 @@ void hex_delete(ref HexView v, bool back, int cols, int visibleRows)
     hex_reveal(v, v.cursor, cols, visibleRows);
 }
 
-// Scroll so the caret's row is in view after a keyboard move. Nudges the
-// row-based scroll position; hex_view re-clamps it after input.
+// Scroll so the caret is in view after a keyboard move. Nudges the scroll
+// position; hex_view re-clamps it after input.
+//
+// Sideways it is the hex pair that gets brought in, being where digits land, and
+// a pair that fits from the far left goes back there so the offsets show again.
 void hex_reveal(ref HexView v, size_t cursor, int cols, int visibleRows)
 {
     long row = cast(long)(cursor / cols);
@@ -1561,6 +1601,32 @@ void hex_reveal(ref HexView v, size_t cursor, int cols, int visibleRows)
         v.topRow = row;
     else if (row >= v.topRow + visibleRows)
         v.topRow = row - visibleRows + 1;
+
+    int start = hex_col_for(v.gridLay, cast(int)(cursor % cols));
+    int end = start + 2;
+    if (start < v.leftCol)
+        v.leftCol = end <= v.visCols ? 0 : start;
+    else if (end - v.leftCol > v.visCols)
+        v.leftCol = end - v.visCols;
+}
+
+unittest
+{
+    HexView v;
+    v.data = new ubyte[64];
+    hex_reveal(v, 15, 16, 4); // no frame measured yet: nowhere to scroll
+    assert(v.leftCol == 0);
+
+    v.gridLay = hex_layout(8, 16, 1);
+    v.visCols = 20;
+    hex_reveal(v, 15, 16, 4);
+    assert(v.leftCol == hex_col_for(v.gridLay, 15) + 2 - 20); // least that shows it
+    hex_reveal(v, 14, 16, 4);
+    assert(v.leftCol == hex_col_for(v.gridLay, 15) + 2 - 20); // already in view
+    hex_reveal(v, 3, 16, 4);
+    assert(v.leftCol == hex_col_for(v.gridLay, 3));
+    hex_reveal(v, 0, 16, 4);
+    assert(v.leftCol == 0); // fits from the far left, offsets and all
 }
 
 /// Bytes `at .. at + len` from the panel's cached window, or null when the window
@@ -1922,6 +1988,7 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     size_t total = hex_total(v);
     long rows  = (cast(long) total + cols - 1) / cols;
     int charW = lay.charW;
+    int originX = body.x - v.leftCol * charW;
 
     // An empty document still draws its first offset and a caret, so it reads as an
     // insertion point ready to build a file from scratch.
@@ -1930,10 +1997,11 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
         char[24] off = void;
         int digits = lay.offsetDigits > off.length ? cast(int) off.length : lay.offsetDigits;
         hex_format(off.ptr, cast(ulong) v.baseAddress, digits);
-        mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(body.x, body.y),
-            mu_Color(150, 150, 160, 255));
+        if (hex_fits(originX, digits, charW, body.x, body.x + body.w))
+            mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, body.y),
+                mu_Color(150, 150, 160, 255));
         if (v.active)
-            hex_draw_caret(ctx, lay, body.x, body.y, 0, charW, rowH, hex_caret_nib(v));
+            hex_draw_caret(ctx, lay, originX, body.y, 0, charW, rowH, hex_caret_nib(v));
         return;
     }
 
@@ -1949,7 +2017,7 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     for (long row = firstRow; row <= lastRow; ++row)
     {
         int y = body.y + cast(int)((row - topRow) * rowH);
-        hex_draw_row(ctx, v, lay, colorFn, v.backFn, body.x, body.x + body.w, y,
+        hex_draw_row(ctx, v, lay, colorFn, v.backFn, originX, body.x, body.x + body.w, y,
             row, cols, rowH, charW, selLow, selHigh, font);
     }
 
@@ -1962,13 +2030,13 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
         if (row >= firstRow && row <= lastRow + 1)
         {
             int y = body.y + cast(int)((row - topRow) * rowH);
-            hex_draw_caret(ctx, lay, body.x, y, col, charW, rowH, hex_caret_nib(v));
+            hex_draw_caret(ctx, lay, originX, y, col, charW, rowH, hex_caret_nib(v));
         }
     }
 }
 
 void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
-    HexColorFn colorFn, HexBackFn backFn, int originX, int endX, int y, long row,
+    HexColorFn colorFn, HexBackFn backFn, int originX, int startX, int endX, int y, long row,
     int cols, int rowH, int charW, size_t selLow, size_t selHigh, mu_Font font)
 {
     size_t total = hex_total(v);
@@ -1980,7 +2048,7 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     char[24] off = void;
     int digits = lay.offsetDigits > off.length ? cast(int) off.length : lay.offsetDigits;
     hex_format(off.ptr, cast(ulong)(v.baseAddress + row * cols), digits);
-    if (hex_fits(originX, digits, charW, endX))
+    if (hex_fits(originX, digits, charW, startX, endX))
         mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, y), offColor);
 
     // Backgrounds under the glyphs, in rendering priority: the hook's wash, the
@@ -2023,7 +2091,7 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
         mu_Color color = colorFn(idx, b, cast(void*) v.colorUser);
 
         int hx = originX + hex_col_for(lay, i) * charW;
-        if (hex_fits(hx, 2, charW, endX))
+        if (hex_fits(hx, 2, charW, startX, endX))
         {
             hex_format(cell.ptr, b, 2);
             mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(hx, y), color);
@@ -2031,7 +2099,7 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
 
         const(char)[] glyph = hex_text(v, b, ch);
         int ax = originX + (lay.asciiStart + i) * charW;
-        if (hex_fits(ax, 1, charW, endX))
+        if (hex_fits(ax, 1, charW, startX, endX))
             mu_draw_text(ctx, font, glyph.ptr, cast(int) glyph.length, mu_Vec2(ax, y), color);
     }
 
