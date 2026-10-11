@@ -55,11 +55,12 @@ configuration "static" {
 	lflags "-L$HOME/.local/lib" platform="posix"
 
 	// Windows: tools/build-sdl3.d installs into ./install by default.
-	// MSVC renames the static archive to SDL3-static.lib so it cannot collide
-	// with the DLL import library of the same name. SDL3_ttf plus its vendored
+	// MSVC renames the static archives to SDL3-static.lib and
+	// SDL3_ttf-static.lib so they cannot collide with the DLL import libraries
+	// of the same name. SDL3_ttf plus its vendored
 	// static freetype/harfbuzz come first; the rest are the transitive system
 	// dependencies SDL reports in its installed sdl3.pc.
-	libs "SDL3_ttf" "harfbuzz" "freetype" \
+	libs "SDL3_ttf-static" "harfbuzz" "freetype" \
 	     "SDL3-static" \
 	     "kernel32" "user32" "gdi32" "winmm" "imm32" "ole32" "oleaut32" \
 	     "version" "uuid" "advapi32" "setupapi" "shell32" "dinput8" \
