@@ -113,6 +113,8 @@ void build(string root, string prefix, bool clean, bool dynamicCrt, bool skipPac
         // dynamic UCRT, and mixing them yields unresolved __imp_* symbols.
         // SDL_FORCE_STATIC_VCRT is SDL2-only and SDL3 silently ignores it.
         common ~= "CMAKE_MSVC_RUNTIME_LIBRARY=" ~ (dynamicCrt ? "MultiThreadedDLL" : "MultiThreaded");
+        // cl.exe cannot create its .pch on a VM shared folder (C1083).
+        common ~= "CMAKE_DISABLE_PRECOMPILE_HEADERS=ON";
         writeln("CRT: ", dynamicCrt ? "dynamic (/MD)" : "static (/MT)");
     }
     else
