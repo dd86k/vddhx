@@ -3,6 +3,12 @@ name: CI
 # Any branch allows testing before putting on main branch
 on: [ push, pull_request, workflow_dispatch ]
 
+permissions:
+  contents: read
+
+# NOTE: Pinning
+#       Pin commits instead of relying on tag
+
 jobs:
   # Test project tests and builds OK
   test:
@@ -25,9 +31,9 @@ jobs:
           - { os: ubuntu-26.04-arm, dc: ldc }
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - name: Setup D compiler
-      uses: dlang-community/setup-dlang@v2
+      uses: dlang-community/setup-dlang@a6f7969b8b5dc3ff448c30f2c6749150795814f3 # v2 branch
       with:
         compiler: ${{ matrix.dc }}
     - name: Unit tests
@@ -46,23 +52,23 @@ jobs:
     needs: test
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     # The default configuration dlopens SDL3, so no SDL dev packages needed.
     - name: Install packaging tools
       run: |
         sudo apt-get update
         sudo apt-get install -y dpkg-dev
-    - uses: dlang-community/setup-dlang@v2
+    - uses: dlang-community/setup-dlang@a6f7969b8b5dc3ff448c30f2c6749150795814f3 # v2 branch
       with:
         compiler: ldc
     # dub.selections.json is gitignored; dub.sdl pins every dependency.
-    - uses: actions/cache@v4
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.dub
         key: dub-${{ matrix.os }}-${{ hashFiles('dub.sdl') }}
     - name: Build .deb
       run: ldc2 -run tools/package.d --deb --compiler=ldc2
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: vddhx-deb-${{ runner.arch }}
         path: dist/*.deb
@@ -80,14 +86,14 @@ jobs:
     # git for dub's git dependencies, tar for actions/cache, binutils for strip.
     - name: Install toolchain and packaging tools
       run: dnf install -y ldc dub git tar binutils rpm-build
-    - uses: actions/checkout@v6
-    - uses: actions/cache@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.dub
         key: dub-fedora-${{ matrix.os }}-${{ hashFiles('dub.sdl') }}
     - name: Build .rpm
       run: ldc2 -run tools/package.d --rpm --compiler=ldc2
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: vddhx-rpm-${{ runner.arch }}
         path: dist/*.rpm
