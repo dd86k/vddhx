@@ -1,15 +1,49 @@
-name: Package
+name: CI
 
+# Any branch allows testing before putting on main branch
 on: [ push, pull_request, workflow_dispatch ]
 
-# Each format is built on its own distro family so dpkg-shlibdeps and rpmbuild
-# pick up glibc requirements users actually have (see tools/package.d).
 jobs:
+  # Test project tests and builds OK
+  test:
+    strategy:
+      # This allows other tests to run even on failure
+      fail-fast: false
+      matrix:
+        include: # easier to maintain, more explicit
+          # DMD: Currently x86-only
+          # GDC: Works best on Linux, BSDs
+          # NOTE: setup-dlang grabs gdc from repo, dmd/ldc always latest
+          # Windows
+          - { os: windows-2025, dc: dmd }
+          - { os: windows-11-arm, dc: ldc }
+          # macOS
+          - { os: macos-26, dc: ldc }
+          - { os: macos-26-intel, dc: ldc }
+          # Linux
+          - { os: ubuntu-26.04, dc: ldc }
+          - { os: ubuntu-26.04-arm, dc: ldc }
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v6
+    - name: Setup D compiler
+      uses: dlang-community/setup-dlang@v2
+      with:
+        compiler: ${{ matrix.dc }}
+    - name: Unit tests
+      run: dub test
+    # Makes sure binary runs even if tests are passing
+    - name: Compile and run
+      run: dub run -- --version
+
+  # Each format is built on its own distro family so dpkg-shlibdeps and rpmbuild
+  # pick up glibc requirements users actually have (see tools/package.d).
   deb:
     strategy:
       fail-fast: false
       matrix:
         os: [ ubuntu-26.04, ubuntu-26.04-arm ]
+    needs: test
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v6
@@ -39,6 +73,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ ubuntu-26.04, ubuntu-26.04-arm ]
+    needs: test
     runs-on: ${{ matrix.os }}
     container: fedora:latest
     steps:
