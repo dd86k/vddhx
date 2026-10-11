@@ -10,6 +10,8 @@ bookmarks, byte-for-byte compare, and an omnibar over the lot.
 
 Status: 0.1.0, in development.
 
+Currently supports Windows, macOS, and Linux.
+
 ## Building
 
 Requirements:
@@ -34,10 +36,18 @@ nothing installed, and needs the libraries built first:
 dub build -c static
 ```
 
-If your platform does not offer SDL3 static libraries, there are helper scripts
-that fetches dependencies and SDL3, builds it, and installs it locally:
-- `./build-sdl3-debian.sh`: installs into `~/.local`
-- `build-sdl3.ps1`: installs into `.\install`
+There are SDL3 static libraries build scripts available if SDL3 dynamic libraries
+are unavailable. This makes building SDL3 static libraries easier.
+
+These defaults to installing the libraries in `~/.local` or `.\install` on Windows:
+
+```
+dmd -run tools/build-sdl3.d       # or: rdmd tools/build-sdl3.d
+gdmd -run tools/build-sdl3.d      # or: gdc -o build-sdl3 tools/build-sdl3.d && ./build-sdl3
+ldmd2 -run tools/build-sdl3.d     # or: ldc2 -run tools/build-sdl3.d
+```
+
+Options go after the file name, e.g. `dmd -run tools/build-sdl3.d --help`.
 
 ## Variables
 

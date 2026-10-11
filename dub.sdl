@@ -45,16 +45,16 @@ configuration "static" {
 	// pointers, so loader_init() compiles away to nothing.
 	subConfiguration "bindbc-sdl" "static"
 
-	// Posix: build-sdl3-debian.sh installs libSDL3.a and libSDL3_ttf.a into
+	// Posix: tools/build-sdl3.d installs libSDL3.a and libSDL3_ttf.a into
 	// ~/.local by default. libSDL3_ttf.a links the system freetype/harfbuzz
 	// shared libs (from libfreetype-dev/libharfbuzz-dev), so those two
 	// resolve from the default search path; list them after SDL3_ttf (which
-	// needs their symbols). If a future SDL_ttf pulls in more, the script
-	// prints `pkg-config --static --libs sdl3_ttf` to check.
+	// needs their symbols). The script warns when SDL's .pc files list a lib
+	// missing here.
 	libs "SDL3_ttf" "harfbuzz" "freetype" "SDL3" platform="posix"
 	lflags "-L$HOME/.local/lib" platform="posix"
 
-	// Windows: build-sdl3.ps1 installs into ./install by default.
+	// Windows: tools/build-sdl3.d installs into ./install by default.
 	// MSVC renames the static archive to SDL3-static.lib so it cannot collide
 	// with the DLL import library of the same name. SDL3_ttf plus its vendored
 	// static freetype/harfbuzz come first; the rest are the transitive system
