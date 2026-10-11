@@ -332,12 +332,12 @@ int screenshot_run(string[] args)
     frame();
     shot("rows.bmp");
 
-    // Scenario 0b (debug): a PNG, which the layout system recognises, so the shot
+    // Scenario 0b (debug): a PNG, which the structure overlay recognises, so the shot
     // carries the field colours and the borders round the signature and the first
     // chunks. Closed again straight away: every scenario after this one counts tabs.
     ui_open("assets/icon/vddhx-256.png");
     frame();
-    shot("layout-png.bmp");
+    shot("structure-png.bmp");
 
     // The pointer resting on a byte names the field it is in, the same way a tab names
     // its path. Real time has to pass, for the reason the tab tip scenario says.
@@ -351,12 +351,12 @@ int screenshot_run(string[] args)
         frame(); frame(); frame();
         Thread.sleep(600.msecs);
         frame();
-        shot("layout-tip.bmp");
+        shot("structure-tip.bmp");
         mu_input_mousemove(&ctx, 0, 0);
         frame();
     }
 
-    // The '#' list over the same document: what the layout found, flat, with the
+    // The '#' list over the same document: what the structure found, flat, with the
     // trail in the label so a field reads as the chunk it belongs to. Enter selects
     // the whole span rather than dropping the caret on its head.
     ui_omni_toggle(OMNI_STRUCTURE);

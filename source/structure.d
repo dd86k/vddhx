@@ -1,34 +1,34 @@
 /// Structure overlay for a document: what the bytes *mean*, as named spans.
 ///
-/// A layout is a parser walking a document and registering spans - a field, a
+/// A structure is a parser walking a document and registering spans - a field, a
 /// record, a chunk - which the grid draws borders around, the theme colours by
 /// role, and the status bar names at the caret. Parsing is incremental: the cache
-/// drives a layout forward only as far as the offset asked about, so a screenful
+/// drives a structure forward only as far as the offset asked about, so a screenful
 /// of a multi-gigabyte container costs the chunks up to it rather than all of them.
 ///
 /// Spans nest but never straddle: a child sits wholly inside its parent and two
 /// siblings never overlap. That is what makes this a sorted array with parent links
 /// rather than a tree of nodes, and what lets a lookup be a binary search and a walk
-/// up the ancestors. It also means a layout has to register in ascending order; a
+/// up the ancestors. It also means a structure has to register in ascending order; a
 /// parser that seeks backwards over ground it already covered is not supported.
 ///
 /// An edit at some offset reparses from the start of the outermost span covering it,
-/// so a layout registering one span over the whole document turns every edit into a
+/// so a structure registering one span over the whole document turns every edit into a
 /// full reparse. Open containers that are actually containers.
 /// Authors: dd86k <dd@dax.moe>
-module layout;
+module structure;
 
 import std.system : Endian;
 
 import ddhx.charset : Charset, ASCII;
 
 /// What a span, or a lone byte, is. The theme maps every one of these to a colour.
-enum LayoutRole
+enum StructureRole
 {
     // Unclaimed: container, or a byte no span reached. Never what a byte *is*
     none,
 
-    // Typically used when there are no layouts used, most useful for character sets
+    // Typically used when there are no structures used, most useful for character sets
     zero,
     printable,
     whitespace,
@@ -49,7 +49,7 @@ enum LayoutRole
     data,
 }
 
-/// What a lone byte is where no layout claims it: the five buckets the grid has
+/// What a lone byte is where no structure claims it: the five buckets the grid has
 /// always coloured by, said as roles so the classifier and a parser answer in one
 /// vocabulary.
 ///
@@ -62,16 +62,16 @@ enum LayoutRole
 /// it draws a glyph: CP437 draws all of C0, and calling those printable would paint a
 /// whole file in one colour. `unmapped` is everything else the set has nothing to draw
 /// for, soft hyphen and private use included.
-LayoutRole layout_classify(ubyte value, immutable(Charset)* set = &ASCII)
+StructureRole structure_classify(ubyte value, immutable(Charset)* set = &ASCII)
 {
     if (value == 0)
-        return LayoutRole.zero;
+        return StructureRole.zero;
     dchar c = set.decode(value);
     if (c == '\t' || c == '\n' || c == '\r' || c == 0x85) // 0x85: NEL, EBCDIC's newline
-        return LayoutRole.whitespace;
+        return StructureRole.whitespace;
     if (c < 0x20 || (c >= 0x7f && c < 0xa0))
-        return LayoutRole.control;
-    return set.printable(value) ? LayoutRole.printable : LayoutRole.unmapped;
+        return StructureRole.control;
+    return set.printable(value) ? StructureRole.printable : StructureRole.unmapped;
 }
 
 /// What to call a role in the interface, empty for `none`.
@@ -79,24 +79,24 @@ LayoutRole layout_classify(ubyte value, immutable(Charset)* set = &ASCII)
 /// The enum member's own name, so a role added above cannot be one the interface has
 /// no word for. They are lowercase like the field names a parser registers, which is
 /// what lets the two sit in one trail without reading as different kinds of thing.
-string layout_role_name(LayoutRole role)
+string structure_role_name(StructureRole role)
 {
     import std.conv : to;
-    return role != LayoutRole.none ? role.to!string() : null;
+    return role != StructureRole.none ? role.to!string() : null;
 }
 
 unittest
 {
-    assert(layout_classify(0x00) == LayoutRole.zero);
-    assert(layout_classify('A')  == LayoutRole.printable);
-    assert(layout_classify('\n') == LayoutRole.whitespace);
-    assert(layout_classify(0x01) == LayoutRole.control);
-    assert(layout_classify(0x80) == LayoutRole.unmapped);
-    assert(layout_classify(0x7f) == LayoutRole.control); // DEL is in the set, not outside it
+    assert(structure_classify(0x00) == StructureRole.zero);
+    assert(structure_classify('A')  == StructureRole.printable);
+    assert(structure_classify('\n') == StructureRole.whitespace);
+    assert(structure_classify(0x01) == StructureRole.control);
+    assert(structure_classify(0x80) == StructureRole.unmapped);
+    assert(structure_classify(0x7f) == StructureRole.control); // DEL is in the set, not outside it
 
-    assert(layout_role_name(LayoutRole.printable) == "printable");
-    assert(layout_role_name(LayoutRole.length) == "length");
-    assert(layout_role_name(LayoutRole.none) is null);
+    assert(structure_role_name(StructureRole.printable) == "printable");
+    assert(structure_role_name(StructureRole.length) == "length");
+    assert(structure_role_name(StructureRole.none) is null);
 }
 
 /// The buckets follow the encoding, so a byte the lane draws as a letter is not
@@ -108,29 +108,29 @@ unittest
     // Letters in the high half, a control region running to 0x40, and soft hyphen,
     // which the set maps but nothing draws.
     immutable(Charset)* ebcdic = findCharset("ebcdic037");
-    assert(layout_classify(0xc1, ebcdic) == LayoutRole.printable);  // 'A'
-    assert(layout_classify(0x40, ebcdic) == LayoutRole.printable);  // space
-    assert(layout_classify(0x25, ebcdic) == LayoutRole.whitespace); // LF
-    assert(layout_classify(0x15, ebcdic) == LayoutRole.whitespace); // NEL
-    assert(layout_classify(0x3f, ebcdic) == LayoutRole.control);
-    assert(layout_classify(0xff, ebcdic) == LayoutRole.control);    // U+009F
-    assert(layout_classify(0xca, ebcdic) == LayoutRole.unmapped);
+    assert(structure_classify(0xc1, ebcdic) == StructureRole.printable);  // 'A'
+    assert(structure_classify(0x40, ebcdic) == StructureRole.printable);  // space
+    assert(structure_classify(0x25, ebcdic) == StructureRole.whitespace); // LF
+    assert(structure_classify(0x15, ebcdic) == StructureRole.whitespace); // NEL
+    assert(structure_classify(0x3f, ebcdic) == StructureRole.control);
+    assert(structure_classify(0xff, ebcdic) == StructureRole.control);    // U+009F
+    assert(structure_classify(0xca, ebcdic) == StructureRole.unmapped);
 
     // CP437 spans the whole byte range, so nothing in it is unmapped - but C0 keeps the
     // control colour though the set draws a glyph for every one of those bytes.
     immutable(Charset)* cp437 = findCharset("cp437");
-    assert(layout_classify(0x80, cp437) == LayoutRole.printable); // 'Ç'
-    assert(layout_classify(0x01, cp437) == LayoutRole.control);   // draws '☺'
+    assert(structure_classify(0x80, cp437) == StructureRole.printable); // 'Ç'
+    assert(structure_classify(0x01, cp437) == StructureRole.control);   // draws '☺'
     foreach (int i; 0 .. 256)
-        assert(layout_classify(cast(ubyte) i, cp437) != LayoutRole.unmapped);
+        assert(structure_classify(cast(ubyte) i, cp437) != StructureRole.unmapped);
 
     immutable(Charset)* mac = findCharset("macroman");
-    assert(layout_classify(0xf0, mac) == LayoutRole.unmapped); // the logo
-    assert(layout_classify(0x80, mac) == LayoutRole.printable);
+    assert(structure_classify(0xf0, mac) == StructureRole.unmapped); // the logo
+    assert(structure_classify(0x80, mac) == StructureRole.printable);
 
-    assert(layout_classify(0x85, findCharset("latin1")) == LayoutRole.whitespace);
-    assert(layout_classify(0x80, findCharset("win1252")) == LayoutRole.printable); // '€'
-    assert(layout_classify(0x81, findCharset("win1252")) == LayoutRole.unmapped);
+    assert(structure_classify(0x85, findCharset("latin1")) == StructureRole.whitespace);
+    assert(structure_classify(0x80, findCharset("win1252")) == StructureRole.printable); // '€'
+    assert(structure_classify(0x81, findCharset("win1252")) == StructureRole.unmapped);
 
     // Bound to the glyph table, so the two cannot drift: what the classifier calls
     // printable the lane can draw, and what it calls unmapped the lane cannot. Nothing
@@ -140,11 +140,11 @@ unittest
         foreach (int i; 0 .. 256)
         {
             ubyte value = cast(ubyte) i;
-            LayoutRole role = layout_classify(value, set);
-            assert(role != LayoutRole.none); // it always commits; see LayoutRole.none
-            if (role == LayoutRole.printable)
+            StructureRole role = structure_classify(value, set);
+            assert(role != StructureRole.none); // it always commits; see StructureRole.none
+            if (role == StructureRole.printable)
                 assert(set.printable(value));
-            else if (role == LayoutRole.unmapped)
+            else if (role == StructureRole.unmapped)
                 assert(set.printable(value) == false);
         }
 }
@@ -156,32 +156,32 @@ unittest
 /// `shade` alternates along a run of touching fields that share a role - IHDR's three
 /// scalars, its four flags - so the theme can draw the odd ones a shade off and the eye
 /// can tell where one ends. It says nothing about the field itself.
-struct LayoutSpan
+struct StructureSpan
 {
     long at;
     long length;
-    LayoutRole role;
+    StructureRole role;
     string name;
     int depth;
     int parent = -1;
     bool shade;
 }
 
-/// Byte source a layout parses through. Fill `buf` from `at` and return what was
+/// Byte source a structure parses through. Fill `buf` from `at` and return what was
 /// actually read, short at the end of the document.
-alias LayoutReadFn = ubyte[] delegate(long at, ubyte[] buf);
+alias StructureReadFn = ubyte[] delegate(long at, ubyte[] buf);
 
 /// A document parser. The cache calls `parse` repeatedly, each time asking for the
 /// spans up to a further offset, and holds the resume position in the builder between
 /// calls; anything else the parser needs to remember is its own business.
-interface ILayout
+interface IStructure
 {
     /// Name of the format, for the status bar and the tab.
     string name();
 
     /// Register spans until they cover `until`, or until the document runs out.
     /// Returns: false when there is nothing left to parse.
-    bool parse(ref LayoutBuilder b, long until);
+    bool parse(ref StructureBuilder b, long until);
 
     /// Forget whatever was being remembered between parse calls: an edit has thrown
     /// away the spans from some offset on, and parsing is about to resume there.
@@ -194,14 +194,14 @@ interface ILayout
 
 /// How deep spans may nest. Past this an open() is dropped rather than tracked, on
 /// the grounds that nothing legible comes of drawing it.
-private enum LAYOUT_MAX_DEPTH = 8;
+private enum STRUCTURE_MAX_DEPTH = 8;
 
-/// What a layout registers into: a cursor over the document, the reads to drive it,
+/// What a structure registers into: a cursor over the document, the reads to drive it,
 /// and the spans coming out.
 ///
 /// `at` is the parser's position and the only state carried between parse calls, so a
 /// format whose records follow one another needs no state of its own.
-struct LayoutBuilder
+struct StructureBuilder
 {
     /// Where the next field lands. field() and open() advance it; a parser jumping to
     /// an offset it read out of a header sets it.
@@ -239,7 +239,7 @@ struct LayoutBuilder
     }
 
     /// Register a leaf of `length` bytes at the cursor and step over it.
-    void field(LayoutRole role, string name, long length)
+    void field(StructureRole role, string name, long length)
     {
         // Only leaves take part: a container sitting between two fields of one role -
         // the last field of a chunk and the first of the next - must not break the run.
@@ -261,14 +261,14 @@ struct LayoutBuilder
     /// role of its own paints the whole file in one colour, which says nothing.
     void open(string name, long length = -1)
     {
-        if (depth >= LAYOUT_MAX_DEPTH)
+        if (depth >= STRUCTURE_MAX_DEPTH)
         {
             ++dropped;
             return;
         }
         // Separately, emit() reading `depth` for the parent link: it has to see the
         // container's own depth, not the one its children will be at.
-        size_t index = emit(LayoutRole.none, name, length);
+        size_t index = emit(StructureRole.none, name, length);
         stack[depth++] = cast(int) index;
     }
 
@@ -284,54 +284,54 @@ struct LayoutBuilder
         if (depth <= 0)
             return;
 
-        LayoutSpan* s = &(*spans)[stack[--depth]];
+        StructureSpan* s = &(*spans)[stack[--depth]];
         if (s.length < 0)
             s.length = at - s.at;
     }
 
     private:
 
-    LayoutReadFn readFn;
-    LayoutSpan[]* spans;
-    int[LAYOUT_MAX_DEPTH] stack;
+    StructureReadFn readFn;
+    StructureSpan[]* spans;
+    int[STRUCTURE_MAX_DEPTH] stack;
     int depth;
     int dropped; // opens refused past the depth cap, so close() can match them
 
-    // The last leaf registered, for the alternating shade. See LayoutSpan.shade.
+    // The last leaf registered, for the alternating shade. See StructureSpan.shade.
     long lastEnd = long.min;
-    LayoutRole lastRole;
+    StructureRole lastRole;
     bool lastShade;
 
-    size_t emit(LayoutRole role, string name, long length, bool shade = false)
+    size_t emit(StructureRole role, string name, long length, bool shade = false)
     {
         int parent = depth > 0 ? stack[depth - 1] : -1;
-        (*spans) ~= LayoutSpan(at, length, role, name, depth, parent, shade);
+        (*spans) ~= StructureSpan(at, length, role, name, depth, parent, shade);
         return spans.length > 0 ? spans.length - 1 : 0; // @suppress(dscanner.suspicious.length_subtraction)
     }
 }
 
-/// A layout bound to a document, with the spans it has produced so far.
-struct LayoutCache
+/// A structure bound to a document, with the spans it has produced so far.
+struct StructureCache
 {
     private: // fields only, struct used in ui
 
-    ILayout impl;
-    LayoutSpan[] spans;
-    LayoutBuilder builder;
+    IStructure impl;
+    StructureSpan[] spans;
+    StructureBuilder builder;
     bool exhausted;
 
     // The last span answered with, so walking a row in order costs a bounds check
-    // rather than a search. See layout_index.
+    // rather than a search. See structure_index.
     size_t hint;
 }
 
-/// Point a cache at a layout and a document, dropping whatever it held.
-LayoutCache layout_bind(ILayout impl, LayoutReadFn readFn, long size)
+/// Point a cache at a structure and a document, dropping whatever it held.
+StructureCache structure_bind(IStructure impl, StructureReadFn readFn, long size)
 {
-    LayoutCache c;
+    StructureCache c;
     c.impl = impl;
     if (impl)
-        impl.forget(); // the same layout may have been walked over another document
+        impl.forget(); // the same structure may have been walked over another document
     c.builder.readFn = readFn;
     c.builder.size = size;
     c.builder.spans = &c.spans;
@@ -339,16 +339,16 @@ LayoutCache layout_bind(ILayout impl, LayoutReadFn readFn, long size)
 }
 
 /// Name of the bound format, empty when there is none.
-string layout_name(ref LayoutCache c)
+string structure_name(ref StructureCache c)
 {
     return c.impl ? c.impl.name() : null;
 }
 
-/// The innermost span holding `at`, parsing further if the layout has not reached it.
+/// The innermost span holding `at`, parsing further if the structure has not reached it.
 /// Returns: false when nothing covers the offset.
-bool layout_at(ref LayoutCache c, long at, out LayoutSpan span)
+bool structure_at(ref StructureCache c, long at, out StructureSpan span)
 {
-    ptrdiff_t i = layout_index(c, at);
+    ptrdiff_t i = structure_index(c, at);
     if (i < 0)
         return false;
     span = c.spans[i];
@@ -357,9 +357,9 @@ bool layout_at(ref LayoutCache c, long at, out LayoutSpan span)
 
 /// Ditto, for the span `up` levels out from the innermost one: 0 is the innermost
 /// itself, 1 its container. What the border drawing asks to nest one box in another.
-bool layout_ancestor(ref LayoutCache c, long at, int up, out LayoutSpan span)
+bool structure_ancestor(ref StructureCache c, long at, int up, out StructureSpan span)
 {
-    ptrdiff_t i = layout_index(c, at);
+    ptrdiff_t i = structure_index(c, at);
     for (; i >= 0 && up > 0; --up)
         i = c.spans[i].parent;
     if (i < 0)
@@ -371,39 +371,39 @@ bool layout_ancestor(ref LayoutCache c, long at, int up, out LayoutSpan span)
 /// The span `level` levels in from the outermost one over `at`: 0 the record at the
 /// top, 1 whatever of it holds the byte.
 ///
-/// Where layout_ancestor counts outwards from the byte, this counts inwards from the
+/// Where structure_ancestor counts outwards from the byte, this counts inwards from the
 /// document, which is what a border grouping a whole record wants. A chunk's length
 /// field and a byte deep in its payload sit at different depths and would need
-/// different answers from layout_ancestor; both are in the same thing at level 0.
+/// different answers from structure_ancestor; both are in the same thing at level 0.
 /// Returns: false when nothing covers `at`, or when it sits shallower than `level`.
-bool layout_level(ref LayoutCache c, long at, int level, out LayoutSpan span)
+bool structure_level(ref StructureCache c, long at, int level, out StructureSpan span)
 {
-    LayoutSpan inner;
-    if (layout_at(c, at, inner) == false)
+    StructureSpan inner;
+    if (structure_at(c, at, inner) == false)
         return false;
 
     int up = inner.depth - level;
-    return up >= 0 && layout_ancestor(c, at, up, span);
+    return up >= 0 && structure_ancestor(c, at, up, span);
 }
 
 /// The role of the byte at `at`, innermost span winning.
-/// Returns: LayoutRole.none where no span covers it, leaving it to the classifier.
-LayoutRole layout_role(ref LayoutCache c, long at)
+/// Returns: StructureRole.none where no span covers it, leaving it to the classifier.
+StructureRole structure_role(ref StructureCache c, long at)
 {
-    LayoutSpan span;
-    return layout_at(c, at, span) ? span.role : LayoutRole.none;
+    StructureSpan span;
+    return structure_at(c, at, span) ? span.role : StructureRole.none;
 }
 
-/// Every span the layout has, driving it forward for up to `budget` of them.
+/// Every span the structure has, driving it forward for up to `budget` of them.
 ///
 /// The one question asked of the whole document rather than of an offset in it: the
 /// flat list a field is picked out of. The budget is what keeps that from walking a
 /// container the size of a disk - `whole` comes back false where it cut the walk
 /// short, so a caller can say the list is partial rather than imply it is all there
 /// is. Asking again costs nothing: the spans are kept.
-const(LayoutSpan)[] layout_spans(ref LayoutCache c, size_t budget, out bool whole)
+const(StructureSpan)[] structure_spans(ref StructureCache c, size_t budget, out bool whole)
 {
-    c.builder.spans = &c.spans; // see layout_ensure, for a cache that was copied
+    c.builder.spans = &c.spans; // see structure_ensure, for a cache that was copied
 
     // A byte past the frontier each time rather than one big reach, so the budget is
     // counted against what came back instead of against how far it got.
@@ -425,10 +425,10 @@ const(LayoutSpan)[] layout_spans(ref LayoutCache c, size_t budget, out bool whol
 /// dropped rather than shifted along the way a bookmark is: a bookmark is what the
 /// user said about those bytes and outlives them, a span is what the parser concluded
 /// from them and does not.
-void layout_invalidate(ref LayoutCache c, long from)
+void structure_invalidate(ref StructureCache c, long from)
 {
     long resume = from;
-    foreach (ref const(LayoutSpan) s; c.spans)
+    foreach (ref const(StructureSpan) s; c.spans)
         if (s.at + s.length > from && s.at < resume)
             resume = s.at;
 
@@ -447,10 +447,10 @@ void layout_invalidate(ref LayoutCache c, long from)
     // Pick the shade run back up from the leaf still standing at the resume point, so a
     // field keeps the colour it had before the edit rather than flipping under the user.
     c.builder.lastEnd = long.min;
-    c.builder.lastRole = LayoutRole.none;
+    c.builder.lastRole = StructureRole.none;
     c.builder.lastShade = false;
-    foreach_reverse (ref const(LayoutSpan) s; c.spans)
-        if (s.role != LayoutRole.none && s.at + s.length == resume)
+    foreach_reverse (ref const(StructureSpan) s; c.spans)
+        if (s.role != StructureRole.none && s.at + s.length == resume)
         {
             c.builder.lastEnd = resume;
             c.builder.lastRole = s.role;
@@ -463,7 +463,7 @@ void layout_invalidate(ref LayoutCache c, long from)
 }
 
 /// Tell the cache the document changed size, an edit having moved everything after it.
-void layout_resize(ref LayoutCache c, long size)
+void structure_resize(ref StructureCache c, long size)
 {
     c.builder.size = size;
 }
@@ -473,16 +473,16 @@ void layout_resize(ref LayoutCache c, long size)
 /// Spans are sorted by start and a child always follows its parent, so the last span
 /// starting at or before `at` is the innermost candidate; when it ends too early the
 /// answer is one of its ancestors, and never a sibling, siblings not overlapping.
-private ptrdiff_t layout_index(ref LayoutCache c, long at)
+private ptrdiff_t structure_index(ref StructureCache c, long at)
 {
-    layout_ensure(c, at + 1);
+    structure_ensure(c, at + 1);
 
     if (c.spans.length == 0)
         return -1;
 
     // The sequential walk the grid does: the previous answer still holds unless a span
     // starts inside it, and the array being sorted, only the very next one can.
-    if (c.hint < c.spans.length && layout_holds(c.spans[c.hint], at) &&
+    if (c.hint < c.spans.length && structure_holds(c.spans[c.hint], at) &&
         (c.hint + 1 >= c.spans.length || c.spans[c.hint + 1].at > at))
         return cast(ptrdiff_t) c.hint;
 
@@ -500,7 +500,7 @@ private ptrdiff_t layout_index(ref LayoutCache c, long at)
         return -1;
 
     ptrdiff_t i = cast(ptrdiff_t) low - 1;
-    while (i >= 0 && layout_holds(c.spans[i], at) == false)
+    while (i >= 0 && structure_holds(c.spans[i], at) == false)
         i = c.spans[i].parent;
 
     if (i >= 0)
@@ -508,13 +508,13 @@ private ptrdiff_t layout_index(ref LayoutCache c, long at)
     return i;
 }
 
-private bool layout_holds(ref const(LayoutSpan) s, long at)
+private bool structure_holds(ref const(StructureSpan) s, long at)
 {
     return at >= s.at && at < s.at + s.length;
 }
 
-/// Drive the layout forward until its spans reach `until`, or it runs out.
-private void layout_ensure(ref LayoutCache c, long until)
+/// Drive the structure forward until its spans reach `until`, or it runs out.
+private void structure_ensure(ref StructureCache c, long until)
 {
     if (c.impl is null || c.exhausted || c.builder.at >= until)
         return;
@@ -542,32 +542,32 @@ version (unittest)
     // A container of 8-byte records after a 4-byte magic, each record a 4-byte length
     // and the 4 bytes it counts, which is enough shape to exercise nesting, laziness
     // and the ancestor walk without a real format's edge cases.
-    private final class RecordLayout : ILayout
+    private final class RecordStructure : IStructure
     {
         int calls; // how many times the cache came back for more
 
         string name() { return "record"; }
         void forget() {}
 
-        bool parse(ref LayoutBuilder b, long until)
+        bool parse(ref StructureBuilder b, long until)
         {
             ++calls;
 
             if (b.at == 0)
-                b.field(LayoutRole.magic, "magic", 4);
+                b.field(StructureRole.magic, "magic", 4);
 
             while (b.at < until && b.at + 8 <= b.size)
             {
                 b.open("record", 8);
-                b.field(LayoutRole.length, "length", 4);
-                b.field(LayoutRole.data, "payload", 4);
+                b.field(StructureRole.length, "length", 4);
+                b.field(StructureRole.data, "payload", 4);
                 b.close();
             }
             return b.at + 8 <= b.size;
         }
     }
 
-    private LayoutReadFn zeroReader()
+    private StructureReadFn zeroReader()
     {
         return delegate(long at, ubyte[] buf) { buf[] = 0; return buf; };
     }
@@ -575,141 +575,141 @@ version (unittest)
 
 unittest
 {
-    RecordLayout impl = new RecordLayout();
-    LayoutCache c = layout_bind(impl, zeroReader(), 4 + 8 * 4);
-    assert(layout_name(c) == "record");
+    RecordStructure impl = new RecordStructure();
+    StructureCache c = structure_bind(impl, zeroReader(), 4 + 8 * 4);
+    assert(structure_name(c) == "record");
 
     // The magic, then the first record's two fields.
-    LayoutSpan s;
-    assert(layout_at(c, 0, s));
-    assert(s.role == LayoutRole.magic && s.at == 0 && s.length == 4);
-    assert(layout_at(c, 3, s) && s.role == LayoutRole.magic);
+    StructureSpan s;
+    assert(structure_at(c, 0, s));
+    assert(s.role == StructureRole.magic && s.at == 0 && s.length == 4);
+    assert(structure_at(c, 3, s) && s.role == StructureRole.magic);
 
-    assert(layout_at(c, 4, s));
-    assert(s.role == LayoutRole.length && s.at == 4 && s.depth == 1);
-    assert(layout_at(c, 8, s));
-    assert(s.role == LayoutRole.data && s.at == 8);
+    assert(structure_at(c, 4, s));
+    assert(s.role == StructureRole.length && s.at == 4 && s.depth == 1);
+    assert(structure_at(c, 8, s));
+    assert(s.role == StructureRole.data && s.at == 8);
 
     // One level out from a field is the record holding it, and one further is nothing.
-    assert(layout_ancestor(c, 8, 1, s));
-    assert(s.role == LayoutRole.none && s.at == 4 && s.length == 8);
-    assert(layout_ancestor(c, 8, 2, s) == false);
+    assert(structure_ancestor(c, 8, 1, s));
+    assert(s.role == StructureRole.none && s.at == 4 && s.length == 8);
+    assert(structure_ancestor(c, 8, 2, s) == false);
 
     // The magic sits at the top level, so it has no container to step out to.
-    assert(layout_ancestor(c, 0, 1, s) == false);
+    assert(structure_ancestor(c, 0, 1, s) == false);
 
     // Counted from the outside, a field and the record holding it answer alike, which
     // is what one border round a whole record needs.
-    assert(layout_level(c, 4, 0, s) && s.name == "record" && s.at == 4);
-    assert(layout_level(c, 8, 0, s) && s.name == "record" && s.at == 4);
-    assert(layout_level(c, 8, 1, s) && s.name == "payload");
-    assert(layout_level(c, 8, 2, s) == false); // nothing that deep here
-    assert(layout_level(c, 0, 0, s) && s.role == LayoutRole.magic); // a top-level leaf
+    assert(structure_level(c, 4, 0, s) && s.name == "record" && s.at == 4);
+    assert(structure_level(c, 8, 0, s) && s.name == "record" && s.at == 4);
+    assert(structure_level(c, 8, 1, s) && s.name == "payload");
+    assert(structure_level(c, 8, 2, s) == false); // nothing that deep here
+    assert(structure_level(c, 0, 0, s) && s.role == StructureRole.magic); // a top-level leaf
 
-    assert(layout_role(c, 12) == LayoutRole.length);
-    assert(layout_role(c, 16) == LayoutRole.data);
+    assert(structure_role(c, 12) == StructureRole.length);
+    assert(structure_role(c, 16) == StructureRole.data);
 
     // Past the last whole record there is nothing to say.
-    assert(layout_at(c, 4 + 8 * 4, s) == false);
+    assert(structure_at(c, 4 + 8 * 4, s) == false);
 }
 
 /// Laziness: nothing is parsed until asked for, and asking again costs nothing.
 unittest
 {
-    RecordLayout impl = new RecordLayout();
-    LayoutCache c = layout_bind(impl, zeroReader(), 4 + 8 * 1024);
+    RecordStructure impl = new RecordStructure();
+    StructureCache c = structure_bind(impl, zeroReader(), 4 + 8 * 1024);
 
     assert(impl.calls == 0);
     assert(c.spans.length == 0);
 
-    LayoutSpan s;
-    assert(layout_at(c, 4, s));
+    StructureSpan s;
+    assert(structure_at(c, 4, s));
     int first = impl.calls;
     assert(first > 0);
 
     // A thousand records past the frontier were never touched.
     assert(c.spans.length < 16);
 
-    // Answering from what is already parsed does not go back to the layout.
-    assert(layout_at(c, 5, s));
+    // Answering from what is already parsed does not go back to the structure.
+    assert(structure_at(c, 5, s));
     assert(impl.calls == first);
 
     // Reaching further does.
-    assert(layout_at(c, 4 + 8 * 512, s));
+    assert(structure_at(c, 4 + 8 * 512, s));
     assert(impl.calls > first);
-    assert(s.role == LayoutRole.length);
+    assert(s.role == StructureRole.length);
 }
 
 /// The sequential walk the grid does, which is what the hint is for.
 unittest
 {
-    LayoutCache c = layout_bind(new RecordLayout(), zeroReader(), 4 + 8 * 8);
+    StructureCache c = structure_bind(new RecordStructure(), zeroReader(), 4 + 8 * 8);
 
     foreach (long at; 0 .. 4 + 8 * 8)
     {
-        LayoutSpan s;
-        assert(layout_at(c, at, s));
+        StructureSpan s;
+        assert(structure_at(c, at, s));
         if (at < 4)
-            assert(s.role == LayoutRole.magic);
+            assert(s.role == StructureRole.magic);
         else
-            assert(s.role == ((at - 4) % 8 < 4 ? LayoutRole.length : LayoutRole.data));
+            assert(s.role == ((at - 4) % 8 < 4 ? StructureRole.length : StructureRole.data));
     }
 }
 
 /// The flat list, and the budget that bounds it.
 unittest
 {
-    LayoutCache c = layout_bind(new RecordLayout(), zeroReader(), 4 + 8 * 4);
+    StructureCache c = structure_bind(new RecordStructure(), zeroReader(), 4 + 8 * 4);
 
     // Cut short: the walk stops with the budget filled and says the list is partial.
     bool whole;
-    const(LayoutSpan)[] some = layout_spans(c, 4, whole);
+    const(StructureSpan)[] some = structure_spans(c, 4, whole);
     assert(some.length == 4);
     assert(whole == false);
     assert(some[0].name == "magic");
     assert(some[1].name == "record");
 
     // Room for all of it: the magic and four records of two fields each.
-    const(LayoutSpan)[] all = layout_spans(c, 64, whole);
+    const(StructureSpan)[] all = structure_spans(c, 64, whole);
     assert(all.length == 1 + 4 * 3);
     assert(whole);
     assert(all[$ - 1].name == "payload");
 
     // In registration order, so a parent always precedes what it holds.
-    foreach (ref const(LayoutSpan) s; all)
+    foreach (ref const(StructureSpan) s; all)
         assert(s.parent < 0 || all[s.parent].at <= s.at);
 
     // An empty cache has nothing to walk and is done saying so.
-    LayoutCache none;
-    assert(layout_spans(none, 16, whole).length == 0);
+    StructureCache none;
+    assert(structure_spans(none, 16, whole).length == 0);
     assert(whole == false); // nothing parsed it, rather than nothing in it
 }
 
 /// Invalidation resumes from the outermost span over the edit, not from the edit.
 unittest
 {
-    LayoutCache c = layout_bind(new RecordLayout(), zeroReader(), 4 + 8 * 4);
+    StructureCache c = structure_bind(new RecordStructure(), zeroReader(), 4 + 8 * 4);
 
-    LayoutSpan s;
-    assert(layout_at(c, 4 + 8 * 3, s));
+    StructureSpan s;
+    assert(structure_at(c, 4 + 8 * 3, s));
     size_t parsed = c.spans.length;
     assert(parsed > 3);
 
     // An edit inside the payload of the second record takes that whole record with it,
     // its length field having been read from bytes that may have just changed.
-    layout_invalidate(c, 4 + 8 + 5);
+    structure_invalidate(c, 4 + 8 + 5);
     assert(c.spans.length < parsed);
-    foreach (ref const(LayoutSpan) sp; c.spans)
+    foreach (ref const(StructureSpan) sp; c.spans)
         assert(sp.at < 4 + 8);
 
     // And the same offsets read back the same once it has been parsed again.
-    assert(layout_at(c, 4 + 8 + 5, s));
-    assert(s.role == LayoutRole.data && s.at == 4 + 8 + 4);
-    assert(layout_ancestor(c, 4 + 8 + 5, 1, s));
-    assert(s.role == LayoutRole.none && s.at == 4 + 8);
+    assert(structure_at(c, 4 + 8 + 5, s));
+    assert(s.role == StructureRole.data && s.at == 4 + 8 + 4);
+    assert(structure_ancestor(c, 4 + 8 + 5, 1, s));
+    assert(s.role == StructureRole.none && s.at == 4 + 8);
 
     // An edit past everything parsed drops nothing.
-    layout_invalidate(c, long.max);
+    structure_invalidate(c, long.max);
     assert(c.spans.length > 0);
 }
 
@@ -718,7 +718,7 @@ unittest
 {
     ubyte[] doc = [ 0x01, 0x02, 0x03, 0x04, 0xff ];
 
-    LayoutBuilder b;
+    StructureBuilder b;
     b.size = doc.length;
     b.readFn = delegate(long at, ubyte[] buf)
     {
@@ -745,17 +745,17 @@ unittest
 /// The alternating shade over a run of touching fields sharing a role.
 unittest
 {
-    LayoutSpan[] spans;
-    LayoutBuilder b;
+    StructureSpan[] spans;
+    StructureBuilder b;
     b.spans = &spans;
 
-    b.field(LayoutRole.magic, "signature", 8);
+    b.field(StructureRole.magic, "signature", 8);
     b.open("IHDR");
-    b.field(LayoutRole.scalar, "width", 4);
-    b.field(LayoutRole.scalar, "height", 4);
-    b.field(LayoutRole.scalar, "bit depth", 1);
-    b.field(LayoutRole.flags, "colour type", 1);
-    b.field(LayoutRole.flags, "compression", 1);
+    b.field(StructureRole.scalar, "width", 4);
+    b.field(StructureRole.scalar, "height", 4);
+    b.field(StructureRole.scalar, "bit depth", 1);
+    b.field(StructureRole.flags, "colour type", 1);
+    b.field(StructureRole.flags, "compression", 1);
     b.close();
 
     assert(spans[0].shade == false);          // nothing before it to alternate with
@@ -768,14 +768,14 @@ unittest
 
     // A container between two fields of one role does not break the run, and a gap does.
     spans = null;
-    b = LayoutBuilder.init;
+    b = StructureBuilder.init;
     b.spans = &spans;
-    b.field(LayoutRole.data, "a", 4);
+    b.field(StructureRole.data, "a", 4);
     b.open("record");
-    b.field(LayoutRole.data, "b", 4);
+    b.field(StructureRole.data, "b", 4);
     b.close();
     b.at += 4; // a hole nothing claims
-    b.field(LayoutRole.data, "c", 4);
+    b.field(StructureRole.data, "c", 4);
 
     assert(spans[0].shade == false);
     assert(spans[2].shade);
@@ -786,59 +786,59 @@ unittest
 unittest
 {
     // Four touching fields of one role, so the shade alternates all the way along.
-    static final class RunLayout : ILayout
+    static final class RunStructure : IStructure
     {
         string name() { return "run"; }
         void forget() {}
-        bool parse(ref LayoutBuilder b, long until)
+        bool parse(ref StructureBuilder b, long until)
         {
             while (b.at < until && b.at + 4 <= b.size)
-                b.field(LayoutRole.scalar, "n", 4);
+                b.field(StructureRole.scalar, "n", 4);
             return b.at + 4 <= b.size;
         }
     }
 
-    LayoutCache c = layout_bind(new RunLayout(), zeroReader(), 16);
-    LayoutSpan s;
-    assert(layout_at(c, 12, s) && s.shade);
-    assert(layout_at(c, 4, s) && s.shade);
-    assert(layout_at(c, 8, s) && s.shade == false);
+    StructureCache c = structure_bind(new RunStructure(), zeroReader(), 16);
+    StructureSpan s;
+    assert(structure_at(c, 12, s) && s.shade);
+    assert(structure_at(c, 4, s) && s.shade);
+    assert(structure_at(c, 8, s) && s.shade == false);
 
     // Editing the third field reparses it and the fourth; both come back as they were.
-    layout_invalidate(c, 9);
-    assert(layout_at(c, 8, s) && s.shade == false);
-    assert(layout_at(c, 12, s) && s.shade);
+    structure_invalidate(c, 9);
+    assert(structure_at(c, 8, s) && s.shade == false);
+    assert(structure_at(c, 12, s) && s.shade);
 }
 
 /// Containers measured by close(), and the depth cap.
 unittest
 {
-    LayoutSpan[] spans;
-    LayoutBuilder b;
+    StructureSpan[] spans;
+    StructureBuilder b;
     b.spans = &spans;
 
     b.open("chunk"); // length unknown until walked
-    b.field(LayoutRole.magic, "tag", 4);
-    b.field(LayoutRole.data, "body", 12);
+    b.field(StructureRole.magic, "tag", 4);
+    b.field(StructureRole.data, "body", 12);
     b.close();
 
     assert(spans.length == 3);
-    assert(spans[0] == LayoutSpan(0, 16, LayoutRole.none, "chunk", 0, -1));
-    assert(spans[1] == LayoutSpan(0, 4, LayoutRole.magic, "tag", 1, 0));
-    assert(spans[2] == LayoutSpan(4, 12, LayoutRole.data, "body", 1, 0));
+    assert(spans[0] == StructureSpan(0, 16, StructureRole.none, "chunk", 0, -1));
+    assert(spans[1] == StructureSpan(0, 4, StructureRole.magic, "tag", 1, 0));
+    assert(spans[2] == StructureSpan(4, 12, StructureRole.data, "body", 1, 0));
 
     // Nesting past the cap is dropped, and the matching close() still balances.
     spans = null;
-    b = LayoutBuilder.init;
+    b = StructureBuilder.init;
     b.spans = &spans;
-    foreach (i; 0 .. LAYOUT_MAX_DEPTH + 4)
+    foreach (i; 0 .. STRUCTURE_MAX_DEPTH + 4)
         b.open("deep");
-    b.field(LayoutRole.data, "leaf", 1);
-    foreach (i; 0 .. LAYOUT_MAX_DEPTH + 4)
+    b.field(StructureRole.data, "leaf", 1);
+    foreach (i; 0 .. STRUCTURE_MAX_DEPTH + 4)
         b.close();
 
-    assert(spans.length == LAYOUT_MAX_DEPTH + 1);
-    assert(spans[$ - 1].depth == LAYOUT_MAX_DEPTH);
+    assert(spans.length == STRUCTURE_MAX_DEPTH + 1);
+    assert(spans[$ - 1].depth == STRUCTURE_MAX_DEPTH);
     assert(b.depth == 0);
     assert(b.dropped == 0);
 }

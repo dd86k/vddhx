@@ -2,8 +2,8 @@
 ///
 /// Every colour the grid puts on a byte comes through here, the byte classes included:
 /// what the plain uncoloured view does is a mapping like any other rather than a
-/// hardcoded scheme sitting beside the layout system. A theme file, when there is one,
-/// replaces the tables below and nothing else.
+/// hardcoded scheme sitting beside the structure overlay. A theme file, when there is
+/// one, replaces the tables below and nothing else.
 ///
 /// Roles that cover a lot of bytes at once - data, text, padding - are deliberately the
 /// quiet ones, and the vivid colours are spent on the fields that appear once or twice
@@ -13,16 +13,16 @@ module theme;
 
 import ddui;
 
-import layout;
+import structure;
 
-/// Colour the glyphs of a byte covered by `role`. LayoutRole.none has no colour of its
+/// Colour the glyphs of a byte covered by `role`. StructureRole.none has no colour of its
 /// own: it means nothing claimed the byte, which is the caller's cue to classify it.
 ///
-/// `shade` is the alternating bit off the span (see LayoutSpan.shade) and answers the
+/// `shade` is the alternating bit off the span (see StructureSpan.shade) and answers the
 /// same hue a step off, which is what tells IHDR's three scalars apart. A step rather
 /// than a colour of its own: a palette handed out per field runs dry on a format with
 /// more fields than colours, and says something where there is nothing to say.
-mu_Color theme_role(LayoutRole role, bool shade = false)
+mu_Color theme_role(StructureRole role, bool shade = false)
 {
     mu_Color c = theme_base(role);
     return shade && c.a ? theme_shade(c) : c;
@@ -51,9 +51,9 @@ private int clamp8(int v)
     return v < 0 ? 0 : (v > 255 ? 255 : v);
 }
 
-private mu_Color theme_base(LayoutRole role)
+private mu_Color theme_base(StructureRole role)
 {
-    switch (role) with (LayoutRole) {
+    switch (role) with (StructureRole) {
     case zero:       return mu_Color(90, 90, 100, 255);    // charcoal
     case printable:  return mu_Color(220, 220, 220, 255);  // off-white
     case whitespace: return mu_Color(120, 170, 200, 255);  // steel blue
@@ -94,29 +94,29 @@ unittest
 {
     // Every role but `none` answers with something visible, or a byte would come out
     // invisible against the panel.
-    foreach (LayoutRole role; LayoutRole.min .. cast(LayoutRole)(LayoutRole.max + 1))
+    foreach (StructureRole role; StructureRole.min .. cast(StructureRole)(StructureRole.max + 1))
     {
         mu_Color c = theme_role(role);
-        assert((role == LayoutRole.none) == (c.a == 0));
+        assert((role == StructureRole.none) == (c.a == 0));
     }
 
     // The classifier roles keep the colours the grid has always drawn them in: the
-    // panel's own hex_classify is what an uncoloured view uses, and a byte no layout
+    // panel's own hex_classify is what an uncoloured view uses, and a byte no structure
     // covers must not change colour for having been named through here instead.
     // hex_classify reads a byte as ASCII, so that is the set the two have to agree on.
     import hexview : hex_classify;
     import ddhx.charset : ASCII;
     foreach (ubyte value; [0x00, 'A', '\n', 0x01, 0x7f, 0x80, 0xff])
-        assert(theme_role(layout_classify(value, &ASCII))
+        assert(theme_role(structure_classify(value, &ASCII))
             == hex_classify(0, value, null));
 
     assert(theme_edge(0) != theme_edge(1));
 
     // The shade is a different colour from the one it alternates with, keeps the alpha,
     // and moves away from whichever end the role sits nearer.
-    foreach (LayoutRole role; LayoutRole.min .. cast(LayoutRole)(LayoutRole.max + 1))
+    foreach (StructureRole role; StructureRole.min .. cast(StructureRole)(StructureRole.max + 1))
     {
-        if (role == LayoutRole.none)
+        if (role == StructureRole.none)
             continue;
         mu_Color base = theme_role(role);
         mu_Color alt  = theme_role(role, true);
@@ -124,6 +124,6 @@ unittest
         assert(base.a == alt.a);
     }
 
-    assert(theme_role(LayoutRole.printable, true).r < theme_role(LayoutRole.printable).r);
-    assert(theme_role(LayoutRole.reserved, true).r > theme_role(LayoutRole.reserved).r);
+    assert(theme_role(StructureRole.printable, true).r < theme_role(StructureRole.printable).r);
+    assert(theme_role(StructureRole.reserved, true).r > theme_role(StructureRole.reserved).r);
 }

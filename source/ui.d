@@ -19,8 +19,8 @@ import crumbs;
 import disks : DISKS_LISTED, Disk, disks_list, disks_size;
 import elevate : Elevated, elevate_denied, elevate_poll, elevate_request;
 import hexview;
-import layout;
-import layouts.png : PngLayout, png_detect;
+import structure;
+import structures.png : PngStructure, png_detect;
 import theme : theme_edge, theme_role;
 import uitext : ui_elide;
 import omnibar;
@@ -78,20 +78,20 @@ struct Document
     /// document for the same reason the marks are: a span is an offset into these
     /// bytes, and two views of one file are looking at one structure.
     ///
-    /// Unbound until detectLayout finds a format it knows, and left that way when it
+    /// Unbound until detectStructure finds a format it knows, and left that way when it
     /// does not - the grid then colours bytes by class, as it always did.
-    LayoutCache layout;
+    StructureCache structure;
 
-    /// Read-ahead for the layout parser, which walks forward a few header bytes at a
+    /// Read-ahead for the structure parser, which walks forward a few header bytes at a
     /// time. Its length is the capacity.
-    ubyte[] layoutBuf;
-    /// Layout buffer starting position in document.
-    long layoutStart;
-    /// Layout buffer length that's valid to use, since last fill.
-    size_t layoutLen;
-    /// Layout buffer revision the buffer was filled at, taken from the document.
+    ubyte[] structureBuf;
+    /// Structure buffer starting position in document.
+    long structureStart;
+    /// Structure buffer length that's valid to use, since last fill.
+    size_t structureLen;
+    /// Structure buffer revision the buffer was filled at, taken from the document.
     /// Used to invalidate the buffer for a fresh read.
-    uint layoutRev;
+    uint structureRev;
 
     /// Byte order multi-byte values are read and written in: the inspector's rows
     /// and the scalars of a find pattern (`u16:`, `f32:`, `utf16:`). Per document,
@@ -99,7 +99,7 @@ struct Document
     /// stays big-endian while the little-endian one in the next tab stays little -
     /// and views of one file are looking at one format.
     ///
-    /// A layout names the order of its own fields and ignores this, formats being
+    /// A structure names the order of its own fields and ignores this, formats being
     /// free to mix the two internally.
     Endian endian = Endian.littleEndian;
 
@@ -1254,26 +1254,26 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
     return byteColor(v, offset, value);
 }
 
-/// What a byte *is*: the role the document's layout gives it, or its class when no
-/// layout covers it. The two are one channel - both answer the same question - so a
+/// What a byte *is*: the role the document's structure gives it, or its class when no
+/// structure covers it. The two are one channel - both answer the same question - so a
 /// field's role replaces the classifier's rather than competing with it.
 ///
 /// One answer behind both the colour the grid draws and the name the breadcrumb says,
 /// so the strip cannot call a byte something the colours disagree with.
 /// `shade` comes back set on the odd fields of a run of touching same-role fields, for
 /// the theme to draw a step off; a byte left to the classifier is never shaded.
-LayoutRole byteRole(View* v, size_t offset, ubyte value, out bool shade)
+StructureRole byteRole(View* v, size_t offset, ubyte value, out bool shade)
 {
     // A container claims the byte but colours nothing, so `none` falls through to the
     // classifier the same as no span at all.
-    LayoutSpan span;
-    if (layout_at(v.doc.layout, cast(long) offset, span) && span.role != LayoutRole.none)
+    StructureSpan span;
+    if (structure_at(v.doc.structure, cast(long) offset, span) && span.role != StructureRole.none)
     {
         shade = span.shade;
         return span.role;
     }
     // The document's set, so the colour agrees with the glyph the text lane drew.
-    return layout_classify(value, v.doc.charset);
+    return structure_classify(value, v.doc.charset);
 }
 
 /// Ditto, as the grid wants it.
@@ -1286,16 +1286,16 @@ mu_Color byteColor(View* v, size_t offset, ubyte value)
 /// Structure hook for the grid: the span `level` levels in from the outermost one over
 /// `pos`, for the border the panel draws round it. `user` is the View in hex.spanUser.
 ///
-/// The layout hangs off the document, so two views of one file outline the same fields
-/// and the parse behind them is done once.
+/// The structure hangs off the document, so two views of one file outline the same
+/// fields and the parse behind them is done once.
 bool hexSpan(long pos, int level, ref HexSpan span, void* user)
 {
     View* v = cast(View*) user;
     if (v is null || v.doc is null)
         return false;
 
-    LayoutSpan found;
-    if (layout_level(v.doc.layout, pos, level, found) == false)
+    StructureSpan found;
+    if (structure_level(v.doc.structure, pos, level, found) == false)
         return false;
 
     span.start  = found.at;
@@ -1304,23 +1304,23 @@ bool hexSpan(long pos, int level, ref HexSpan span, void* user)
     return true;
 }
 
-/// Name the layout gives the byte at `at`, outermost first: "IDAT / length". Written
+/// Name the structure gives the byte at `at`, outermost first: "IDAT / length". Written
 /// into `buf` rather than built, this being asked once a frame.
 ///
 /// Read the way the grid is: the record, then what in it. Containers carry no name of
 /// their own to skip, so a format that boxes without naming leaves only the field.
-/// Returns: The used slice of `buf`, empty when no layout covers the offset.
-const(char)[] layoutLabel(Document* doc, long at, char[] buf)
+/// Returns: The used slice of `buf`, empty when no structure covers the offset.
+const(char)[] structureLabel(Document* doc, long at, char[] buf)
 {
-    LayoutSpan inner;
-    if (layout_at(doc.layout, at, inner) == false)
+    StructureSpan inner;
+    if (structure_at(doc.structure, at, inner) == false)
         return null;
 
     size_t n;
     for (int level; level <= inner.depth; ++level)
     {
-        LayoutSpan s;
-        if (layout_level(doc.layout, at, level, s) == false || s.name.length == 0)
+        StructureSpan s;
+        if (structure_level(doc.structure, at, level, s) == false || s.name.length == 0)
             continue;
 
         if (n && n + SEP.length <= buf.length)
@@ -1341,18 +1341,18 @@ const(char)[] layoutLabel(Document* doc, long at, char[] buf)
 /// What sits between a record and the field inside it.
 immutable string SEP = " / ";
 
-/// How many of the layout's fields the '#' list holds. A flat list of a whole
-/// document is the one thing that asks a layout to be walked eagerly, so it is asked
+/// How many of the structure's fields the '#' list holds. A flat list of a whole
+/// document is the one thing that asks a structure to be walked eagerly, so it is asked
 /// for a listful and no more: a container format big enough to matter would otherwise
 /// be parsed end to end to fill a box showing ten rows.
 enum size_t STRUCT_ROWS = 2048;
 
 /// Name of `spans[i]` with the records holding it in front - "IDAT / length". What
-/// layoutLabel says about the caret, said about a span already in hand: the parent
+/// structureLabel says about the caret, said about a span already in hand: the parent
 /// links are right there, so nothing has to be looked up by offset.
-const(char)[] spanLabel(const(LayoutSpan)[] spans, size_t i, char[] buf)
+const(char)[] spanLabel(const(StructureSpan)[] spans, size_t i, char[] buf)
 {
-    ptrdiff_t[16] chain = void; // deeper than a layout may nest; see LAYOUT_MAX_DEPTH
+    ptrdiff_t[16] chain = void; // deeper than a structure nests; see STRUCTURE_MAX_DEPTH
     size_t depth;
     for (ptrdiff_t at = i; at >= 0 && depth < chain.length; at = spans[at].parent)
         chain[depth++] = at;
@@ -1383,26 +1383,27 @@ const(char)[] spanLabel(const(LayoutSpan)[] spans, size_t i, char[] buf)
 /// - "PNG / IDAT / length".
 ///
 /// Where no span covers the caret the last component is the byte's class instead -
-/// "PNG / control", or "control" alone on a document no layout was bound to - which is
-/// the same role the grid coloured it by. The format stays at the root wherever one is
-/// bound: dropping it between two chunks would read as the layout having been lost,
-/// and the strip is the one place saying a document was parsed at all.
+/// "PNG / control", or "control" alone on a document no structure was bound to -
+/// which is the same role the grid coloured it by. The format stays at the root
+/// wherever one is bound: dropping it between two chunks would read as the
+/// structure having been lost, and the strip is the one place saying a document
+/// was parsed at all.
 const(char)[] viewCrumbs(View* v)
 {
     char[64] pathbuf = void;
-    const(char)[] path = layoutLabel(v.doc, cast(long) v.hex.cursor, pathbuf);
+    const(char)[] path = structureLabel(v.doc, cast(long) v.hex.cursor, pathbuf);
 
     ubyte value;
     if (path.length == 0 && viewByte(v, v.hex.cursor, value))
-        path = layout_role_name(layout_classify(value, v.doc.charset));
+        path = structure_role_name(structure_classify(value, v.doc.charset));
 
-    string format = layout_name(v.doc.layout);
+    string format = structure_name(v.doc.structure);
     if (format.length == 0)
         return path.length ? sformat(v.crumbs, "%s", path) : null;
     return path.length ?
-        // With layout loaded
+        // With structure loaded
         sformat(v.crumbs, "%s%s%s", format, SEP, path) :
-        // Without layout loaded
+        // Without structure loaded
         sformat(v.crumbs, "%s", format);
 }
 
@@ -1433,9 +1434,9 @@ bool viewByte(View* v, size_t at, out ubyte value)
     return true;
 }
 
-/// Byte source a layout parses `d` through, swallowing a failed read as a short one:
+/// Byte source a structure parses `d` through, swallowing a failed read as a short one:
 /// this runs inside a frame, where an exception would take the window down with it.
-LayoutReadFn documentReader(Document* d)
+StructureReadFn documentReader(Document* d)
 {
     return delegate(long at, ubyte[] buf)
     {
@@ -1443,53 +1444,53 @@ LayoutReadFn documentReader(Document* d)
             return buf[0 .. 0];
 
         try
-            return layoutBuffered(d, at, buf);
+            return structureBuffered(d, at, buf);
         catch (Exception e)
             return buf[0 .. 0];
     };
 }
 
-/// How much the layout buffer reads ahead at a time.
-enum size_t LAYOUT_BLOCK = 64 * 1024;
+/// How much the structure buffer reads ahead at a time.
+enum size_t STRUCTURE_BLOCK = 64 * 1024;
 
-/// Serve `buf` from `doc`'s layout buffer, refilling it from `at` on a miss. A
+/// Serve `buf` from `doc`'s structure buffer, refilling it from `at` on a miss. A
 /// request larger than the buffer goes straight to the editor.
 /// Throws: Whatever the editor does.
-ubyte[] layoutBuffered(Document* doc, long at, ubyte[] buf)
+ubyte[] structureBuffered(Document* doc, long at, ubyte[] buf)
 {
-    if (buf.length > LAYOUT_BLOCK)
+    if (buf.length > STRUCTURE_BLOCK)
         return doc.editor.view(at, buf);
 
-    bool fresh = doc.layoutRev == doc.revision && doc.layoutLen > 0 &&
-        at >= doc.layoutStart && at - doc.layoutStart < doc.layoutLen;
+    bool fresh = doc.structureRev == doc.revision && doc.structureLen > 0 &&
+        at >= doc.structureStart && at - doc.structureStart < doc.structureLen;
     // A request straddling the end of a full buffer has more document after it, so
     // it refills; one past the end of a short buffer is at EOF, so it is served short.
-    if (fresh && at + buf.length > doc.layoutStart + doc.layoutLen &&
-        doc.layoutLen == LAYOUT_BLOCK)
+    if (fresh && at + buf.length > doc.structureStart + doc.structureLen &&
+        doc.structureLen == STRUCTURE_BLOCK)
         fresh = false;
 
     if (fresh == false)
     {
-        if (doc.layoutBuf.length < LAYOUT_BLOCK)
-            doc.layoutBuf.length = LAYOUT_BLOCK;
-        doc.layoutLen = 0; // a throwing read leaves nothing claimed
-        ubyte[] got = doc.editor.view(at, doc.layoutBuf);
-        doc.layoutStart = at;
-        doc.layoutLen   = got.length;
-        doc.layoutRev   = doc.revision;
+        if (doc.structureBuf.length < STRUCTURE_BLOCK)
+            doc.structureBuf.length = STRUCTURE_BLOCK;
+        doc.structureLen = 0; // a throwing read leaves nothing claimed
+        ubyte[] got = doc.editor.view(at, doc.structureBuf);
+        doc.structureStart = at;
+        doc.structureLen   = got.length;
+        doc.structureRev   = doc.revision;
     }
 
-    size_t from = cast(size_t)(at - doc.layoutStart);
-    if (from >= doc.layoutLen)
+    size_t from = cast(size_t)(at - doc.structureStart);
+    if (from >= doc.structureLen)
         return buf[0 .. 0];
-    size_t n = doc.layoutLen - from < buf.length ? doc.layoutLen - from : buf.length;
-    return buf[0 .. n] = doc.layoutBuf[from .. from + n];
+    size_t n = doc.structureLen - from < buf.length ? doc.structureLen - from : buf.length;
+    return buf[0 .. n] = doc.structureBuf[from .. from + n];
 }
 
-/// Give `d` a layout when its opening bytes say what it is, and nothing when they do
+/// Give `d` a structure when its opening bytes say what it is, and nothing when they do
 /// not. Called once, on open: what a file *is* does not change under editing, even
 /// when the bytes saying so do.
-void detectLayout(Document* d)
+void detectStructure(Document* d)
 {
     if (d.editor is null)
         return;
@@ -1497,27 +1498,27 @@ void detectLayout(Document* d)
     ubyte[64] head = void;
     ubyte[] got;
     try
-        got = layoutBuffered(d, 0, head); // warms the buffer the parse starts in
+        got = structureBuffered(d, 0, head); // warms the buffer the parse starts in
     catch (Exception e)
         return;
 
     // NOTE: Eventually will probably be a loop with a table of functions
     if (png_detect(got))
     {
-        d.layout = layout_bind(new PngLayout(), documentReader(d), d.editor.size());
+        d.structure = structure_bind(new PngStructure(), documentReader(d), d.editor.size());
         return;
     }
 }
 
-/// Drop the spans an edit at `pos` invalidated and tell the layout the new size.
+/// Drop the spans an edit at `pos` invalidated and tell the structure the new size.
 /// Cheap enough to call on every keystroke: the cache truncates rather than reparses,
 /// and the parse that follows is driven by what the next frame actually draws.
-void layoutEdited(Document* doc, long pos)
+void structureEdited(Document* doc, long pos)
 {
     if (pos < 0)
         pos = 0;
-    layout_resize(doc.layout, doc.editor.size());
-    layout_invalidate(doc.layout, pos);
+    structure_resize(doc.structure, doc.editor.size());
+    structure_invalidate(doc.structure, pos);
 }
 
 /// Background hook for the grid: a wash behind the bookmarked bytes, nothing behind
@@ -1600,7 +1601,7 @@ void hexReplace(long pos, ubyte value, void* user)
     {
         v.doc.editor.replace(pos, &value, 1);
         ++v.doc.revision;
-        layoutEdited(v.doc, pos);
+        structureEdited(v.doc, pos);
     }
     catch (Exception e)
         logWarn("replace failed: %s", e.msg);
@@ -1614,7 +1615,7 @@ void hexInsert(long pos, ubyte value, void* user)
         v.doc.editor.insert(pos, &value, 1);
         ++v.doc.revision;
         bookmark_shift(v.doc.marks, pos, 1); // the bytes past it all moved up one
-        layoutEdited(v.doc, pos);
+        structureEdited(v.doc, pos);
     }
     catch (Exception e)
         logWarn("insert failed: %s", e.msg);
@@ -1628,7 +1629,7 @@ void hexRemove(long pos, long len, void* user)
         v.doc.editor.remove(pos, len);
         ++v.doc.revision;
         bookmark_shift(v.doc.marks, pos, -len);
-        layoutEdited(v.doc, pos);
+        structureEdited(v.doc, pos);
     }
     catch (Exception e)
         logWarn("remove failed: %s", e.msg);
@@ -1649,7 +1650,7 @@ long hexUndo(void* user)
         logWarn("undo failed: %s", e.msg);
     ++v.doc.revision;
     v.hex.dataSize = v.doc.editor.size();
-    layoutEdited(v.doc, at);
+    structureEdited(v.doc, at);
     return at;
 }
 /// Ditto.
@@ -1663,7 +1664,7 @@ long hexRedo(void* user)
         logWarn("redo failed: %s", e.msg);
     ++v.doc.revision;
     v.hex.dataSize = v.doc.editor.size();
-    layoutEdited(v.doc, at);
+    structureEdited(v.doc, at);
     return at;
 }
 
@@ -2071,7 +2072,7 @@ Document* ui_adopt(string path, IDocument src)
     d.path   = path; // in-place Save now has a target
     d.title  = baseName(path);
     d.restricted = ui_fixed(d);
-    detectLayout(d);
+    detectStructure(d);
     return d;
 }
 
@@ -2564,7 +2565,7 @@ void cutSelection(bool asText)
         return;
     }
     ++doc.revision;
-    layoutEdited(doc, cast(long) low);
+    structureEdited(doc, cast(long) low);
     bookmark_shift(doc.marks, cast(long) low, -cast(long)(high - low + 1));
 
     view.hex.dataSize = doc.editor.size();
@@ -2645,7 +2646,7 @@ public void ui_paste()
     // The document may have moved even on a failed insert-after-remove, so the
     // panel is refreshed either way.
     ++doc.revision;
-    layoutEdited(doc, pos);
+    structureEdited(doc, pos);
     view.hex.dataSize = editor.size();
     hex_set_caret(view.hex, ok ? low + bytes.length : low);
     if (ok)
@@ -3141,32 +3142,32 @@ const(OmniItem)[] ui_omni_items()
         break;
     case OmniMode.structure:
         bool whole;
-        const(LayoutSpan)[] spans = layout_spans(focusedDoc.layout, STRUCT_ROWS, whole);
+        const(StructureSpan)[] spans = structure_spans(focusedDoc.structure, STRUCT_ROWS, whole);
         if (spans.length == 0)
         {
-            put(layout_name(focusedDoc.layout).length ?
-                    "nothing parsed in this document" : "no layout for this document",
+            put(structure_name(focusedDoc.structure).length ?
+                    "nothing parsed in this document" : "no structure for this document",
                 "PNG is the only format read so far", -1, false, true);
             break;
         }
         // The role goes in as a keyword rather than on screen: the colour under the
         // caret already says it, and it is what lets "#checksum" find a field the
         // format calls CRC.
-        foreach (size_t i, ref const(LayoutSpan) s; spans)
+        foreach (size_t i, ref const(StructureSpan) s; spans)
         {
             char[128] path = void;
             char[64] where = void;
             put(ui_row_text(spanLabel(spans, i, path)),
                 ui_row_text(sformat(where, "0x%08x  %d byte%s", s.at, s.length,
                     s.length == 1 ? "" : "s")),
-                cast(int) i, false, false, layout_role_name(s.role));
+                cast(int) i, false, false, structure_role_name(s.role));
         }
         // A cut list has to say so, or a missing field reads as one the format does
         // not have. Not pinned, so typing a query puts the notice away with the rows
         // it was about; unfiltered it sorts last, where the list runs out.
         if (whole == false)
         {
-            const(LayoutSpan) last = spans[$ - 1];
+            const(StructureSpan) last = spans[$ - 1];
             char[64] far = void;
             put(ui_row_text(sformat(far, "%d fields, and more past 0x%08x",
                     spans.length, last.at + last.length)), null, -1);
@@ -3252,7 +3253,7 @@ void ui_struct_preview(OmniMode mode)
 
     int id = omni_current(omni);
     bool whole;
-    const(LayoutSpan)[] spans = layout_spans(focusedDoc.layout, STRUCT_ROWS, whole);
+    const(StructureSpan)[] spans = structure_spans(focusedDoc.structure, STRUCT_ROWS, whole);
     if (id < 0 || id >= spans.length || spans[id].length <= 0)
         return;
 
@@ -3774,7 +3775,7 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         // The id indexes the list the rows were built from, which is the cache's own
         // array: nothing has edited the document between building it and this.
         bool whole;
-        const(LayoutSpan)[] spans = layout_spans(focusedDoc.layout, STRUCT_ROWS, whole);
+        const(StructureSpan)[] spans = structure_spans(focusedDoc.structure, STRUCT_ROWS, whole);
         if (id >= 0 && id < spans.length && spans[id].length > 0)
         {
             // Selected rather than jumped to: a field is a run of bytes, and the
@@ -5113,11 +5114,11 @@ void ui_tip(mu_Context* ctx)
     mu_draw_text(ctx, font, text, mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD), TIP_TEXT);
 }
 
-/// The field tooltip: what the layout calls the byte under the pointer, once it has
+/// The field tooltip: what the structure calls the byte under the pointer, once it has
 /// rested on it long enough.
 ///
 /// Found by asking the panels which of them has the pointer (see SpanTip), and only
-/// worth putting up where there is a layout to name anything: on a document with none
+/// worth putting up where there is a structure to name anything: on a document with none
 /// this is a hover that never resolves, which is the same as no hover at all.
 ///
 /// Moving to another byte restarts the wait rather than following the pointer live: a
@@ -5157,7 +5158,7 @@ void ui_span_tip(mu_Context* ctx)
         return;
 
     char[64] pathbuf = void;
-    const(char)[] path = layoutLabel(over.doc, spanTip.at, pathbuf);
+    const(char)[] path = structureLabel(over.doc, spanTip.at, pathbuf);
     if (path.length == 0)
         return;
 

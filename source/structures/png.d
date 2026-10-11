@@ -1,16 +1,16 @@
-/// PNG as a layout: the eight-byte signature, then the chunk loop.
+/// PNG as a structure: the eight-byte signature, then the chunk loop.
 ///
-/// The first real format over the layout interface, and picked for it: chunks are
+/// The first real format over the structure interface, and picked for it: chunks are
 /// length-prefixed and follow one another, so the whole file parses front to back one
 /// record at a time, which is what the incremental cache is built around. Only IHDR
 /// is broken into fields; every other chunk's payload is left as one span, there being
 /// nothing to say about it that the bytes do not.
 /// Authors: dd86k <dd@dax.moe>
-module layouts.png;
+module structures.png;
 
 import std.system : Endian;
 
-import layout;
+import structure;
 
 /// The signature every PNG opens with.
 immutable ubyte[8] PNG_SIGNATURE = [ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a ];
@@ -22,20 +22,20 @@ bool png_detect(const(ubyte)[] head)
 }
 
 /// PNG structure over a document.
-final class PngLayout : ILayout
+final class PngStructure : IStructure
 {
     string name()
     {
         return "PNG";
     }
 
-    bool parse(ref LayoutBuilder b, long until)
+    bool parse(ref StructureBuilder b, long until)
     {
         if (b.at == 0)
         {
             if (b.size < PNG_SIGNATURE.length)
                 return false;
-            b.field(LayoutRole.magic, "signature", PNG_SIGNATURE.length);
+            b.field(StructureRole.magic, "signature", PNG_SIGNATURE.length);
         }
 
         while (ended == false && b.at < until)
@@ -56,7 +56,7 @@ final class PngLayout : ILayout
 
     // Chunk types are four bytes read out of the file rather than literals, so naming
     // a span after one means a string per chunk. Keyed by the four bytes, a file of a
-    // hundred thousand IDATs allocates once. Per layout instance rather than global:
+    // hundred thousand IDATs allocates once. Per structure instance rather than global:
     // the table belongs to the document being parsed, and nothing here is threaded.
     string[uint] tags;
 
@@ -64,7 +64,7 @@ final class PngLayout : ILayout
     // middle parts. Registered under the declared length even when the file is too
     // short for it, so a truncated last chunk shows as the short one it is.
     // Returns: false at the end of the chunks, whether that is IEND or a cut file.
-    bool chunk(ref LayoutBuilder b)
+    bool chunk(ref StructureBuilder b)
     {
         long head = b.at;
         if (head + 8 > b.size) // no room for even a length and a type
@@ -81,17 +81,17 @@ final class PngLayout : ILayout
         bool whole  = head + total <= b.size;
 
         b.open(tag, whole ? total : b.size - head);
-        b.field(LayoutRole.length, "length", 4);
-        b.field(LayoutRole.magic, "type", 4);
+        b.field(StructureRole.length, "length", 4);
+        b.field(StructureRole.magic, "type", 4);
 
         long payload = whole ? cast(long) declared : b.size - b.at;
         if (tag == "IHDR" && payload == 13)
             ihdr(b);
         else if (payload > 0)
-            b.field(LayoutRole.data, "data", payload);
+            b.field(StructureRole.data, "data", payload);
 
         if (whole)
-            b.field(LayoutRole.checksum, "crc", 4);
+            b.field(StructureRole.checksum, "crc", 4);
         b.close();
 
         if (whole == false)
@@ -103,15 +103,15 @@ final class PngLayout : ILayout
 
     // IHDR's thirteen bytes, the one payload worth naming: everything downstream of a
     // PNG is read in terms of these.
-    void ihdr(ref LayoutBuilder b)
+    void ihdr(ref StructureBuilder b)
     {
-        b.field(LayoutRole.scalar, "width", 4);
-        b.field(LayoutRole.scalar, "height", 4);
-        b.field(LayoutRole.scalar, "bit depth", 1);
-        b.field(LayoutRole.flags, "colour type", 1);
-        b.field(LayoutRole.flags, "compression", 1);
-        b.field(LayoutRole.flags, "filter", 1);
-        b.field(LayoutRole.flags, "interlace", 1);
+        b.field(StructureRole.scalar, "width", 4);
+        b.field(StructureRole.scalar, "height", 4);
+        b.field(StructureRole.scalar, "bit depth", 1);
+        b.field(StructureRole.flags, "colour type", 1);
+        b.field(StructureRole.flags, "compression", 1);
+        b.field(StructureRole.flags, "filter", 1);
+        b.field(StructureRole.flags, "interlace", 1);
     }
 
     // A chunk type as a name, interned. Bytes outside printable ASCII become dots
@@ -166,7 +166,7 @@ version (unittest)
         return doc;
     }
 
-    private LayoutReadFn readerFor(ubyte[] doc)
+    private StructureReadFn readerFor(ubyte[] doc)
     {
         return delegate(long at, ubyte[] buf)
         {
@@ -195,42 +195,42 @@ unittest
     ubyte[] doc = pngFile();
     assert(doc.length == 61);
 
-    LayoutCache c = layout_bind(new PngLayout(), readerFor(doc), doc.length);
-    assert(layout_name(c) == "PNG");
+    StructureCache c = structure_bind(new PngStructure(), readerFor(doc), doc.length);
+    assert(structure_name(c) == "PNG");
 
-    LayoutSpan s;
-    assert(layout_at(c, 0, s));
-    assert(s.role == LayoutRole.magic && s.name == "signature" && s.length == 8);
-    assert(layout_ancestor(c, 0, 1, s) == false); // the signature is not in a chunk
+    StructureSpan s;
+    assert(structure_at(c, 0, s));
+    assert(s.role == StructureRole.magic && s.name == "signature" && s.length == 8);
+    assert(structure_ancestor(c, 0, 1, s) == false); // the signature is not in a chunk
 
     // IHDR, broken out into its fields, each inside the chunk that holds them.
-    assert(layout_at(c, 8, s) && s.role == LayoutRole.length && s.name == "length");
-    assert(layout_at(c, 12, s) && s.role == LayoutRole.magic && s.name == "type");
-    assert(layout_at(c, 16, s) && s.name == "width" && s.length == 4);
-    assert(layout_at(c, 20, s) && s.name == "height");
-    assert(layout_at(c, 24, s) && s.name == "bit depth" && s.length == 1);
-    assert(layout_at(c, 28, s) && s.name == "interlace");
-    assert(layout_at(c, 29, s) && s.role == LayoutRole.checksum && s.name == "crc");
+    assert(structure_at(c, 8, s) && s.role == StructureRole.length && s.name == "length");
+    assert(structure_at(c, 12, s) && s.role == StructureRole.magic && s.name == "type");
+    assert(structure_at(c, 16, s) && s.name == "width" && s.length == 4);
+    assert(structure_at(c, 20, s) && s.name == "height");
+    assert(structure_at(c, 24, s) && s.name == "bit depth" && s.length == 1);
+    assert(structure_at(c, 28, s) && s.name == "interlace");
+    assert(structure_at(c, 29, s) && s.role == StructureRole.checksum && s.name == "crc");
 
-    assert(layout_ancestor(c, 16, 1, s));
-    assert(s.name == "IHDR" && s.at == 8 && s.length == 25 && s.role == LayoutRole.none);
+    assert(structure_ancestor(c, 16, 1, s));
+    assert(s.name == "IHDR" && s.at == 8 && s.length == 25 && s.role == StructureRole.none);
 
     // An unnamed payload stays one span.
-    assert(layout_at(c, 41, s));
-    assert(s.role == LayoutRole.data && s.name == "data" && s.at == 41 && s.length == 4);
-    assert(layout_ancestor(c, 41, 1, s));
+    assert(structure_at(c, 41, s));
+    assert(s.role == StructureRole.data && s.name == "data" && s.at == 41 && s.length == 4);
+    assert(structure_ancestor(c, 41, 1, s));
     assert(s.name == "IDAT" && s.at == 33 && s.length == 16);
 
     // IEND carries no payload, so its CRC follows its type.
-    assert(layout_at(c, 57, s) && s.role == LayoutRole.checksum);
-    assert(layout_ancestor(c, 57, 1, s) && s.name == "IEND" && s.length == 12);
+    assert(structure_at(c, 57, s) && s.role == StructureRole.checksum);
+    assert(structure_ancestor(c, 57, 1, s) && s.name == "IEND" && s.length == 12);
 
     // Nothing past the end of the file.
-    assert(layout_at(c, 61, s) == false);
+    assert(structure_at(c, 61, s) == false);
 
     // Every byte of the file is covered, the chunks tiling it end to end.
     foreach (long at; 0 .. cast(long) doc.length)
-        assert(layout_at(c, at, s), "uncovered byte");
+        assert(structure_at(c, at, s), "uncovered byte");
 }
 
 /// Only the chunks up to the offset asked about are walked.
@@ -238,14 +238,14 @@ unittest
 {
     ubyte[] doc = pngFile();
 
-    LayoutCache c = layout_bind(new PngLayout(), readerFor(doc), doc.length);
+    StructureCache c = structure_bind(new PngStructure(), readerFor(doc), doc.length);
 
-    LayoutSpan s;
-    assert(layout_at(c, 16, s) && s.name == "width");
+    StructureSpan s;
+    assert(structure_at(c, 16, s) && s.name == "width");
 
     // IHDR was reached, so IDAT and IEND were not: asking for one of their offsets
     // would have had to parse them.
-    assert(layout_ancestor(c, 41, 1, s) && s.name == "IDAT");
+    assert(structure_ancestor(c, 41, 1, s) && s.name == "IDAT");
 }
 
 /// A file cut short mid-chunk shows the short chunk rather than nothing.
@@ -253,18 +253,18 @@ unittest
 {
     ubyte[] doc = pngFile()[0 .. 45]; // inside IDAT, its CRC lost
 
-    LayoutCache c = layout_bind(new PngLayout(), readerFor(doc), doc.length);
+    StructureCache c = structure_bind(new PngStructure(), readerFor(doc), doc.length);
 
-    LayoutSpan s;
-    assert(layout_ancestor(c, 41, 1, s));
+    StructureSpan s;
+    assert(structure_ancestor(c, 41, 1, s));
     assert(s.name == "IDAT" && s.at == 33 && s.length == 12); // 16 declared, 12 left
-    assert(layout_at(c, 41, s) && s.role == LayoutRole.data && s.length == 4);
+    assert(structure_at(c, 41, s) && s.role == StructureRole.data && s.length == 4);
 
     // And one cut inside a chunk header registers nothing of it at all.
     doc = pngFile()[0 .. 12];
-    c = layout_bind(new PngLayout(), readerFor(doc), doc.length);
-    assert(layout_at(c, 0, s) && s.name == "signature");
-    assert(layout_at(c, 8, s) == false);
+    c = structure_bind(new PngStructure(), readerFor(doc), doc.length);
+    assert(structure_at(c, 0, s) && s.name == "signature");
+    assert(structure_at(c, 8, s) == false);
 }
 
 /// A corrupt chunk type is still a four-character name.
@@ -273,10 +273,10 @@ unittest
     ubyte[] doc = PNG_SIGNATURE.dup;
     doc ~= pngChunk("\x00A\xffB", [ 1, 2 ]);
 
-    LayoutCache c = layout_bind(new PngLayout(), readerFor(doc), doc.length);
+    StructureCache c = structure_bind(new PngStructure(), readerFor(doc), doc.length);
 
-    LayoutSpan s;
-    assert(layout_ancestor(c, 8 + 8, 1, s));
+    StructureSpan s;
+    assert(structure_ancestor(c, 8 + 8, 1, s));
     assert(s.name == ".A.B" && s.length == 14);
 }
 
@@ -285,13 +285,13 @@ unittest
 {
     ubyte[] doc = pngFile();
 
-    LayoutCache c = layout_bind(new PngLayout(), readerFor(doc), doc.length);
+    StructureCache c = structure_bind(new PngStructure(), readerFor(doc), doc.length);
 
-    LayoutSpan s;
-    assert(layout_at(c, 57, s)); // parse it all
+    StructureSpan s;
+    assert(structure_at(c, 57, s)); // parse it all
 
-    layout_invalidate(c, 41); // inside IDAT's payload
-    assert(layout_at(c, 16, s) && s.name == "width"); // IHDR survived
-    assert(layout_ancestor(c, 41, 1, s) && s.name == "IDAT" && s.at == 33);
-    assert(layout_ancestor(c, 57, 1, s) && s.name == "IEND");
+    structure_invalidate(c, 41); // inside IDAT's payload
+    assert(structure_at(c, 16, s) && s.name == "width"); // IHDR survived
+    assert(structure_ancestor(c, 41, 1, s) && s.name == "IDAT" && s.at == 33);
+    assert(structure_ancestor(c, 57, 1, s) && s.name == "IEND");
 }
