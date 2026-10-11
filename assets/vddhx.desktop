@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=vddhx
+GenericName=Hex Editor
+Comment=Graphical hex editor
+Exec=vddhx %F
+Icon=vddhx
+Terminal=false
+Categories=Development;Utility;
+Keywords=hex;binary;editor;
+MimeType=application/octet-stream;
