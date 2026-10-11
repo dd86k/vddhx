@@ -1,0 +1,59 @@
+name: Package
+
+on: [ push, pull_request, workflow_dispatch ]
+
+# Each format is built on its own distro family so dpkg-shlibdeps and rpmbuild
+# pick up glibc requirements users actually have (see tools/package.d).
+jobs:
+  deb:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-26.04, ubuntu-26.04-arm ]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v6
+    # The default configuration dlopens SDL3, so no SDL dev packages needed.
+    - name: Install packaging tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y dpkg-dev
+    - uses: dlang-community/setup-dlang@v2
+      with:
+        compiler: ldc
+    # dub.selections.json is gitignored; dub.sdl pins every dependency.
+    - uses: actions/cache@v4
+      with:
+        path: ~/.dub
+        key: dub-${{ matrix.os }}-${{ hashFiles('dub.sdl') }}
+    - name: Build .deb
+      run: ldc2 -run tools/package.d --deb --compiler=ldc2
+    - uses: actions/upload-artifact@v4
+      with:
+        name: vddhx-deb-${{ runner.arch }}
+        path: dist/*.deb
+        if-no-files-found: error
+
+  rpm:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-26.04, ubuntu-26.04-arm ]
+    runs-on: ${{ matrix.os }}
+    container: fedora:latest
+    steps:
+    # git for dub's git dependencies, tar for actions/cache, binutils for strip.
+    - name: Install toolchain and packaging tools
+      run: dnf install -y ldc dub git tar binutils rpm-build
+    - uses: actions/checkout@v6
+    - uses: actions/cache@v4
+      with:
+        path: ~/.dub
+        key: dub-fedora-${{ matrix.os }}-${{ hashFiles('dub.sdl') }}
+    - name: Build .rpm
+      run: ldc2 -run tools/package.d --rpm --compiler=ldc2
+    - uses: actions/upload-artifact@v4
+      with:
+        name: vddhx-rpm-${{ runner.arch }}
+        path: dist/*.rpm
+        if-no-files-found: error
