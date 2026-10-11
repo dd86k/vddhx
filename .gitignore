@@ -37,3 +37,6 @@ vddhx-test-*
 
 # nano
 *.swp
+
+# Packages (tools/package.d)
+/dist/
