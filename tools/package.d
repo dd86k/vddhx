@@ -1,9 +1,8 @@
-// Builds the static configuration and wraps it into .deb and/or .rpm packages.
+// Builds vddhx and wraps it into .deb and/or .rpm packages.
 //
-// The static build only links the distro's freetype/harfbuzz; dpkg-shlibdeps
-// and rpmbuild turn those into versioned dependencies. What SDL and render.d
-// dlopen (video backends, fontconfig) never shows up as a NEEDED entry, so it
-// is listed by hand as recommendations. Build each format on its own distro
+// dpkg-shlibdeps and rpmbuild only see NEEDED entries. SDL itself (loader.d,
+// unless --static), its video backends, and render.d's fontconfig are all
+// dlopened, so they are listed by hand. Build each format on its own distro
 // family so that glibc requirements match what users have.
 //
 // Usage: dmd -run tools/package.d [--help] [options...]
@@ -32,6 +31,13 @@ enum SUMMARY = "Graphical hex editor";
 enum DESCRIPTION = "A graphical hex editor built on ddhx, for files and disks.";
 
 immutable uint[] ICON_SIZES = [16, 32, 48, 64, 128, 256];
+
+// The dynamic build's SDL: soname, Debian package, and the floor dub.sdl sets
+// (bindbc-sdl's 3.2.0 baseline, SDL_TTF_3_2_2). rpm sonames carry no version.
+immutable string[3][] SDL_LIBS = [
+    ["libSDL3.so.0",     "libsdl3-0",    "3.2.0"],
+    ["libSDL3_ttf.so.0", "libsdl3-ttf0", "3.2.2"],
+];
 
 // Sonames dlopened at runtime: SDL's video backends and render.d's fontconfig.
 // Mapped to Debian package names; rpm can recommend the sonames directly.
@@ -62,6 +68,7 @@ struct Meta
 {
     string version_;
     string release;
+    bool linkStatic;
     string maintainer;
     string homepage;
     string license;
@@ -69,15 +76,16 @@ struct Meta
 
 int main(string[] args)
 {
-    bool deb, rpm, noBuild;
+    bool deb, rpm, noBuild, linkStatic;
     string compiler, outDir, release = "1";
     GetoptResult opts = getopt(args,
         "deb", "Build a .deb (default: every format whose tools are on PATH)", &deb,
         "rpm", "Build an .rpm", &rpm,
+        "static", "Link SDL3 in rather than depend on the distro's", &linkStatic,
         "compiler", "D compiler passed to dub (default: dub's choice)", &compiler,
         "release", "Package release/revision number (default: 1)", &release,
         "out", "Output directory (default: <repo>/dist)", &outDir,
-        "no-build", "Package the existing ./vddhx (must be the static configuration)", &noBuild);
+        "no-build", "Package the existing ./vddhx (must match --static)", &noBuild);
     if (opts.helpWanted)
     {
         defaultGetoptPrinter("Package vddhx as .deb and/or .rpm.", opts.options);
@@ -103,10 +111,11 @@ int main(string[] args)
     {
         Meta meta = readMeta(root);
         meta.release = release;
+        meta.linkStatic = linkStatic;
         string binary = buildPath(root, NAME);
         if (noBuild == false)
         {
-            string[] cmd = ["dub", "build", "-c", "static", "-b", "release", "--root", root];
+            string[] cmd = ["dub", "build", "-c", linkStatic ? "static" : "application", "-b", "release", "--root", root];
             if (compiler.length)
                 cmd ~= "--compiler=" ~ compiler;
             run(cmd);
@@ -219,6 +228,9 @@ string packageDeb(string root, string outDir, string binary, Meta meta)
     }
 
     string[] depends = [shlibDepends(outDir, buildPath(stage, "usr/bin", NAME))];
+    if (meta.linkStatic == false)
+        foreach (immutable string[3] lib; SDL_LIBS)
+            depends ~= format("%s (>= %s)", lib[1], lib[2]);
     string[] recommends = RUNTIME_LIBS.map!(l => l[1]).array ~ DEB_FONTS.dup;
 
     string control = format(
@@ -277,6 +289,10 @@ string packageRpm(string root, string outDir, string binary, string arch, Meta m
 
     // Matches the soname provides rpm generates on 64-bit targets.
     string suffix = ["x86_64", "aarch64", "ppc64le", "riscv64", "s390x"].canFind(arch) ? "()(64bit)" : "";
+    string requires;
+    if (meta.linkStatic == false)
+        foreach (immutable string[3] lib; SDL_LIBS)
+            requires ~= "Requires: " ~ lib[0] ~ suffix ~ "\n";
     string recommends;
     foreach (immutable string[2] lib; RUNTIME_LIBS)
         recommends ~= "Recommends: " ~ lib[0] ~ suffix ~ "\n";
@@ -304,7 +320,7 @@ string packageRpm(string root, string outDir, string binary, string arch, Meta m
         "\n%%install\ncp -a %s/. %%{buildroot}/\n" ~
         "\n%%files\n%s",
         NAME, meta.version_, meta.release, SUMMARY, meta.license, meta.homepage,
-        meta.maintainer, recommends, DESCRIPTION, stage, files);
+        meta.maintainer, requires ~ recommends, DESCRIPTION, stage, files);
 
     string top = buildPath(outDir, "rpmbuild");
     mkdirRecurse(top);
