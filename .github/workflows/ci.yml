@@ -98,3 +98,44 @@ jobs:
         name: vddhx-rpm-${{ runner.arch }}
         path: dist/*.rpm
         if-no-files-found: error
+
+  # Static: SDL3 and SDL3_ttf are linked in, so the artifact is the exe alone.
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025, arch: x86_64 }
+          - { os: windows-11-arm, arch: aarch64 }
+    needs: test
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: dlang-community/setup-dlang@a6f7969b8b5dc3ff448c30f2c6749150795814f3 # v2 branch
+      with:
+        compiler: ldc
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/AppData/Local/dub
+        key: dub-${{ matrix.os }}-${{ hashFiles('dub.sdl') }}
+    # The script pins the SDL tags, so its hash decides when to rebuild.
+    - id: sdl3
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: install
+        key: sdl3-${{ matrix.os }}-${{ hashFiles('tools/build-sdl3.d') }}
+    - name: Build SDL3
+      if: steps.sdl3.outputs.cache-hit != 'true'
+      run: ldc2 -run tools/build-sdl3.d
+    - name: Build vddhx
+      run: dub build -c static -b release --compiler=ldc2
+    - name: Stage artifact
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory stage | Out-Null
+        Copy-Item vddhx.exe, LICENSE, README.md stage
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: vddhx-windows-${{ matrix.arch }}
+        path: stage/*
+        if-no-files-found: error

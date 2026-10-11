@@ -341,21 +341,33 @@ Install the C++ build tools (free, no IDE required):
 
 A mingw gcc is not a substitute: DMD/LDC produce MSVC-ABI objects on win64.`);
 
+    // Native toolset for the host, matching what the D compiler targets.
+    version (AArch64)
+    {
+        enum string COMPONENT = "Microsoft.VisualStudio.Component.VC.Tools.ARM64";
+        enum string VCVARS = "vcvarsarm64.bat";
+    }
+    else
+    {
+        enum string COMPONENT = "Microsoft.VisualStudio.Component.VC.Tools.x86.x64";
+        enum string VCVARS = "vcvars64.bat";
+    }
+
     auto found = execute([vswhere, "-latest", "-products", "*",
-        "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-requires", COMPONENT,
         "-property", "installationPath"]);
     string vsRoot = found.output.strip;
     if (found.status != 0 || vsRoot.length == 0)
         throw new Exception("Visual Studio found, but the 'Desktop development with C++' workload is not installed");
 
-    string vcvars = buildPath(vsRoot, `VC\Auxiliary\Build\vcvars64.bat`);
+    string vcvars = buildPath(vsRoot, `VC\Auxiliary\Build`, VCVARS);
     if (exists(vcvars) == false)
-        throw new Exception("vcvars64.bat not found under " ~ vsRoot);
+        throw new Exception(VCVARS ~ " not found under " ~ vsRoot);
 
     writeln("Importing MSVC environment from ", vcvars);
     auto dump = executeShell(`call "` ~ vcvars ~ `" >nul 2>&1 && set`);
     if (dump.status != 0)
-        throw new Exception(format("vcvars64.bat failed (exit code %d)", dump.status));
+        throw new Exception(format("%s failed (exit code %d)", VCVARS, dump.status));
     foreach (string line; dump.output.lineSplitter)
     {
         ptrdiff_t eq = line.indexOf('=');
