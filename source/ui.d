@@ -109,9 +109,6 @@ struct Document
     BackgroundWorker job;
     /// The view the job was started from, locked until it answers.
     View* jobView;
-    /// Ditto, when it started: the tab only shows a bar for a walk long enough to
-    /// be seen, or every F3 would flash one.
-    MonoTime jobSince;
 
     /// Which single-byte set the text lane reads the bytes through. Per document
     /// for the same reason the order is: a mainframe dump is EBCDIC in every pane
@@ -3897,8 +3894,7 @@ bool ui_refuse_edit(const(Document)* d)
 /// Percentage for `v`'s tab, -1 when it has none to show.
 int ui_job_progress(const(View)* v)
 {
-    enum Duration QUIET = 150.msecs;
-    if (ui_locked(v) == false || MonoTime.currTime - v.doc.jobSince < QUIET)
+    if (ui_locked(v) == false)
         return -1;
     return v.doc.job.progress;
 }
@@ -3931,7 +3927,6 @@ void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*)
             land(v);
     };
     d.jobView  = v;
-    d.jobSince = MonoTime.currTime;
     job.run();
 }
 

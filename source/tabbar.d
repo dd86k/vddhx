@@ -35,7 +35,7 @@ struct TabItem
 struct TabBar
 {
     /// Width a tab shrinks to before the strip scrolls instead of shrinking more.
-    int minWidth = 90;
+    int minWidth = 120;
     /// Width a tab grows to at most, so one long name cannot eat the whole strip.
     int maxWidth = 220;
 
@@ -685,11 +685,15 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
             mu_draw_text(ctx, font, label, mu_Vec2(textX, textY), ink);
     }
 
-    if (it.progress >= 0 && textW > 0)
+    // Spans the whole tab rather than the label, which a short name would leave
+    // too narrow to read as moving.
+    if (it.progress >= 0)
     {
+        int barX = r.x + inset;
+        int barW = closeR.x + closeR.w - barX;
         int y = mu_min(textY + th + 1, r.y + r.h - TAB_BAR_H);
-        mu_draw_rect(ctx, mu_Rect(textX, y, textW, TAB_BAR_H), TAB_CLOSEBG);
-        mu_draw_rect(ctx, mu_Rect(textX, y, textW * mu_min(it.progress, 100) / 100, TAB_BAR_H),
+        mu_draw_rect(ctx, mu_Rect(barX, y, barW, TAB_BAR_H), TAB_CLOSEBG);
+        mu_draw_rect(ctx, mu_Rect(barX, y, barW * mu_min(it.progress, 100) / 100, TAB_BAR_H),
             TAB_ACCENT);
     }
 
