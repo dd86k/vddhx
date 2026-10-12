@@ -184,6 +184,10 @@ void stageCommon(string root, string dir, string binary)
             buildPath(icons, format("%ux%u/apps", size, size), NAME ~ ".png"), octal!644);
     install(buildPath(root, "assets/icon", NAME ~ ".svg"),
         buildPath(icons, "scalable/apps", NAME ~ ".svg"), octal!644);
+
+    // The window icon, which source/icon.d looks up under XDG_DATA_DIRS.
+    install(buildPath(root, "assets/icon", NAME ~ "-256.bmp"),
+        buildPath(dir, "usr/share", NAME, "icons", NAME ~ "-256.bmp"), octal!644);
 }
 
 void install(string from, string to, uint mode)
