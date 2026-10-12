@@ -632,7 +632,7 @@ int screenshot_run(string[] args)
     //
     // Aimed at the middle of the leftmost pane: the outer third each way splits it
     // rather than joins it (see split_zone), and this is the joining gesture.
-    mu_Vec2 leaving = find("othe");
+    mu_Vec2 leaving = find("oth");
     int leavingY = leaving.y + 3;
     mu_input_mousemove(&ctx, leaving.x + 3, leavingY); frame(); frame();
     mu_input_mousedown(&ctx, leaving.x + 3, leavingY, MU_MOUSE_LEFT); frame();

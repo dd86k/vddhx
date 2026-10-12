@@ -115,11 +115,12 @@ private enum mu_Color TAB_CLOSEBG = mu_Color( 90,  90, 105, 255); // hovered clo
 
 private enum int TAB_LIFT     = 3; // pixels an inactive tab sits below the strip top
 private enum int TAB_ACCENT_H = 2; // thickness of the active tab's accent edge
+private enum int TAB_HEADROOM = 4; // space above a tab's content, clear of the accent
 private enum int TAB_DOT      = 6; // side of the unsaved-changes dot
 private enum int TAB_GAP      = 3; // strip colour showing between two tabs
-private enum int TAB_PAD      = 2; // added to style.padding for a tab's own insets
+private enum int TAB_PAD      = 4; // added to style.padding for a tab's own insets
 private enum int TAB_INSET    = 4; // strip colour left of the first tab
-private enum int TAB_BAR_H    = 2; // thickness of the job progress bar
+private enum int TAB_BAR_H    = 3; // thickness of the job progress bar
 private enum int TAB_LOCK_W   = 8; // padlock body width; the shackle sits inset on it
 
 // Pixels the pointer must travel with the button down before a click on a tab
@@ -127,11 +128,11 @@ private enum int TAB_LOCK_W   = 8; // padlock body width; the shackle sits inset
 // pixel of hand shake on the way back up.
 private enum int TAB_DRAG_MIN = 4;
 
-/// Height one strip takes, which is a menubar's so the two line up when stacked.
+/// Height one strip takes: a menubar's, plus headroom under the accent edge.
 /// For a caller reasoning about where a strip sits before it is drawn.
 int tab_bar_height(mu_Context* ctx)
 {
-    return ctx.style.size.y + ctx.style.padding * 2;
+    return ctx.style.size.y + ctx.style.padding * 2 + TAB_HEADROOM;
 }
 
 /// Draw and drive a strip of tabs from `items`, in display order, `selected`
@@ -277,7 +278,7 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
         mu_Id cid = mu_get_id(ctx, key.ptr, key.sizeof);
 
         mu_Rect closeR = mu_Rect(r.x + r.w - inset - closeW,
-            r.y + (h - closeW) / 2, closeW, closeW);
+            r.y + TAB_HEADROOM + (h - TAB_HEADROOM - closeW) / 2, closeW, closeW);
 
         // Body first: the box sits inside it, and the later call is the one that
         // leaves hover on the box when both match.
@@ -386,7 +387,8 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     }
     if (ctx.hover == nid)
         mu_draw_rect(ctx, newR, TAB_HOVER);
-    mu_draw_control_text(ctx, "+", newR, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
+    mu_Rect plusR = mu_Rect(newR.x, newR.y + TAB_HEADROOM, newR.w, newR.h - TAB_HEADROOM);
+    mu_draw_control_text(ctx, "+", plusR, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
 
     return action;
 }
@@ -445,7 +447,7 @@ int tab_badge(mu_Context* ctx, ref const(TabBar) bar, mu_Rect strip, int th, mu_
 
     int tw = ctx.text_width(font, bar.badge.ptr, cast(int) bar.badge.length);
     mu_draw_text(ctx, font, bar.badge,
-        mu_Vec2(strip.x + TAB_INSET + TAB_PAD, strip.y + (strip.h - th) / 2),
+        mu_Vec2(strip.x + TAB_INSET + TAB_PAD, strip.y + TAB_HEADROOM + (strip.h - TAB_HEADROOM - th) / 2),
         bar.unfocused ? TAB_DIM : TAB_ACCENT);
     return tw + TAB_PAD * 2 + TAB_INSET;
 }
@@ -633,7 +635,7 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
 {
     int h = r.h;
     mu_Rect closeR = mu_Rect(r.x + r.w - inset - closeW,
-        r.y + (h - closeW) / 2, closeW, closeW);
+        r.y + TAB_HEADROOM + (h - TAB_HEADROOM - closeW) / 2, closeW, closeW);
 
     // The active tab runs the strip's full height in the body's own colour, so it
     // reads as joined to the content below; the others sit lower and darker.
@@ -650,7 +652,7 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
 
     int textX = r.x + inset;
     int textW = closeR.x - inset - textX;
-    int textY = r.y + top + (r.h - top - th) / 2;
+    int textY = r.y + TAB_HEADROOM + top + (r.h - TAB_HEADROOM - top - th) / 2;
 
     if (it.locked && textW > TAB_LOCK_W + inset)
     {
