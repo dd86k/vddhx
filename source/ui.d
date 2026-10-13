@@ -12,6 +12,8 @@ import ddhx.document : DocCaps, FileDocument, IDocument, OFlags;
 import ddhx.editor : IDocumentEditor;
 import ddhx.editor.piecev4 : PieceV4DocumentEditor;
 import about : about_open, about_frame;
+import settings : settings_page;
+import preferences : prefs, prefs_save;
 import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
 import bookmarks;
@@ -119,6 +121,11 @@ struct Document
     /// `utf16:`) and goes on meaning that whatever this says, there being no such
     /// thing as a pattern whose encoding is implied.
     immutable(Charset)* charset = &ASCII;
+
+    /// The empty, read-only stand-in behind the settings tab, so tabs, panes and
+    /// the omnibar take that tab like any other. Commands that would edit, save
+    /// or split it check ui_on_settings and do nothing.
+    bool settingsPage;
 }
 
 /// One way of looking at a document: which document, plus everything about the
@@ -593,16 +600,6 @@ public void ui_status_dismiss()
     statusLen = 0;
 }
 
-// TODO: minimapEnabled, crumbsEnabled, pendingCompare could all be bit flags
-
-/// Minimap toolbar toggle (int for mu_checkbox); pushed onto hex.minimap.
-__gshared int minimapEnabled = 1;
-
-/// Ditto, for the breadcrumb strip between a tab and its grid. A window setting
-/// rather than a per-view one: it is a row of chrome, and two panes disagreeing on
-/// whether they have it is a window that looks broken rather than configured.
-__gshared int crumbsEnabled = 1;
-
 /// Path the async Open dialog picked, waiting for the next frame to consume it.
 /// Written by the dialog callback (possibly off-thread), read on the main thread,
 /// so the ready flag is atomic and orders the buffer write against the read.
@@ -647,13 +644,11 @@ public void ui_new_tab()
 {
     ++untitled;
 
-    Document* d = new Document;
+    Document* d = newDocument();
     d.editor = new PieceV4DocumentEditor(true); // no document: a zero-length, in-memory buffer
     d.title  = untitled == 1 ? "untitled" : format("untitled %u", untitled);
-    docs ~= d;
 
-    View* v = new View;
-    v.doc = d;
+    View* v = newView(d);
     wireView(v);
 
     // The very first tab has no pane to go in yet, ui_init opening it before
@@ -670,6 +665,28 @@ public void ui_new_tab()
     p.views ~= v; // .length updated
     p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     v.hex.takeFocus = true; // ready to take bytes without a click first
+}
+
+/// A document set up the way the saved defaults say, already in `docs`.
+Document* newDocument()
+{
+    Document* d = new Document;
+    d.charset = prefs.charset;
+    d.endian  = prefs.endian;
+    docs ~= d;
+    return d;
+}
+
+/// Ditto, a view of `d`. A split copies its source instead, see ui_split_view.
+View* newView(Document* d)
+{
+    View* v = new View;
+    v.doc = d;
+    v.hex.autoColumns = prefs.columns == 0;
+    if (prefs.columns)
+        v.hex.columns = prefs.columns;
+    v.hex.insertMode = prefs.insert;
+    return v;
 }
 
 /// A fresh pane with no tabs in it. Callers fill in `views` before the next frame.
@@ -950,6 +967,8 @@ void diff_unlink(View* v)
 /// of its column, in a new column of its own, and takes the keyboard.
 public void ui_split()
 {
+    if (ui_on_settings())
+        return;
     ui_split_pane(ui_split_view());
 }
 
@@ -984,6 +1003,8 @@ void ui_split_pane(View* v)
 /// either side stay where they are.
 public void ui_split_down()
 {
+    if (ui_on_settings())
+        return;
     size_t ci, pi;
     if (ui_locate(focused, ci, pi) == false)
         return;
@@ -1831,6 +1852,8 @@ public void ui_open_dialog()
 /// two apart when it lands.
 public void ui_compare_dialog()
 {
+    if (ui_on_settings())
+        return;
     pendingCompare = true;
     compareFrom    = focusedPane.views[focusedPane.current];
     ui_file_dialog(&ui_on_file_picked, false);
@@ -1860,8 +1883,7 @@ public void ui_compare_with(string path)
     if (d is null)
         return;
 
-    View* right = new View;
-    right.doc = d;
+    View* right = newView(d);
     wireView(right);
     right.hex.active = true;
 
@@ -1925,6 +1947,13 @@ public bool ui_open(string path, bool here = false)
 /// Ditto, for a document already loaded.
 bool ui_show(Document* doc, bool here)
 {
+    // One settings tab, wherever it is: bringing it here would make a second.
+    if (doc.settingsPage)
+    {
+        ui_focus_document(doc);
+        return true;
+    }
+
     // The focused pane is where the user was working - or, on a drop, the pane the
     // file was let go over.
     Pane* p = focused;
@@ -1970,8 +1999,7 @@ bool ui_show(Document* doc, bool here)
     }
     else
     {
-        v = new View;
-        v.doc = doc;
+        v = newView(doc);
         p.views ~= v; // .length updated
         p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     }
@@ -2063,8 +2091,7 @@ Document* ui_adopt(string path, IDocument src)
     IDocumentEditor ed = new PieceV4DocumentEditor(true);
     ed.open(src);
 
-    Document* d = new Document;
-    docs ~= d;
+    Document* d = newDocument();
     d.editor = ed;
     d.path   = path; // in-place Save now has a target
     d.title  = baseName(path);
@@ -2086,7 +2113,7 @@ bool ui_fixed(Document* d)
 /// what an Open takes over instead of stacking a tab on top of it.
 bool scratchEmpty(ref Document d)
 {
-    return d.path.length == 0 && d.editor &&
+    return d.settingsPage == false && d.path.length == 0 && d.editor &&
         d.editor.edited() == false && d.editor.size() == 0;
 }
 
@@ -2229,6 +2256,8 @@ extern (C) void ui_on_save_picked(void* user, const(char*)* fileList, int filter
 /// a handle without write access never having let an edit through.
 public void ui_toggle_readonly()
 {
+    if (ui_on_settings())
+        return;
     Document* doc = &focusedDoc();
     if (doc.restricted == false)
     {
@@ -2346,6 +2375,8 @@ void ui_swap_source(Document* doc, IDocument src)
 /// the write landing later on the main thread once a path is chosen.
 public bool ui_save()
 {
+    if (ui_on_settings())
+        return false;
     Document doc = focusedDoc();
     if (doc.path.length)
         return saveTo(doc, doc.path);
@@ -2360,6 +2391,8 @@ public bool ui_save()
 /// in-place Save follows it.
 public void ui_save_as()
 {
+    if (ui_on_settings())
+        return;
     pendingSaveTarget = focusedDoc.editor;
     ui_file_dialog(&ui_on_save_picked, true);
 }
@@ -2439,6 +2472,8 @@ bool ui_selection(ref View v, out size_t low, out size_t high)
 ///          it managed to copy.
 public bool ui_copy()
 {
+    if (ui_on_settings())
+        return false;
     return copySelection(false);
 }
 
@@ -2453,6 +2488,8 @@ public bool ui_copy()
 /// is a one-way trip and ui_paste stays on hex.
 public bool ui_copy_text()
 {
+    if (ui_on_settings())
+        return false;
     return copySelection(true);
 }
 
@@ -2529,6 +2566,8 @@ bool copySelection(bool asText)
 /// where they are. A bare caret cuts the byte Delete would drop.
 public void ui_cut()
 {
+    if (ui_on_settings())
+        return;
     cutSelection(false);
 }
 
@@ -2538,6 +2577,8 @@ public void ui_cut()
 /// (see ui_copy_text).
 public void ui_cut_text()
 {
+    if (ui_on_settings())
+        return;
     cutSelection(true);
 }
 
@@ -2581,6 +2622,8 @@ void cutSelection(bool asText)
 /// A selection wider than one byte is what the paste replaces, in either mode.
 public void ui_paste()
 {
+    if (ui_on_settings())
+        return;
     Document* doc = &focusedDoc();
     View* view = &focusedView();
     if (doc.editor is null || ui_refuse_edit(doc))
@@ -2715,6 +2758,8 @@ unittest
 /// asked.
 public void ui_undo(bool redo)
 {
+    if (ui_on_settings())
+        return;
     Document *doc = &focusedDoc();
     if (doc.editor is null || ui_refuse_edit(doc))
         return;
@@ -2854,7 +2899,7 @@ enum
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
     CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_COLUMNS, CMD_CHARSET,
-    CMD_KEYS, CMD_ABOUT, CMD_QUIT,
+    CMD_SETTINGS, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
 }
 
 /// Ditto.
@@ -2901,6 +2946,7 @@ immutable Entry[] COMMANDS = [
     Entry("Toggle Byte Order","",             CMD_ENDIAN,       "endian endianness little big le be swap order inspector pattern"),
     Entry("Columns...",       "",             CMD_COLUMNS,      "width row bytes per line wrap 8 16 24 32 auto fit resize"),
     Entry("Character Set...", "",             CMD_CHARSET,      "charset encoding text lane ascii cp437 ibm dos oem ebcdic mainframe mac roman latin1 iso 8859 win1252 windows"),
+    Entry("Settings",         "",             CMD_SETTINGS,     "preferences options configure defaults rc vddhxrc"),
     Entry("Keyboard Shortcuts...", "",        CMD_KEYS,          "keys chords bindings help cheat sheet"),
     Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
@@ -3508,8 +3554,53 @@ static assert(INSPECT.length == INSPECT_SINGLES + 2 * INSPECT_ORDERED);
 /// carries the order, so the keystroke's result is already on screen.
 public void ui_endian_toggle()
 {
+    if (ui_on_settings())
+        return;
     focusedDoc.endian = focusedDoc.endian == Endian.littleEndian
         ? Endian.bigEndian : Endian.littleEndian;
+}
+
+/// Bring the settings tab up, in the focused pane unless one is already open.
+public void ui_settings_open()
+{
+    foreach (Document* d; docs)
+    {
+        if (d.settingsPage)
+        {
+            ui_focus_document(d);
+            return;
+        }
+    }
+
+    Document* d = newDocument();
+    d.editor = new PieceV4DocumentEditor(true);
+    d.title  = "Settings";
+    d.restricted   = true;
+    d.settingsPage = true;
+
+    Pane* p = focused;
+    p.views ~= newView(d);
+    p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
+}
+
+/// Whether the focused tab is the settings page rather than a document.
+bool ui_on_settings()
+{
+    return focusedDoc.settingsPage;
+}
+
+/// Flip a window chrome toggle, saved at once like everything the settings
+/// tab changes.
+public void ui_toggle_minimap()
+{
+    prefs.minimap = prefs.minimap == false;
+    cast(void) prefs_save();
+}
+/// Ditto.
+public void ui_toggle_crumbs()
+{
+    prefs.crumbs = prefs.crumbs == false;
+    cast(void) prefs_save();
 }
 
 /// Set the document's character set. Per document, so both views of one file read
@@ -3987,6 +4078,8 @@ void ui_find_step(ref View v, bool backward, long from)
 /// what keeps a repeat moving instead of finding the same match again.
 public void ui_find_repeat(bool backward)
 {
+    if (ui_on_settings())
+        return;
     // A match leaves the caret on its last byte, so stepping back from the caret
     // would land inside the match and find it again.
     long from = backward
@@ -4013,6 +4106,8 @@ public void ui_find_repeat(bool backward)
 /// press stopped on would compare that press's run against itself and stall.
 public void ui_skip_element(bool backward, bool select = false)
 {
+    if (ui_on_settings())
+        return;
     if (focusedDoc.editor is null || ui_refuse_busy(&focusedDoc()))
         return;
 
@@ -4102,6 +4197,8 @@ void ui_select_range(ref View v, size_t start, size_t len)
 /// byte of it rarely is.
 public void ui_mark_toggle()
 {
+    if (ui_on_settings())
+        return;
     long at  = cast(long) hex_sel_low(focusedView.hex);
     long len = cast(long) hex_sel_high(focusedView.hex) - at + 1;
 
@@ -4118,6 +4215,8 @@ public void ui_mark_toggle()
 /// Ctrl+Shift+B would make it two.
 public void ui_mark_name()
 {
+    if (ui_on_settings())
+        return;
     long at = cast(long) hex_sel_low(focusedView.hex);
     if (bookmark_has(focusedDoc.marks, at) == false)
     {
@@ -4145,6 +4244,8 @@ public void ui_mark_name()
 /// the list is the vocabulary and the box is the way past it.
 public void ui_columns_prompt()
 {
+    if (ui_on_settings())
+        return;
     settingPreview = SettingPreview(&focusedView(), &focusedDoc(), focusedView.hex.columns,
         focusedView.hex.autoColumns, focusedDoc.charset, true);
     promptKind = PromptKind.columns;
@@ -4156,6 +4257,8 @@ public void ui_columns_prompt()
 /// the rows are the answer and typing narrows them; nothing here is free text.
 public void ui_charset_prompt()
 {
+    if (ui_on_settings())
+        return;
     settingPreview = SettingPreview(&focusedView(), &focusedDoc(), focusedView.hex.columns,
         focusedView.hex.autoColumns, focusedDoc.charset, true);
     promptKind = PromptKind.charset;
@@ -4511,6 +4614,8 @@ string ui_mark_name_clean(const(char)[] typed)
 /// select the whole of what was marked there.
 public void ui_mark_step(int dir)
 {
+    if (ui_on_settings())
+        return;
     ptrdiff_t index = bookmark_step(focusedDoc.marks, cast(long) hex_sel_low(focusedView.hex), dir);
     if (index < 0)
     {
@@ -4523,6 +4628,8 @@ public void ui_mark_step(int dir)
 /// Drop every bookmark on the focused document.
 public void ui_mark_clear()
 {
+    if (ui_on_settings())
+        return;
     ui_status("cleared %u bookmark(s)", focusedDoc.marks.length);
     focusedDoc.marks = null;
 }
@@ -4554,8 +4661,8 @@ void ui_omni_run(int id)
     case CMD_COPY:      cast(void)ui_copy();             break;
     case CMD_COPY_TEXT: cast(void)ui_copy_text();        break;
     case CMD_PASTE:     ui_paste();            break;
-    case CMD_MINIMAP:   minimapEnabled = minimapEnabled ? 0 : 1; break;
-    case CMD_CRUMBS:    crumbsEnabled = crumbsEnabled ? 0 : 1; break;
+    case CMD_MINIMAP:   ui_toggle_minimap();   break;
+    case CMD_CRUMBS:    ui_toggle_crumbs();    break;
     case CMD_ENDIAN:    ui_endian_toggle();    break;
     case CMD_FIND_NEXT: ui_find_repeat(false); break;
     case CMD_FIND_PREV: ui_find_repeat(true);  break;
@@ -4584,6 +4691,7 @@ void ui_omni_run(int id)
     case CMD_CHARSET:   ui_charset_prompt();         return;
     case CMD_OPEN_DEVICE: ui_open_device_prompt();   return;
     case CMD_KEYS:      ui_omni_open(OMNI_HELP);     return;
+    case CMD_SETTINGS:  ui_settings_open();    break;
     case CMD_ABOUT:     about_open();          break;
     case CMD_QUIT:
         // Through SDL's own queue, so it meets the same unsaved-changes check as
@@ -4716,7 +4824,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             mu_draw_text(ctx, ctx.style.font, cast(string) statusText[0 .. statusLen],
                 mu_Vec2(sr.x + 4, ty), mu_Color(200, 200, 150, 255));
         }
-        else
+        else if (ui_on_settings() == false) // no caret to report on
         {
             size_t selLen = hex_total(focusedView.hex) ?
                 hex_sel_high(focusedView.hex) - hex_sel_low(focusedView.hex) + 1 : 0;
@@ -5197,7 +5305,8 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
         p.items.length = p.views.length;
     foreach (size_t i, View* v; p.views)
         p.items[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited(),
-            cast(int) ui_view_count(v.doc), ui_job_progress(v), v.doc.restricted);
+            cast(int) ui_view_count(v.doc), ui_job_progress(v),
+            v.doc.restricted && v.doc.settingsPage == false); // nothing there to unlock
 
     // Only the pane taking keys lights its accent, so with several panes open it
     // is never a guess which one a keystroke lands in.
@@ -5231,7 +5340,13 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     }
 
     View* v = p.views[p.current];
-    v.hex.minimap = minimapEnabled != 0;
+    if (v.doc.settingsPage)
+    {
+        settings_page(ctx);
+        return;
+    }
+
+    v.hex.minimap = prefs.minimap;
 
     // The set is the document's, the panel only draws through it, so the binding is
     // remade each frame rather than being carried in the view: a tab dragged into
@@ -5252,7 +5367,7 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     // it reads as a caption to the bytes under it. Drawn on every document, parsed
     // or not - the classifier always has a word for the byte under the caret, and a
     // strip that came and went with the format would move the grid under the user.
-    if (crumbsEnabled)
+    if (prefs.crumbs)
         crumb_bar(ctx, cast(string) viewCrumbs(v), CANVAS);
 
     // The panel keeps its copy of the size live within a frame; this keeps it
@@ -5520,6 +5635,8 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Copy",  "Ctrl+C", 0, 0)) cast(void)ui_copy();
         if (mu_menu_item_ex(ctx, "Copy as Text", "Ctrl+Shift+C", 0, 0)) cast(void)ui_copy_text();
         if (mu_menu_item_ex(ctx, "Paste", "Ctrl+V", 0, 0)) ui_paste();
+        mu_menu_separator(ctx);
+        if (mu_menu_item_ex(ctx, "Settings", "", 0, 0)) ui_settings_open();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }
@@ -5580,10 +5697,10 @@ void ui_menubar(mu_Context* ctx)
         mu_menu_separator(ctx);
         // No native checkmark on a ddui menu item, so the on/off state rides in the
         // shortcut column instead.
-        if (mu_menu_item_ex(ctx, "Minimap", minimapEnabled ? "On" : "Off", 0, 0))
-            minimapEnabled = minimapEnabled ? 0 : 1;
-        if (mu_menu_item_ex(ctx, "Breadcrumbs", crumbsEnabled ? "On" : "Off", 0, 0))
-            crumbsEnabled = crumbsEnabled ? 0 : 1;
+        if (mu_menu_item_ex(ctx, "Minimap", prefs.minimap ? "On" : "Off", 0, 0))
+            ui_toggle_minimap();
+        if (mu_menu_item_ex(ctx, "Breadcrumbs", prefs.crumbs ? "On" : "Off", 0, 0))
+            ui_toggle_crumbs();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }

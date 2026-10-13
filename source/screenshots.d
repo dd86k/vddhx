@@ -524,6 +524,24 @@ int screenshot_run(string[] args)
     // scenarios above earned it, the scratch buffer in front.
     mu_Vec2 close = find("Close");
     click(close.x + 3, close.y + 3);
+
+    // Scenario 9b: Edit > Settings, a tab of its own, one shot per category.
+    mu_Vec2 edit = find("Edit");
+    click(edit.x + 3, edit.y + 3);
+    frame(); frame();
+    mu_Vec2 settingsItem = find("Settings");
+    click(settingsItem.x + 3, settingsItem.y + 3);
+    frame(); frame();
+    shot("settings.bmp");
+    foreach (string page; ["Appearance", "Defaults"])
+    {
+        mu_Vec2 at = find(page.ptr); // literals, so NUL-terminated
+        click(at.x + 3, at.y + 3);
+        frame(); frame();
+        shot(page == "Defaults" ? "settings-defaults.bmp" : "settings-appearance.bmp");
+    }
+    ui_close_current_tab();
+    frame();
     ui_open(fix.other);
     ui_new_tab();
     frame();

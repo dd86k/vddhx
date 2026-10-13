@@ -128,11 +128,12 @@ private enum int TAB_LOCK_W   = 8; // padlock body width; the shackle sits inset
 // pixel of hand shake on the way back up.
 private enum int TAB_DRAG_MIN = 4;
 
-/// Height one strip takes: a menubar's, plus headroom under the accent edge.
+/// Height one strip takes: a menubar's, plus headroom under the accent edge and
+/// the lift an inactive tab sits down by, so its label clears the bottom too.
 /// For a caller reasoning about where a strip sits before it is drawn.
 int tab_bar_height(mu_Context* ctx)
 {
-    return ctx.style.size.y + ctx.style.padding * 2 + TAB_HEADROOM;
+    return ctx.style.size.y + ctx.style.padding * 2 + TAB_HEADROOM + TAB_LIFT;
 }
 
 /// Draw and drive a strip of tabs from `items`, in display order, `selected`
@@ -652,7 +653,8 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
 
     int textX = r.x + inset;
     int textW = closeR.x - inset - textX;
-    int textY = r.y + TAB_HEADROOM + top + (r.h - TAB_HEADROOM - top - th) / 2;
+    // One line for every tab, active or not, so a label does not jump on switching.
+    int textY = r.y + TAB_HEADROOM + (r.h - TAB_HEADROOM - th) / 2;
 
     if (it.locked && textW > TAB_LOCK_W + inset)
     {

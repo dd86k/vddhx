@@ -14,6 +14,7 @@ import loader;
 import input : input_event;
 import render;
 import ui;
+import preferences : prefs_load;
 version (Screenshots) import screenshots;
 version (FrameStats) import framestats;
 
@@ -135,6 +136,9 @@ int main(string[] args)
     ctx.get_clipboard = &clipboardGet;  // so the omnibar's box takes Ctrl+C / X / V
     ctx.set_clipboard = &clipboardSet;
     ui_style(ctx);
+
+    // Ahead of ui_init, whose first tab already takes the defaults.
+    prefs_load();
 
     // Give the UI the window so File > Open can parent its native dialog to it.
     ui_init(window);

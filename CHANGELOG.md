@@ -40,6 +40,8 @@ devices stay cheap to open and scroll.
 - **Disks**: lists drives and partitions on Windows and Linux, opens them
   read-only, and asks for elevation (UAC, pkexec) only when needed. vddhx
   itself never runs privileged.
+- **Settings** (Edit > Settings): opens as a tab. Defaults for new tabs and
+  window options apply and save at once, to a .vddhxrc in ddhx's syntax.
 
 ### Known limitations
 
