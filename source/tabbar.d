@@ -278,8 +278,7 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
         key[1] = 1;
         mu_Id cid = mu_get_id(ctx, key.ptr, key.sizeof);
 
-        mu_Rect closeR = mu_Rect(r.x + r.w - inset - closeW,
-            r.y + TAB_HEADROOM + (h - TAB_HEADROOM - closeW) / 2, closeW, closeW);
+        mu_Rect closeR = tab_close_rect(r, closeW);
 
         // Body first: the box sits inside it, and the later call is the one that
         // leaves hover on the box when both match.
@@ -483,7 +482,7 @@ unittest
     assert(tab_inside(r, mu_Vec2(60, 19))  == false);
 }
 
-// Width one tab asks for: its label, the close box, the three insets around them
+// Width one tab asks for: its label, the close box, the two insets ahead of them
 // and the gap to the next tab, held between the strip's two bounds. Room for the
 // close box is kept whether or not it is drawn, so a label never shifts under the
 // pointer.
@@ -498,7 +497,7 @@ int tab_width(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
         tw += ctx.text_width(ctx.style.font, tag.ptr, cast(int) tag.length) + inset;
     if (it.locked)
         tw += TAB_LOCK_W + inset;
-    return mu_clamp(tw + closeW + inset * 3 + TAB_GAP, bar.minWidth, bar.maxWidth);
+    return mu_clamp(tw + closeW + inset * 2 + TAB_GAP, bar.minWidth, bar.maxWidth);
 }
 
 // Where the tab dragged to `centre` belongs in the strip, `from` being the one it
@@ -628,15 +627,20 @@ void tab_lock(mu_Context* ctx, int x, int y, int th, mu_Color ink)
     mu_draw_rect(ctx, mu_Rect(x, top + SHACKLE_H, TAB_LOCK_W, BODY_H), ink);
 }
 
+// Flush with the tab's right edge: an inset there only wastes room a label could use.
+mu_Rect tab_close_rect(mu_Rect r, int closeW)
+{
+    return mu_Rect(r.x + r.w - closeW,
+        r.y + TAB_HEADROOM + (r.h - TAB_HEADROOM - closeW) / 2, closeW, closeW);
+}
+
 // Paint one tab in `r`. Split out of the strip's loop so a tab being dragged can
 // be drawn from the pointer once every other tab is down, and so land on top.
 void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     mu_Rect r, bool active, bool bodyHot, bool closeHot,
     int closeW, int inset, int th, mu_Font font)
 {
-    int h = r.h;
-    mu_Rect closeR = mu_Rect(r.x + r.w - inset - closeW,
-        r.y + TAB_HEADROOM + (h - TAB_HEADROOM - closeW) / 2, closeW, closeW);
+    mu_Rect closeR = tab_close_rect(r, closeW);
 
     // The active tab runs the strip's full height in the body's own colour, so it
     // reads as joined to the content below; the others sit lower and darker.
