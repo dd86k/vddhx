@@ -103,6 +103,75 @@ jobs:
         path: dist/*.rpm
         if-no-files-found: error
 
+  # Static, built on the oldest glibc worth supporting (Rocky 9: 2.34), so the
+  # image runs on any newer distro. Tool downloads are pinned by hash.
+  appimage:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            arch: x86_64
+            ldc-sha256: 35805db60f47fd1a162b2035da84d96beec37e6d1e7b1edf60498a90acfaedce
+            tool-sha256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+            runtime-sha256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+          - os: ubuntu-26.04-arm
+            arch: aarch64
+            ldc-sha256: f2b24edc254d4b9944234f641de3c4b3a36d5752639ec30cb2bbe122931b2283
+            tool-sha256: f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
+            runtime-sha256: 00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
+    needs: test
+    runs-on: ${{ matrix.os }}
+    # The Docker Hub "rockylinux" library image stopped at 9.3.
+    container: rockylinux/rockylinux:9
+    env:
+      LDC: 1.43.0
+      APPIMAGETOOL: 1.9.1
+      RUNTIME: 20251108
+      # No FUSE in the container; appimagetool is an AppImage itself.
+      APPIMAGE_EXTRACT_AND_RUN: 1
+    steps:
+    # git for dub, gcc to link build-sdl3.d before it installs the rest, file
+    # for appimagetool, binutils for strip.
+    - name: Install bootstrap tools
+      run: dnf install -y git tar xz gcc binutils file
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    # setup-dlang is untested in this container; the official tarball targets an
+    # old glibc and runs as is.
+    - name: Install LDC and appimagetool
+      run: |
+        curl -fsSLo ldc.tar.xz "https://github.com/ldc-developers/ldc/releases/download/v$LDC/ldc2-$LDC-linux-${{ matrix.arch }}.tar.xz"
+        curl -fsSLo /usr/local/bin/appimagetool "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL/appimagetool-${{ matrix.arch }}.AppImage"
+        curl -fsSLo "$RUNNER_TEMP/runtime" "https://github.com/AppImage/type2-runtime/releases/download/$RUNTIME/runtime-${{ matrix.arch }}"
+        sha256sum -c <<EOF
+        ${{ matrix.ldc-sha256 }}  ldc.tar.xz
+        ${{ matrix.tool-sha256 }}  /usr/local/bin/appimagetool
+        ${{ matrix.runtime-sha256 }}  $RUNNER_TEMP/runtime
+        EOF
+        tar -xJf ldc.tar.xz -C /opt && rm ldc.tar.xz
+        chmod +x /usr/local/bin/appimagetool
+        echo "/opt/ldc2-$LDC-linux-${{ matrix.arch }}/bin" >> "$GITHUB_PATH"
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.dub
+        key: dub-rocky9-${{ matrix.arch }}-${{ hashFiles('dub.sdl') }}
+    # The static link needs only the archives, so a hit skips the dev packages.
+    - id: sdl3
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.local
+        key: sdl3-rocky9-${{ matrix.arch }}-${{ hashFiles('tools/build-sdl3.d') }}
+    - name: Build SDL3
+      if: steps.sdl3.outputs.cache-hit != 'true'
+      run: ldc2 -run tools/build-sdl3.d --enable-crb
+    - name: Build AppImage
+      run: ldc2 -run tools/package.d --appimage --compiler=ldc2 "--runtime=$RUNNER_TEMP/runtime"
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: vddhx-appimage-${{ matrix.arch }}
+        path: dist/*.AppImage
+        if-no-files-found: error
+
   # Static: SDL3 and SDL3_ttf are linked in, so the artifact is the exe alone.
   windows:
     strategy:
