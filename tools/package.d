@@ -1,9 +1,10 @@
-// Builds vddhx and wraps it into .deb and/or .rpm packages.
+// Builds vddhx and wraps it into .deb, .rpm, and/or AppImage packages.
 //
 // dpkg-shlibdeps and rpmbuild only see NEEDED entries. SDL itself (loader.d,
 // unless --static), its video backends, and render.d's fontconfig are all
 // dlopened, so they are listed by hand. Build each format on its own distro
 // family so that glibc requirements match what users have.
+// The AppImage is always static and built on the oldest distro CI covers.
 //
 // Usage: dmd -run tools/package.d [--help] [options...]
 module package_;
@@ -14,7 +15,7 @@ import std.conv : octal;
 import std.digest : toHexString, LetterCase;
 import std.digest.md : md5Of;
 import std.file : copy, dirEntries, DirEntry, exists, getSize, isFile, mkdirRecurse,
-    read, readText, rmdirRecurse, setAttributes, SpanMode, write;
+    read, readText, rmdirRecurse, setAttributes, SpanMode, symlink, write;
 import std.format : format;
 import std.getopt : defaultGetoptPrinter, getopt, GetoptResult;
 import std.path : absolutePath, buildPath, dirName, pathSeparator, relativePath;
@@ -76,11 +77,13 @@ struct Meta
 
 int main(string[] args)
 {
-    bool deb, rpm, noBuild, linkStatic;
-    string compiler, outDir, release = "1";
+    bool deb, rpm, appimage, noBuild, linkStatic;
+    string compiler, outDir, runtime, release = "1";
     GetoptResult opts = getopt(args,
         "deb", "Build a .deb (default: every format whose tools are on PATH)", &deb,
         "rpm", "Build an .rpm", &rpm,
+        "appimage", "Build an AppImage (implies --static; needs appimagetool)", &appimage,
+        "runtime", "AppImage runtime passed to appimagetool (default: it downloads one)", &runtime,
         "static", "Link SDL3 in rather than depend on the distro's", &linkStatic,
         "compiler", "D compiler passed to dub (default: dub's choice)", &compiler,
         "release", "Package release/revision number (default: 1)", &release,
@@ -88,7 +91,7 @@ int main(string[] args)
         "no-build", "Package the existing ./vddhx (must match --static)", &noBuild);
     if (opts.helpWanted)
     {
-        defaultGetoptPrinter("Package vddhx as .deb and/or .rpm.", opts.options);
+        defaultGetoptPrinter("Package vddhx as .deb, .rpm, and/or AppImage.", opts.options);
         return 0;
     }
 
@@ -96,7 +99,7 @@ int main(string[] args)
     outDir = absolutePath(outDir.length ? outDir : buildPath(root, "dist"));
 
     // No flag: build whatever this host can, so a bare run just works.
-    if (deb == false && rpm == false)
+    if (deb == false && rpm == false && appimage == false)
     {
         deb = findTool("dpkg-deb") !is null;
         rpm = findTool("rpmbuild") !is null;
@@ -106,6 +109,10 @@ int main(string[] args)
             return 1;
         }
     }
+
+    // SDL3 is too new for the distros an AppImage is meant for.
+    if (appimage)
+        linkStatic = true;
 
     try
     {
@@ -129,6 +136,8 @@ int main(string[] args)
             writeln("Built ", packageDeb(root, outDir, binary, meta));
         if (rpm)
             writeln("Built ", packageRpm(root, outDir, binary, arch, meta));
+        if (appimage)
+            writeln("Built ", packageAppImage(root, outDir, binary, arch, meta, runtime));
     }
     catch (Exception ex)
     {
@@ -338,6 +347,39 @@ string packageRpm(string root, string outDir, string binary, string arch, Meta m
         "--define", "_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm",
         specPath]);
     return buildPath(outDir, format("%s-%s-%s.%s.rpm", NAME, meta.version_, meta.release, arch));
+}
+
+string packageAppImage(string root, string outDir, string binary, string arch, Meta meta, string runtime)
+{
+    string tool = findTool("appimagetool");
+    if (tool is null)
+        throw new Exception("appimagetool not found on PATH");
+
+    string appDir = buildPath(outDir, NAME ~ ".AppDir");
+    stageCommon(root, appDir, binary);
+    scope (exit) rmdirRecurse(appDir);
+    install(buildPath(root, "LICENSE"),
+        buildPath(appDir, "usr/share/licenses", NAME, "LICENSE"), octal!644);
+
+    // Symlinks rather than a wrapper script: thisExePath() then resolves into
+    // usr/bin, and icon.d finds the window icon through its exe-relative
+    // fallback, without exporting an XDG_DATA_DIRS every child would inherit.
+    symlink("usr/bin/" ~ NAME, buildPath(appDir, "AppRun"));
+    mkdirRecurse(buildPath(appDir, "usr/bin/assets"));
+    symlink("../../share/" ~ NAME ~ "/icons", buildPath(appDir, "usr/bin/assets/icon"));
+
+    install(buildPath(root, "assets", NAME ~ ".desktop"), buildPath(appDir, NAME ~ ".desktop"), octal!644);
+    install(buildPath(root, "assets/icon", NAME ~ "-256.png"), buildPath(appDir, NAME ~ ".png"), octal!644);
+    symlink(NAME ~ ".png", buildPath(appDir, ".DirIcon"));
+
+    string image = buildPath(outDir, format("%s-%s-%s.AppImage", NAME, meta.version_, arch));
+    string[] cmd = [tool];
+    if (runtime.length)
+        cmd ~= ["--runtime-file", absolutePath(runtime)];
+    // appimagetool names the target architecture from ARCH, not the binary.
+    environment["ARCH"] = arch;
+    run(cmd ~ [appDir, image]);
+    return image;
 }
 
 void run(string[] args)

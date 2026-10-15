@@ -45,11 +45,11 @@ configuration "static" {
 	// pointers, so loader_init() compiles away to nothing.
 	subConfiguration "bindbc-sdl" "static"
 
-	// Posix: tools/build-sdl3.d installs libSDL3.a and libSDL3_ttf.a into
-	// ~/.local by default. libSDL3_ttf.a links the system freetype/harfbuzz
-	// shared libs (from libfreetype-dev/libharfbuzz-dev), so those two
-	// resolve from the default search path; list them after SDL3_ttf (which
-	// needs their symbols). The script warns when SDL's .pc files list a lib
+	// Posix: tools/build-sdl3.d installs libSDL3.a, libSDL3_ttf.a and the
+	// vendored libfreetype.a/libharfbuzz.a into ~/.local by default.
+	// The -L below makes those win over the system's shared ones, which only
+	// --vendored=false builds rely on. List them after SDL3_ttf (which needs
+	// their symbols). The script warns when SDL's .pc files list a lib
 	// missing here.
 	libs "SDL3_ttf" "harfbuzz" "freetype" "SDL3" platform="posix"
 	lflags "-L$HOME/.local/lib" platform="posix"
