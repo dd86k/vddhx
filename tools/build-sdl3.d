@@ -2,7 +2,8 @@
 //
 // Windows builds with MSVC (cl) + Ninja: DMD/LDC emit MSVC-ABI objects on
 // win64, so an archive from the mingw gcc that is often on PATH will not link.
-// There, SDL_ttf vendors freetype/harfbuzz; elsewhere it links the distro's.
+// SDL_ttf vendors freetype/harfbuzz by default, so the binary (and the
+// AppImage built from it) carries no font-stack dependency beyond fontconfig.
 //
 // Usage: dmd -run tools/build-sdl3.d [--help] [--dry-run] [options...]
 // (or ldmd2/gdmd -run; gdc has no -run, so compile it first)
@@ -17,8 +18,9 @@ import std.path : absolutePath, baseName, buildPath, dirName, expandTilde,
     pathSeparator;
 import std.process : environment, escapeShellCommand, execute, executeShell,
     spawnProcess, wait;
-import std.stdio : stderr, writeln;
+import std.stdio : readln, stderr, stdout, write, writeln;
 import std.string : format, indexOf, lineSplitter, strip;
+import std.typecons : Tuple;
 
 private:
 
@@ -28,19 +30,18 @@ enum SDL_TTF_TAG = "release-3.2.2"; // matches the SDL_TTF_3_2_2 version in dub.
 version (Windows) enum bool WINDOWS = true;
 else              enum bool WINDOWS = false;
 
-enum Family { unknown, debian, fedora }
+enum Family { unknown, debian, fedora, el }
 
 bool dryRun;
+bool enableCrb;
 
-// SDL_ttf links the system freetype+harfbuzz. The fonts are the runtime side,
-// found through fontconfig (see source/render.d).
+// The fonts are the runtime side, found through fontconfig (see source/render.d).
 immutable string[] DEBIAN_PACKAGES = [
     "build-essential", "cmake", "ninja-build", "git",
     "libx11-dev", "libxext-dev", "libxrandr-dev", "libxcursor-dev", "libxi-dev",
     "libxfixes-dev", "libxss-dev", "libxtst-dev", "libwayland-dev", "wayland-protocols",
-    "libxkbcommon-dev", "libegl1-mesa-dev", "libgles2-mesa-dev",
+    "libdecor-0-dev", "libxkbcommon-dev", "libegl1-mesa-dev", "libgles2-mesa-dev",
     "libpulse-dev", "libasound2-dev", "libdbus-1-dev",
-    "libfreetype-dev", "libharfbuzz-dev",
     // fonts used in packaging
     "fonts-noto-core", "fonts-noto-mono", "fonts-noto-cjk",
 ];
@@ -48,20 +49,36 @@ immutable string[] FEDORA_PACKAGES = [
     "gcc", "gcc-c++", "cmake", "ninja-build", "git",
     "libX11-devel", "libXext-devel", "libXrandr-devel", "libXcursor-devel", "libXi-devel",
     "libXfixes-devel", "libXScrnSaver-devel", "libXtst-devel", "wayland-devel", "wayland-protocols-devel",
-    "libxkbcommon-devel", "mesa-libEGL-devel", "mesa-libGLES-devel",
+    "libdecor-devel", "libxkbcommon-devel", "mesa-libEGL-devel", "mesa-libGLES-devel",
     "pulseaudio-libs-devel", "alsa-lib-devel", "dbus-devel",
-    "freetype-devel", "harfbuzz-devel",
     // fonts used in packaging
     "google-noto-sans-fonts", "google-noto-sans-mono-fonts", "google-noto-sans-cjk-fonts",
 ];
+// Only needed with --vendored=false.
+immutable string[] DEBIAN_TTF_PACKAGES = ["libfreetype-dev", "libharfbuzz-dev"];
+immutable string[] FEDORA_TTF_PACKAGES = ["freetype-devel", "harfbuzz-devel"];
+
+// RHEL and rebuilds name a few packages differently from Fedora.
+string elPackage(string fedora)
+{
+    switch (fedora)
+    {
+    case "mesa-libGLES-devel":         return "libglvnd-devel";
+    case "google-noto-sans-cjk-fonts": return "google-noto-sans-cjk-ttc-fonts";
+    default:                           return fedora;
+    }
+}
 
 int main(string[] args)
 {
     string prefix;
     bool noClean, dynamicCrt, skipPackages;
+    bool vendored = true;
     GetoptResult opts = getopt(args,
         "dry-run|n", "Print what would run; only read-only checks execute", &dryRun,
         "skip-packages", "Report missing distro packages instead of installing them", &skipPackages,
+        "vendored", "Build freetype/harfbuzz into SDL_ttf (default: true; Windows always)", &vendored,
+        "enable-crb", "EL: install from the CRB repo without asking (this run only)", &enableCrb,
         "prefix", "Install prefix (default: ~/.local, or <repo>/install on Windows)", &prefix,
         "no-clean", "Keep existing build directories", &noClean,
         "dynamic-crt", "Windows: link SDL against /MD (D side then needs -mscrtlib=msvcrt)", &dynamicCrt);
@@ -79,7 +96,7 @@ int main(string[] args)
 
     try
     {
-        build(root, prefix, noClean == false, dynamicCrt, skipPackages);
+        build(root, prefix, noClean == false, dynamicCrt, skipPackages, vendored || WINDOWS);
     }
     catch (Exception ex)
     {
@@ -93,7 +110,7 @@ int main(string[] args)
     return 0;
 }
 
-void build(string root, string prefix, bool clean, bool dynamicCrt, bool skipPackages)
+void build(string root, string prefix, bool clean, bool dynamicCrt, bool skipPackages, bool vendored)
 {
     string sdlDir = buildPath(root, "SDL");
     string ttfDir = buildPath(root, "SDL_ttf");
@@ -119,7 +136,7 @@ void build(string root, string prefix, bool clean, bool dynamicCrt, bool skipPac
     }
     else
     {
-        installPackages(skipPackages);
+        installPackages(skipPackages, vendored);
     }
 
     foreach (string tool; WINDOWS ? ["cl", "cmake", "ninja", "git"] : ["cmake", "ninja", "git"])
@@ -141,8 +158,6 @@ void build(string root, string prefix, bool clean, bool dynamicCrt, bool skipPac
         "SDL_TEST_LIBRARY=OFF",
     ]);
 
-    // Windows has no system freetype/harfbuzz, so vendor them there.
-    bool vendored = WINDOWS;
     if (vendored == false)
         environment["PKG_CONFIG_PATH"] = buildPath(libDir, "pkgconfig") ~
             pathSeparator ~ environment.get("PKG_CONFIG_PATH", "");
@@ -232,8 +247,10 @@ Family detectFamily(string[string] osr)
         {
         case "debian", "ubuntu":
             return Family.debian;
-        case "fedora", "rhel", "centos":
+        case "fedora":
             return Family.fedora;
+        case "rhel", "centos":
+            return Family.el;
         default:
         }
     }
@@ -242,7 +259,7 @@ Family detectFamily(string[string] osr)
 
 // Per package, so the install line and any admin request name only what is
 // missing. dpkg -s would accept a removed package whose config files remain.
-string[] missingPackages(Family family, immutable string[] pkgs)
+string[] missingPackages(Family family, const(string)[] pkgs)
 {
     string[] missing;
     foreach (string pkg; pkgs)
@@ -276,7 +293,7 @@ bool isRoot()
         return false;
 }
 
-void installPackages(bool skip)
+void installPackages(bool skip, bool vendored)
 {
     string[string] osr = readOsRelease();
     Family family = detectFamily(osr);
@@ -284,17 +301,37 @@ void installPackages(bool skip)
     {
         writeln("warning: no package list for '", osr.get("ID", "?"), "'; install the headers for:");
         writeln("  X11 (Xext Xrandr Xcursor Xi Xfixes XScrnSaver Xtst), Wayland + protocols,");
-        writeln("  xkbcommon, EGL, GLES2, PulseAudio, ALSA, D-Bus, FreeType, HarfBuzz;");
+        writeln("  xkbcommon, libdecor, EGL, GLES2, PulseAudio, ALSA, D-Bus;");
+        if (vendored == false)
+            writeln("  FreeType, HarfBuzz;");
         writeln("  plus a C compiler, cmake, ninja, git, and Noto fonts");
         return;
     }
 
-    string[] missing = missingPackages(family,
-        family == Family.debian ? DEBIAN_PACKAGES : FEDORA_PACKAGES);
+    const(string)[] wanted = family == Family.debian
+        ? DEBIAN_PACKAGES ~ (vendored ? [] : DEBIAN_TTF_PACKAGES)
+        : FEDORA_PACKAGES ~ (vendored ? [] : FEDORA_TTF_PACKAGES);
+    if (family == Family.el)
+        wanted = wanted.map!elPackage.array;
+    string[] missing = missingPackages(family, wanted);
     if (missing.length == 0)
         return;
 
-    string[] install = (family == Family.debian ? ["apt-get", "install", "-y"] : ["dnf", "install", "-y"]) ~ missing;
+    string crbHint;
+    string[] install = family == Family.debian ? ["apt-get", "install", "-y"] : ["dnf", "install", "-y"];
+    // ninja-build and libdecor-devel live in CRB. Enabled for this transaction
+    // only, so the repo configuration stays as the administrator left it.
+    if (family == Family.el && crbEnabled() == false)
+    {
+        if (enableCrb == false && skip == false && dryRun == false)
+            enableCrb = confirm("ninja-build and libdecor-devel are in the disabled CRB repository; " ~
+                "use it for this install? [y/N] ");
+        if (enableCrb || skip || dryRun)
+            install ~= "--enablerepo=crb";
+        else
+            crbHint = "\nor rerun with --enable-crb to install from CRB for this run.";
+    }
+    install ~= missing;
     // SDL's configure drops a backend whose headers are absent instead of
     // failing, so building past this point yields e.g. a binary without Wayland.
     string request = "missing packages; as root (or ask an administrator):\n  " ~ escapeShellCommand(install);
@@ -304,6 +341,7 @@ void installPackages(bool skip)
         return;
     }
     request ~= "\nor rerun with --skip-packages to build without them (SDL drops the matching backends).";
+    request ~= crbHint;
 
     string[] elevate;
     if (isRoot() == false)
@@ -327,6 +365,36 @@ void installPackages(bool skip)
     {
         throw new Exception(ex.msg ~ "\n" ~ request);
     }
+}
+
+bool crbEnabled()
+{
+    try
+    {
+        Tuple!(int, "status", string, "output") r = execute(["dnf", "repolist", "--enabled", "-q"]);
+        foreach (string line; r.output.lineSplitter)
+            if (line.startsWith("crb ", "codeready-builder"))
+                return true;
+    }
+    catch (Exception)
+    {
+    }
+    return false;
+}
+
+// No terminal (CI, pipes) means no answer, which is a no.
+bool confirm(string question)
+{
+    version (Posix)
+    {
+        import core.sys.posix.unistd : isatty;
+        if (isatty(0) == 0)
+            return false;
+    }
+    write(question);
+    stdout.flush();
+    string answer = readln().strip;
+    return answer == "y" || answer == "Y" || answer == "yes";
 }
 
 // The Windows half of what the Linux package step does: the Win32/D3D/WASAPI
@@ -401,6 +469,9 @@ void checkout(string dir, string url, string tag, bool submodules)
     }
 
     writeln("Reusing existing checkout at ", dir);
+    // A checkout from a --vendored=false run lacks the vendored sources.
+    if (submodules)
+        run(["git", "-C", dir, "submodule", "update", "--init", "--depth", "1"]);
     // Informational only: a network-share checkout can trip git's "dubious
     // ownership" guard, which must not abort the build.
     try
