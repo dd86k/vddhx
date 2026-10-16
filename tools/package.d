@@ -182,7 +182,14 @@ void stageCommon(string root, string dir, string binary)
         rmdirRecurse(dir);
 
     install(binary, buildPath(dir, "usr/bin", NAME), octal!755);
-    run(["strip", "--strip-unneeded", buildPath(dir, "usr/bin", NAME)]);
+    // On x86, Ubuntu 26.04's toolchain stamps "ISA needed: x86-64-v3" into
+    // the GNU property note although the code is baseline, and glibc then
+    // refuses to start on CPUs without AVX2. That marker is the note's only
+    // content on x86; on aarch64 it holds BTI/PAC and must stay.
+    string[] stripArgs = ["strip", "--strip-unneeded"];
+    if (machine() == "x86_64")
+        stripArgs ~= "--remove-section=.note.gnu.property";
+    run(stripArgs ~ buildPath(dir, "usr/bin", NAME));
 
     install(buildPath(root, "assets", NAME ~ ".desktop"),
         buildPath(dir, "usr/share/applications", NAME ~ ".desktop"), octal!644);
