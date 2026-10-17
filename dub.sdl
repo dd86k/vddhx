@@ -7,7 +7,7 @@ license "MIT"
 dependency "bindbc-sdl" version="==2.4.4"
 dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="b89172370942af639af8625a3f5a3978166f47a4"
 dependency "ddlogger" repository="git+https://github.com/dd86k/ddlogger.git" version="4397d8e57a88bd6b3a3e5e4c846ba97ac3bfd364"
-dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="63428e6b90dc38529b2662932e2fb69458b22dcd"
+dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="0bfad84e39ce8bf48667fdaa163d00100a3ae789"
 
 # Windows: no console window; --console attaches one for logs (source/main.d).
 # The entry keeps D main, which LDC emits as C wmain and DMD as C main.

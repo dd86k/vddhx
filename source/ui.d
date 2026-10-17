@@ -816,9 +816,9 @@ void ui_drop_document(Document* d)
         d.job.abandon(); // before the editor it reads through goes
     if (d.editor)
     {
-        IDocument doc = d.editor.document();
+        IDocument[] held = (cast(PieceV4DocumentEditor) d.editor).documents();
         d.editor.close();
-        if (doc)
+        foreach (IDocument doc; held)
             doc.close();
         d.editor = null;
     }
