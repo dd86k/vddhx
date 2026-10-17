@@ -9,6 +9,13 @@ Rules:
 - Better to keep entries closest to the actual intent: "Bookmarks survive closing
   the tab" is clearer than "Bookmarks are written to a sidecar file".
 
+## Upcoming
+
+### Fixed
+
+- **Packaging**: fix "CPU ISA level is lower than required" by trimming
+  the `.note.gnu.property` for DEB and RPM packages.
+
 ## v0.1.0
 
 First release of vddhx, a graphical port of the ddhx hex editor. It runs on
