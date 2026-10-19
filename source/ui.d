@@ -1622,7 +1622,7 @@ void hexReplace(long pos, ubyte value, void* user)
         structureEdited(v.doc, pos);
     }
     catch (Exception e)
-        logWarn("replace failed: %s", e.msg);
+        logError("replace failed: %s", e.msg);
 }
 /// Ditto.
 void hexInsert(long pos, ubyte value, void* user)
@@ -1636,7 +1636,7 @@ void hexInsert(long pos, ubyte value, void* user)
         structureEdited(v.doc, pos);
     }
     catch (Exception e)
-        logWarn("insert failed: %s", e.msg);
+        logError("insert failed: %s", e.msg);
 }
 /// Ditto.
 void hexRemove(long pos, long len, void* user)
@@ -1650,7 +1650,7 @@ void hexRemove(long pos, long len, void* user)
         structureEdited(v.doc, pos);
     }
     catch (Exception e)
-        logWarn("remove failed: %s", e.msg);
+        logError("remove failed: %s", e.msg);
 }
 
 /// ddui-side history hooks: step the editor's undo/redo and hand back where the
@@ -1665,7 +1665,7 @@ long hexUndo(void* user)
     try
         at = v.doc.editor.undo();
     catch (Exception e)
-        logWarn("undo failed: %s", e.msg);
+        logError("undo failed: %s", e.msg);
     ++v.doc.revision;
     v.hex.dataSize = v.doc.editor.size();
     structureEdited(v.doc, at);
@@ -1679,7 +1679,7 @@ long hexRedo(void* user)
     try
         at = v.doc.editor.redo();
     catch (Exception e)
-        logWarn("redo failed: %s", e.msg);
+        logError("redo failed: %s", e.msg);
     ++v.doc.revision;
     v.hex.dataSize = v.doc.editor.size();
     structureEdited(v.doc, at);
@@ -2076,7 +2076,7 @@ Document* ui_load(string path, bool elevate = false)
             ui_elevate(path, false);
             return null;
         }
-        logWarn("open failed: %s", e.msg);
+        logError("open failed: %s", e.msg);
         // Both callers leave the window as it was, so a file picked from the Open
         // dialog that cannot be read would otherwise look like nothing happened.
         // Clipped because ui_status drops a message that overflows.
@@ -2175,7 +2175,7 @@ bool saveTo(ref Document d, string path)
     {
         try { if (exists(tmp)) remove(tmp); }
         catch (Exception) {} // best-effort cleanup; report the original cause
-        logWarn("save failed: %s", e.msg);
+        logError("save failed: %s", e.msg);
         return false;
     }
 
@@ -2224,7 +2224,7 @@ bool saveInPlace(ref Document d)
     }
     catch (Exception e)
     {
-        logWarn("save failed: %s", e.msg);
+        logError("save failed: %s", e.msg);
         ui_status("cannot save %s: %s", ui_clip(d.title, 32), ui_clip(e.msg, 44));
         return false;
     }
@@ -2282,7 +2282,7 @@ public void ui_toggle_readonly()
                 ui_elevate(doc.path, true);
                 return;
             }
-            logWarn("read-only off: %s", e.msg);
+            logError("read-only off: %s", e.msg);
             ui_status("cannot open %s for writing: %s", ui_clip(doc.title, 32), ui_clip(e.msg, 44));
             return;
         }
@@ -2313,7 +2313,7 @@ void ui_elevated(ref Elevated answer)
 {
     if (answer.error.length)
     {
-        logWarn("elevated open of %s: %s", answer.path, answer.error);
+        logError("elevated open of %s: %s", answer.path, answer.error);
         ui_status("cannot open %s: %s", ui_clip(baseName(answer.path), 32),
             ui_clip(answer.error, 44));
         return;
@@ -2549,10 +2549,10 @@ bool copySelection(bool asText)
 
     if (SDL_SetClipboardText(text.data.ptr) == false)
     {
-        logWarn("copy failed: %s", SDL_GetError().fromStringz);
+        logError("copy failed: %s", SDL_GetError().fromStringz);
         return false;
     }
-    logInfo("copied %s byte(s) from %#x%s", done, low, asText ? " as text" : "");
+    logDebugging("copied %s byte(s) from %#x%s", done, low, asText ? " as text" : "");
     // Characters, not bytes: one lane character per byte is the whole promise, and
     // the count is what says the copy took at all - the clipboard looks the same
     // from here either way.
@@ -2599,7 +2599,7 @@ void cutSelection(bool asText)
         doc.editor.remove(cast(long) low, cast(long)(high - low + 1));
     catch (Exception e)
     {
-        logWarn("cut failed: %s", e.msg);
+        logError("cut failed: %s", e.msg);
         return;
     }
     ++doc.revision;
@@ -2632,7 +2632,7 @@ public void ui_paste()
     char* clip = SDL_GetClipboardText(); // caller frees; an empty string on failure
     if (clip is null)
     {
-        logWarn("paste failed: %s", SDL_GetError().fromStringz);
+        logError("paste failed: %s", SDL_GetError().fromStringz);
         return;
     }
     scope(exit) SDL_free(clip);
@@ -2681,7 +2681,7 @@ public void ui_paste()
         ok = true;
     }
     catch (Exception e)
-        logWarn("paste failed: %s", e.msg);
+        logError("paste failed: %s", e.msg);
 
     // The document may have moved even on a failed insert-after-remove, so the
     // panel is refreshed either way.
@@ -2690,7 +2690,7 @@ public void ui_paste()
     view.hex.dataSize = editor.size();
     hex_set_caret(view.hex, ok ? low + bytes.length : low);
     if (ok)
-        logInfo("pasted %s byte(s) at %#x", bytes.length, low);
+        logDebugging("pasted %s byte(s) at %#x", bytes.length, low);
 }
 
 /// Parse clipboard text into the bytes it spells out. Returns null when the text
@@ -3817,7 +3817,7 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         if (a.ok)
         {
             hex_set_caret(focusedView.hex, cast(size_t) a.pos); // scrolls it into view
-            logInfo("went to %#x", a.pos);
+            logDebugging("went to %#x", a.pos);
         }
         focusedView.hex.takeFocus = true;
         break;
@@ -3850,7 +3850,7 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             if (SDL_SetClipboardText(clip.ptr))
                 ui_status("copied %s", ui_inspect_row(id).label);
             else
-                logWarn("copy failed: %s", SDL_GetError().fromStringz);
+                logError("copy failed: %s", SDL_GetError().fromStringz);
         }
         focusedView.hex.takeFocus = true;
         break;
@@ -3869,7 +3869,7 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             // Selected rather than jumped to: a field is a run of bytes, and the
             // status bar then says how long it is.
             ui_select_range(focusedView, cast(size_t) spans[id].at, cast(size_t) spans[id].length);
-            logInfo("went to %s at %#x", spans[id].name, spans[id].at);
+            logDebugging("went to %s at %#x", spans[id].name, spans[id].at);
         }
         focusedView.hex.takeFocus = true;
         break;
@@ -4009,7 +4009,7 @@ void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*)
         d.jobView = null;
         if (error)
         {
-            logWarn("search failed: %s", error.msg);
+            logError("search failed: %s", error.msg);
             ui_status("search failed: %s", ui_clip(error.msg, 44));
         }
         else if (cancelled)

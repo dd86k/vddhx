@@ -96,7 +96,7 @@ bool prefs_save()
     }
     catch (Exception e)
     {
-        logWarn("%s: %s", savePath, e.msg);
+        logError("%s: %s", savePath, e.msg);
         return false;
     }
     return true;

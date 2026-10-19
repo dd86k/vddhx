@@ -125,7 +125,7 @@ void about_frame(mu_Context* ctx, int width, int height)
         {
             import std.string : fromStringz;
             import bindbc.sdl : SDL_GetError;
-            logWarn("SDL_OpenURL: %s", SDL_GetError().fromStringz);
+            logError("SDL_OpenURL: %s", SDL_GetError().fromStringz);
         }
     }
     mu_label(ctx, "License");

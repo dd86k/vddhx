@@ -11,6 +11,7 @@ import ddui;
 import elevate : ELEVATE_ARG, elevate_helper;
 import icon : icon_apply;
 import loader;
+import logging : logging_init, logging_sdl;
 import input : input_event;
 import render;
 import ui;
@@ -31,6 +32,8 @@ private enum HELP =
     "\n" ~
     "Options:\n" ~
     "  --console     Windows: attach a console for logs\n" ~
+    "  --verbose     Log debugging messages\n" ~
+    "  --trace       Log everything, SDL's verbose messages included\n" ~
     "  -h, --help    Print this help and exit\n" ~
     "  --version     Print version information and exit\n";
 
@@ -51,12 +54,11 @@ int main(string[] args)
         case "--version":       return cli_print(VERSION_TEXT);
         case "--console":       console = true; break;
         case "--verbose":       loglevel = LogLevel.debugging; break;
+        case "--trace":         loglevel = LogLevel.trace; break;
         default:                paths ~= arg;
         }
     }
 
-    // Ideally, should be logging to a file (appdata etc.),
-    // but this is a stopgap to see if loader loads proper
     version (Windows)
     {
         // The GUI subsystem starts without stderr; only borrow a console on request.
@@ -66,17 +68,24 @@ int main(string[] args)
     else
         logAddAppender(new ConsoleAppender());
 
-    logSetLevel(loglevel);
+    // Screenshot runs would rotate out the log of the session worth keeping.
+    bool logfile = true;
+    version (Screenshots)
+    {
+        import std.algorithm.searching : canFind;
+        logfile = args.canFind("--screenshot") == false;
+    }
+    logging_init(loglevel, logfile);
 
     // Under the dynamic configuration nothing may touch SDL_* or TTF_* before
     // this, the screenshot driver included.
     if (loader_init() == false)
         return 1;
     scope(exit) loader_quit();
+    logging_sdl(loglevel);
 
     version (Screenshots)
     {
-        import std.algorithm.searching : canFind;
         if (args.canFind("--screenshot"))
             return screenshot_run(args);
     }
@@ -84,6 +93,7 @@ int main(string[] args)
     if (SDL_Init(SDL_INIT_VIDEO) == false)
         return fatal(null, format("SDL_Init: %s", SDL_GetError().fromStringz));
     scope(exit) SDL_Quit();
+    logInfo("video driver: %s", SDL_GetCurrentVideoDriver().fromStringz);
 
     SDL_Window* window = SDL_CreateWindow("vddhx", 800, 600, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (window is null)
