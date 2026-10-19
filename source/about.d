@@ -15,7 +15,7 @@ import hexview : hex_classify;
 
 /// Application version. Single source of truth: dub.sdl carries no version
 /// field, since dub derives package versions from git tags.
-enum VERSION = "0.1.0";
+enum VERSION = "0.1.1";
 
 enum AUTHOR = "dd <dd@dax.moe>";                    /// Matching dub.sdl's authors/copyright fields.
 enum HOMEPAGE = "https://github.com/dd86k/vddhx";   /// Opened from the dialog.

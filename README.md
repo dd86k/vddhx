@@ -8,8 +8,6 @@ bookmarks, byte-for-byte compare, and an omnibar over the lot.
 
 ![vddhx: two panes and the omnibar](assets/screenshot.png)
 
-Status: 0.1.0, in development.
-
 Currently supports Windows, macOS, and Linux.
 
 ## Building
