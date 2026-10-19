@@ -59,6 +59,23 @@ preference.
   If none of the listed ones work, vddhx warns and lets SDL pick.
 - `SDL_VIDEO_DRIVER`: Video backend (`wayland`, `x11`, `windows`, ...).
 
+## Files
+
+Settings live in `.vddhxrc`, the first found of:
+1. Home folder: `~/.vddhxrc` or `%USERPROFILE%\.vddhxrc`
+2. User config: `$XDG_CONFIG_HOME/vddhx/.vddhxrc` (`~/.config/vddhx/.vddhxrc`)
+   or `%LOCALAPPDATA%\vddhx\.vddhxrc`
+3. System: `/etc/vddhx/.vddhxrc` or `%ProgramData%\vddhx\.vddhxrc`
+
+The settings tab saves to the first two, never to the system file.
+
+Each session logs to `vddhx.log`, the previous session's kept as `vddhx.log.old`:
+- Linux and macOS: `$XDG_STATE_HOME/vddhx/` (`~/.local/state/vddhx/`)
+- Windows: `%LOCALAPPDATA%\vddhx\`
+
+Help > About links to the folder. `--verbose` and `--trace` log more; please
+attach the log to bug reports.
+
 ## Hacking
 
 `source/README.md` has the module map and the cross-module notes.

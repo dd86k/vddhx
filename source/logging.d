@@ -14,6 +14,7 @@ private enum string FILENAME = "vddhx.log";
 
 private __gshared SDL_LogOutputFunction sdlDefault;
 private __gshared void* sdlDefaultData;
+private __gshared string logFolder;
 
 /// Set the level, open the log file, and log what a bug report needs first.
 /// Console appenders must already be added, so a file that fails to open can
@@ -25,6 +26,12 @@ void logging_init(LogLevel level, bool file)
     logInfo("vddhx %s, built with %s, on %s", VERSION, COMPILER, platform());
     if (path)
         logInfo("logging to %s", path);
+}
+
+/// Folder holding the session's log, null when it is not logging to a file.
+string logging_folder()
+{
+    return logFolder;
 }
 
 /// Route SDL's messages through ddlogger. After loader_init, before SDL_Init.
@@ -70,6 +77,7 @@ private string openFile(LogLevel level)
         logWarn("%s: %s", path, e.msg);
         return null;
     }
+    logFolder = dirName(path);
     return path;
 }
 

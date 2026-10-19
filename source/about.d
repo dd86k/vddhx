@@ -10,6 +10,7 @@ import bindbc.sdl : SDL_OpenURL, SDL_GetVersion,
 import ddlogger;
 import ddui;
 import elite : elite_open;
+import logging : logging_folder;
 import hexview : hex_classify;
 
 /// Application version. Single source of truth: dub.sdl carries no version
@@ -49,11 +50,58 @@ private string sdlVersion()
     return cached;
 }
 
+/// The log folder as the dialog shows it, home shortened to ~ on Posix so it
+/// fits the value column.
+private string logsShown()
+{
+    static string cached;
+    if (cached is null)
+    {
+        cached = logging_folder();
+        version (Posix)
+        {
+            import os.path : getHomeFolder;
+            string home = getHomeFolder();
+            if (home.length && cached.length > home.length &&
+                cached[0 .. home.length] == home && cached[home.length] == '/')
+                cached = "~" ~ cached[home.length .. $];
+        }
+    }
+    return cached;
+}
+
+/// `path` as a file:// URL for SDL_OpenURL, which hands it to the platform's
+/// opener; a folder opens in the file manager.
+private string fileUrl(string path)
+{
+    import std.algorithm.searching : canFind;
+    import std.array : Appender;
+    import std.ascii : isAlphaNum;
+
+    Appender!string url;
+    url.put("file://");
+    version (Windows)
+        url.put('/'); // file:///C:/...
+    foreach (char c; path)
+    {
+        version (Windows)
+        {
+            if (c == '\\')
+                c = '/';
+        }
+        if (isAlphaNum(c) || "-._~/:".canFind(c))
+            url.put(c);
+        else
+            url.put(format("%%%02X", c)); // byte-wise, so UTF-8 encodes as it should
+    }
+    return url.data;
+}
+
 /// Window title, and the key ddui pools the dialog's container under.
 private enum TITLE = "About vddhx";
 
 private enum int WIDTH  = 460;
-private enum int HEIGHT = 246;
+private enum int HEIGHT = 270;
 
 /// Side of the icon beside the heading.
 private enum int MARK = 48;
@@ -134,6 +182,18 @@ void about_frame(mu_Context* ctx, int width, int height)
     mu_label(ctx, COMPILER);
     mu_label(ctx, "SDL");
     mu_label(ctx, sdlVersion());
+    mu_label(ctx, "Logs");
+    if (string folder = logging_folder())
+    {
+        if (about_link(ctx, logsShown()) && SDL_OpenURL(fileUrl(folder).toStringz) == false)
+        {
+            import std.string : fromStringz;
+            import bindbc.sdl : SDL_GetError;
+            logError("SDL_OpenURL: %s", SDL_GetError().fromStringz);
+        }
+    }
+    else
+        mu_label(ctx, "not logging to a file");
 
     // First cell eats all the width but the button's, pushing it flush right.
     static immutable int[2] closerow = [ -90, -1 ];
