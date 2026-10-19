@@ -9,12 +9,27 @@ Rules:
 - Better to keep entries closest to the actual intent: "Bookmarks survive closing
   the tab" is clearer than "Bookmarks are written to a sidecar file".
 
-## Upcoming
+## v0.1.1
+
+### Added
+
+- **Logging**: each session writes a log file, the previous one kept as
+  `vddhx.log.old`. Help > About links to its folder, and the README lists
+  where it and `.vddhxrc` live.
+- `--trace` logs everything, SDL's own messages included. `--verbose` is now
+  listed in `--help`.
+
+### Changed
+
+- SDL's warnings and errors now show up in vddhx's log.
+- Failed actions (save, paste, undo...) are logged as errors; routine ones
+  (goto, copy, paste) only with `--verbose`.
 
 ### Fixed
 
 - **Packaging**: fix "CPU ISA level is lower than required" by trimming
   the `.note.gnu.property` for DEB and RPM packages.
+- Closing a tab releases every file it held open, not just the first.
 
 ## v0.1.0
 
