@@ -11,6 +11,8 @@
 /// Authors: dd86k <dd@dax.moe>
 module address;
 
+import std.string : strip;
+
 /// Kind of address (absolute, relative, etc.) so goto command knows how to deal with input.
 enum AddressKind
 {
@@ -37,11 +39,11 @@ struct Address
 
 /// Parse an offset expression against a document of `size` bytes.
 /// Returns: Resolved Address instance. Check Address.ok if valid.
-Address address_parse(const(char)[] text, long caret, long size)
+Address address_parse(const(char)[] text, long caret, long size) pure nothrow @safe @nogc
 {
     Address a;
 
-    text = address_strip(text);
+    text = strip(text);
     if (text.length == 0)
         return a;
 
@@ -149,24 +151,11 @@ unittest
 
 private:
 
-/// Trim the blanks off both ends of `text`.
-const(char)[] address_strip(const(char)[] text)
-{
-    // TODO: Wouldn't std.string.strip be better for this?
-    size_t start;
-    size_t end = text.length;
-    while (start < end && (text[start] == ' ' || text[start] == '\t'))
-        ++start;
-    while (end > start && (text[end - 1] == ' ' || text[end - 1] == '\t'))
-        --end;
-    return text[start .. end];
-}
-
 /// Parse an integer in the base its prefix names (0x, 0b, leading 0, else
 /// decimal). Refuses overflow.
-bool address_number(const(char)[] text, out long value)
+bool address_number(const(char)[] text, out long value) pure nothrow @safe @nogc
 {
-    text = address_strip(text);
+    text = strip(text);
 
     int radix = 10;
     // Prefixes need a digit after; "07" is 7 in either base.
@@ -202,9 +191,9 @@ bool address_number(const(char)[] text, out long value)
 }
 
 /// Parse a percentage, e.g. "50", "12.5".
-bool address_percent(const(char)[] text, out double per)
+bool address_percent(const(char)[] text, out double per) pure nothrow @safe @nogc
 {
-    text = address_strip(text);
+    text = strip(text);
 
     double value = 0; // .init is NaN
     size_t at;
@@ -235,7 +224,7 @@ bool address_percent(const(char)[] text, out double per)
 }
 
 /// Hex digit value, or -1. Caller range-checks narrower bases.
-int address_digit(char c)
+int address_digit(char c) pure nothrow @safe @nogc
 {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -244,7 +233,7 @@ int address_digit(char c)
 }
 
 /// Saturating add. The result gets clamped to the document afterwards.
-long address_add(long a, long b)
+long address_add(long a, long b) pure nothrow @safe @nogc
 {
     if (b > 0 && a > long.max - b)
         return long.max;
