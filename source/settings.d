@@ -141,12 +141,19 @@ bool settings_endian(mu_Context* ctx, ref int index, Endian current)
     return (mu_dropdown(ctx, &index, names.ptr, cast(int) names.length) & MU_RES_CHANGE) != 0;
 }
 
+bool settings_writemode(mu_Context* ctx, ref int index, WriteMode current)
+{
+    static immutable const(char)*[3] names = [ "Overwrite", "Insert", "Read-only" ];
+    index = current;
+    return (mu_dropdown(ctx, &index, names.ptr, cast(int) names.length) & MU_RES_CHANGE) != 0;
+}
+
 
 void settings_defaults(mu_Context* ctx)
 {
     // Separate statics: dropdowns are identified by their index's address.
     __gshared ColumnsBox columns;
-    __gshared int charset, endian, insert;
+    __gshared int charset, endian, writemode;
 
     settings_note(ctx, "What new tabs start with.");
 
@@ -174,11 +181,10 @@ void settings_defaults(mu_Context* ctx)
         changed = true;
     }
 
-    settings_label(ctx, "");
-    insert = prefs.insert;
-    if (mu_checkbox(ctx, "Insert mode", &insert) & MU_RES_CHANGE)
+    settings_label(ctx, "Write mode");
+    if (settings_writemode(ctx, writemode, prefs.writemode))
     {
-        prefs.insert = insert != 0;
+        prefs.writemode = cast(WriteMode) writemode;
         changed = true;
     }
 

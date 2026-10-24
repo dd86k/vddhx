@@ -10,13 +10,16 @@ import ddlogger;
 import ddhx.charset : Charset, ASCII, findCharset;
 import hexview : HEX_COLUMNS_MAX;
 
+/// Mode new tabs start in. Read-only only sets the tab's starting state.
+enum WriteMode { overwrite, insert, readonly }
+
 /// Copied into documents and views on creation; changes don't affect open ones.
 struct Prefs
 {
     int columns = 16;   /// Elements per row. 0 to fit to pane.
     immutable(Charset)* charset = &ASCII;   /// Change charset default.
     Endian endian = Endian.littleEndian;    /// Change endianness default.
-    bool insert;            /// Change insert mode default.
+    WriteMode writemode;    /// Change write mode default.
     bool minimap = true;    /// Show minimap.
     bool crumbs = true;     /// Show breadcrumbs.
 }
@@ -140,11 +143,11 @@ bool prefs_set(ref Prefs p, string key, string value)
         default:             return false;
         }
     case "writemode":
-        // TODO: ddhx's "readonly" and "digit".
         switch (value)
         {
-        case "overwrite": p.insert = false; return true;
-        case "insert":    p.insert = true;  return true;
+        case "overwrite": p.writemode = WriteMode.overwrite; return true;
+        case "insert":    p.writemode = WriteMode.insert;    return true;
+        case "readonly":  p.writemode = WriteMode.readonly;  return true;
         default:          return false;
         }
     case "minimap":     return prefs_bool(value, p.minimap);
@@ -163,7 +166,7 @@ string prefs_get(ref const(Prefs) p, string key)
     case "columns":     return p.columns ? to!string(p.columns) : "auto";
     case "charset":     return p.charset.id;
     case "endian":      return p.endian == Endian.bigEndian ? "big" : "little";
-    case "writemode":   return p.insert ? "insert" : "overwrite";
+    case "writemode":   return to!string(p.writemode);
     case "minimap":     return p.minimap ? "on" : "off";
     case "breadcrumbs": return p.crumbs ? "on" : "off";
     default:            assert(false, key);
@@ -304,7 +307,10 @@ unittest
     assert(prefs_set(p, "columns", "257") == false);
     assert(prefs_set(p, "endian", "be"));
     assert(p.endian == Endian.bigEndian);
-    assert(prefs_set(p, "writemode", "readonly") == false);
+    assert(prefs_set(p, "writemode", "readonly"));
+    assert(p.writemode == WriteMode.readonly);
+    assert(prefs_get(p, "writemode") == "readonly");
+    assert(prefs_set(p, "writemode", "digit") == false);
     assert(prefs_set(p, "minimap", "true") == false);
     assert(prefs_set(p, "nope", "on") == false);
 }

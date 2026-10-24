@@ -9,6 +9,16 @@ Rules:
 - Better to keep entries closest to the actual intent: "Bookmarks survive closing
   the tab" is clearer than "Bookmarks are written to a sidecar file".
 
+## Unreleased
+
+### Added
+
+- **Bookmarks**: "Bookmark All Matches..." command.
+  Search data and mark new bookmarks using a pattern. Esc cancels it.
+- "Replace..." and "Insert..." commands with their Range equivalent.
+  Same syntax as ddhx.
+- **Settings**: Add `writemode readonly`.
+
 ## v0.1.1
 
 ### Added

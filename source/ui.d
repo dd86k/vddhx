@@ -13,7 +13,7 @@ import ddhx.editor : IDocumentEditor;
 import ddhx.editor.piecev4 : PieceV4DocumentEditor;
 import about : about_open, about_frame;
 import settings : settings_page;
-import preferences : prefs, prefs_save;
+import preferences : prefs, prefs_save, WriteMode;
 import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
 import edit : EditRequest, edit_parse;
@@ -543,7 +543,7 @@ View* newView(Document* d)
     v.hex.autoColumns = prefs.columns == 0;
     if (prefs.columns)
         v.hex.columns = prefs.columns;
-    v.hex.insertMode = prefs.insert;
+    v.hex.insertMode = prefs.writemode == WriteMode.insert;
     return v;
 }
 
@@ -1779,7 +1779,7 @@ Document* ui_adopt(string path, IDocument src)
     d.editor = ed;
     d.path   = path; // Save target
     d.title  = baseName(path);
-    d.restricted = ui_fixed(d);
+    d.restricted = ui_fixed(d) || prefs.writemode == WriteMode.readonly;
     detectStructure(d);
     return d;
 }
