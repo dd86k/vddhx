@@ -89,6 +89,22 @@ bool bookmark_toggle(ref Bookmark[] list, long at, long length)
     return true;
 }
 
+/// Add sorted, non-overlapping `runs` in one pass, merged like single adds.
+void bookmark_add_all(ref Bookmark[] list, const(Bookmark)[] runs)
+{
+    Bookmark[] all = new Bookmark[list.length + runs.length];
+    size_t i, j, n;
+    while (i < list.length || j < runs.length)
+    {
+        if (j == runs.length || (i < list.length && list[i].at <= runs[j].at))
+            all[n++] = list[i++];
+        else
+            all[n++] = runs[j++];
+    }
+    bookmark_merge(all);
+    list = all;
+}
+
 /// Set the name of the bookmark containing `at`; empty removes it.
 /// Returns: false if no bookmark contains `at`.
 bool bookmark_rename(ref Bookmark[] list, long at, string name)
@@ -394,4 +410,11 @@ unittest
     list = [ Bookmark(0x10, 4, "magic"), Bookmark(0x18, 4, "version") ];
     bookmark_shift(list, 0x14, -4);
     assert(list == [ Bookmark(0x10, 4, "magic"), Bookmark(0x14, 4, "version") ]);
+
+    // Batch add: interleaved with existing ones, touching unnamed runs fold.
+    list = [ Bookmark(0x08, 2, "magic"), Bookmark(0x30, 2) ];
+    bookmark_add_all(list, [ Bookmark(0x00, 2), Bookmark(0x02, 2), Bookmark(0x09, 4),
+        Bookmark(0x40, 1) ]);
+    assert(list == [ Bookmark(0x00, 4), Bookmark(0x08, 5, "magic"), Bookmark(0x30, 2),
+        Bookmark(0x40, 1) ]);
 }

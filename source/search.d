@@ -256,6 +256,45 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
     return hit;
 }
 
+/// Pass every match of `needle` to `each`, first to last, without overlaps.
+/// `each` returns false to stop.
+void search_all(ref const(Needle) needle, long size,
+    scope bool delegate(long at, size_t length) each, ref SearchContext ctx)
+{
+    if (needle.length == 0 || ctx.read is null)
+        return;
+
+    size_t least = search_least(needle);
+    if (least == 0)
+        return; // runs only: see search_matchable
+
+    long last = size - cast(long) least; // last possible start
+    if (last < 0)
+        return;
+
+    ctx.total = last + 1;
+    ctx.done  = 0;
+
+    // Leading run: each match reaches back to where the last one ended, so one
+    // attempt per match.
+    if (needle.data[0] == SEARCH_RUN)
+    {
+        size_t length;
+        long at;
+        while (at <= last && search_range(needle, at, last, size, false, length, ctx) >= 0)
+        {
+            if (each(at, length) == false)
+                return;
+            at += cast(long) length;
+            search_advance(ctx, cast(long) length);
+        }
+        return;
+    }
+
+    size_t length;
+    search_range(needle, 0, last, size, false, length, ctx, each);
+}
+
 /// Max element size for a skip (the comparison copy); larger selections need
 /// a search.
 enum size_t SEARCH_ELEMENT_MAX = 4096;
@@ -498,11 +537,14 @@ const(char)[] search_strip(const(char)[] text)
 
 /// Try every offset in [lo, hi]; return the first match, or the last if
 /// `wantLast` (backward search; the walk is still forward).
+/// With `each`, every match not overlapping the previous one goes to it
+/// instead, until it returns false.
 ///
 /// Not ddhx's `matchPattern`: it takes a haystack, so runs couldn't reach past
 /// the buffer. Stretches are streamed separately, so runs span the document.
 long search_range(ref const(Needle) needle, long lo, long hi, long size,
-    bool wantLast, out size_t length, ref SearchContext ctx)
+    bool wantLast, out size_t length, ref SearchContext ctx,
+    scope bool delegate(long at, size_t length) each = null)
 {
     if (lo > hi)
         return -1;
@@ -537,6 +579,7 @@ long search_range(ref const(Needle) needle, long lo, long hi, long size,
     // Otherwise resume past it. Stretches are swept once in total, not per
     // candidate.
     Chain chain = { -1, -1 };
+    long next = lo; // first start past the last match given to `each`
 
     long pos = lo;
     scan: while (pos <= hi)
@@ -562,6 +605,8 @@ long search_range(ref const(Needle) needle, long lo, long hi, long size,
                 continue;
 
             long at   = pos + cast(long) i;
+            if (at < next)
+                continue;
             long from = at + cast(long) head.length;
             long end  = from;
             if (segs.count > 1)
@@ -573,6 +618,14 @@ long search_range(ref const(Needle) needle, long lo, long hi, long size,
                         break scan; // all later candidates fail too
                 }
                 end = chain.end;
+            }
+
+            if (each)
+            {
+                if (each(at, cast(size_t)(end - at)) == false)
+                    return at;
+                next = end;
+                continue;
             }
 
             if (wantLast == false)
@@ -1005,4 +1058,44 @@ unittest
     stop = false;
     assert(search_skip(0, 1, SIZE, false, *ctx) == -1);
     assert(reads == 2); // element, then one window
+}
+
+unittest
+{
+    static ubyte[] data = [
+        0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0xde, 0xad,
+        0xbe, 0xef, 0x22, 0x33, 0xde, 0xad, 0x44, 0x55,
+        0xaa, 0xaa, 0xaa,
+    ];
+    static ubyte[] reader(long pos, ubyte[] buf, void* user)
+    {
+        if (pos >= data.length)
+            return null;
+        size_t n = data.length - cast(size_t) pos;
+        if (n > buf.length) n = buf.length;
+        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
+        return buf[0 .. n];
+    }
+
+    long size = cast(long) data.length;
+    long[2][] all(string text, size_t stop = size_t.max)
+    {
+        Needle n;
+        assert(search_parse(text, n), text);
+        long[2][] hits;
+        search_all(n, size, (long at, size_t length) {
+            hits ~= [ at, cast(long) length ];
+            return hits.length < stop;
+        }, *search_context(&reader, null));
+        return hits;
+    }
+
+    assert(all("0xdeadbeef") == [ [ 0, 4 ], [ 6, 4 ] ]);
+    assert(all("0xdead") == [ [ 0, 2 ], [ 6, 2 ], [ 12, 2 ] ]);
+    assert(all("0xdead", 2) == [ [ 0, 2 ], [ 6, 2 ] ]);
+    assert(all("0xaaaa") == [ [ 16, 2 ] ]); // no overlaps
+    assert(all("0xde ? ? 0xef") == [ [ 0, 4 ], [ 6, 4 ] ]);
+    assert(all("0xde * 0xef") == [ [ 0, 4 ], [ 6, 4 ] ]);
+    assert(all("* 0xef") == [ [ 0, 4 ], [ 4, 6 ] ]);
+    assert(all("0x99").length == 0);
 }

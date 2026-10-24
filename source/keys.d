@@ -425,6 +425,23 @@ void keys_navigate()
     expect(low() == NEEDLE_A, "...wrapping round the end");
     press(SDLK_N, CTRL | SHIFT);
     expect(low() == NEEDLE_B, "Ctrl+Shift+N goes back, wrapping round the top");
+
+    size_t marks = ui_probe().marks;
+    press(SDLK_P, CTRL | SHIFT);
+    type("Bookmark All Matches");
+    press(SDLK_RETURN);
+    Probe p = ui_probe();
+    expect(p.omni && p.mode == OmniMode.find, "Bookmark All Matches... asks for a pattern");
+    type("0xcafebabe");
+    press(SDLK_RETURN);
+    expect(ui_probe().marks == marks + 2, "...and marks every match");
+
+    // The box goes back to finding afterwards.
+    press(SDLK_HOME, CTRL);
+    press(SDLK_F, CTRL);
+    type("0xcafebabe");
+    press(SDLK_RETURN);
+    expect(low() == NEEDLE_A && ui_probe().marks == marks + 2, "Ctrl+F finds again");
 }
 
 void keys_write(ref const(Files) f)
