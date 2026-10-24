@@ -44,8 +44,7 @@ unittest
     import core.stdc.stdlib : malloc, free;
     import core.stdc.string : strlen;
 
-    // Stub face: one unit per byte, so a pixel budget reads as a byte count
-    // (the ellipsis being three of them).
+    // Stub font: 1 px per byte, so widths are byte counts (… is 3).
     extern (C) int width(mu_Font font, const(char)* str, int len)
     {
         return len < 0 ? cast(int) strlen(str) : len;
@@ -68,8 +67,7 @@ unittest
     assert(ui_elide(ctx, "readme.txt", 3, buf) is null);
     assert(ui_elide(ctx, "readme.txt", 0, buf) is null);
 
-    // A budget of 5 pays for two label bytes plus the ellipsis, which would split
-    // the two-byte "é", so the whole pair goes instead.
+    // Budget 5 would split "é", so it goes whole.
     assert(ui_elide(ctx, "aébbbb", 6, buf) == "aé…");
     assert(ui_elide(ctx, "aébbbb", 5, buf) == "a…");
 }

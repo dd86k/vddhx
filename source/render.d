@@ -1,9 +1,7 @@
-/// Glue between ddui (microui) draw commands and SDL3's 2D renderer.
+/// ddui draw commands to SDL3's renderer.
 ///
-/// Text is drawn with SDL3_ttf through the renderer text engine, whose glyph
-/// atlas spans every open face, so one string can pull glyphs from several
-/// (base + CJK + symbols). UI icons go the same way rather than through a baked
-/// bitmap strip.
+/// Text and UI icons go through SDL3_ttf's renderer text engine; its atlas
+/// spans all open faces, so one string can mix base, CJK and symbol glyphs.
 /// Authors: dd86k <dd@dax.moe>
 module render;
 
@@ -13,30 +11,26 @@ import std.format : format;
 import std.math : ceil, lround;
 import std.path : baseName, buildPath;
 import std.string : fromStringz, toStringz;
-import bindbc.sdl; // publicly re-exports SDL3_ttf (TTF_*) under the static config
+import bindbc.sdl; // re-exports TTF_* in the static config
 import ddlogger;
 import ddui;
 import elite : MU_COMMAND_SHIP, elite_draw;
 import icon : exeDir;
 
-// Point size the faces are opened at. render_text_height reports the real TTF
-// line height of whichever face a command used, so this only sets the scale.
+// Sets the scale only; render_text_height reports actual line height.
 private enum float FONT_SIZE = 14.0f;
 
-// Output pixels per window point. ddui lays out in points, so this is applied only
-// here: geometry is mapped on the way out and the faces are sized up to match,
-// rasterising glyphs at the output resolution rather than upscaling them.
+// Output pixels per point. ddui works in points; geometry is mapped here and
+// faces are sized to match, so glyphs rasterise at output resolution.
 private __gshared float density = 1;
 
-// The renderer text engine caches rasterised glyphs across every open face.
 private __gshared TTF_TextEngine* engine;
 
-// Both carry the same fallback chain, so missing glyphs resolve whichever face
-// is selected.
+// Both share the fallback chain.
 private __gshared TTF_Font* fontUI;
 private __gshared TTF_Font* fontMono;
 
-// Fallback faces, retained so render_quit can close them after the primaries.
+// Kept so render_quit can close them after the primaries.
 private __gshared TTF_Font*[8] fallbacks;
 private __gshared size_t fallbackCount;
 
@@ -47,9 +41,8 @@ private struct Icon
     immutable(char)* plain;
 }
 
-// Drawn via the UI face and its symbol fallback. Index 0 is unused. `plain` is
-// what iconText falls back to when no open face carries the codepoint: an ugly
-// close button beats one that cannot be rendered.
+// Drawn with the UI face and fallbacks. Index 0 unused. `plain` is used when
+// no face has the codepoint.
 private immutable Icon[MU_ICON_MAX] icons = [
     MU_ICON_CLOSE:     Icon('✕', "✕", "x"),
     MU_ICON_CHECK:     Icon('✓', "✓", "*"),
@@ -58,13 +51,12 @@ private immutable Icon[MU_ICON_MAX] icons = [
     MU_ICON_DROPDOWN:  Icon('▾', "▾", "v"),
 ];
 
-// Resolved once the faces are open, since the answer depends on what they hold.
+// Resolved after the faces are open.
 private __gshared immutable(char)*[MU_ICON_MAX] iconText;
 
-// Shaped strings, keyed by face and content: the hex view alone draws two per
-// visible byte each frame, and shaping them anew every time dominated the frame.
-// Entries left unused for TEXT_TTL frames are dropped, so scrolling through
-// offsets does not grow the cache without bound.
+// Shaped text cache, keyed by face and content. The hex view draws two strings
+// per visible byte, and reshaping dominated frame time. Entries unused for
+// TEXT_TTL frames are evicted.
 private struct TextKey
 {
     const(TTF_Font)* font;
@@ -80,11 +72,10 @@ private struct TextEntry
 }
 private enum uint TEXT_TTL = 64;
 private __gshared TextEntry[TextKey] textCache;
-private __gshared TextKey[] textStale; // reused by the sweep
+private __gshared TextKey[] textStale; // reused by sweep_text
 private __gshared uint textFrame;
 
-// Font file names, tried in order against every directory font_dirs returns.
-// Names may carry a subdirectory.
+// Font files tried in order in each font_dirs directory. May include a subdir.
 version (Windows)
 {
     private immutable string[] uiNames = [
@@ -131,7 +122,7 @@ else version (OSX)
 }
 else
 {
-    // Only reached without fontconfig, so the layouts of the major distributions.
+    // Without fontconfig: common distro paths.
     private immutable string[] uiNames = [
         "truetype/noto/NotoSans-Regular.ttf",
         "noto/NotoSans-Regular.ttf",
@@ -164,24 +155,18 @@ else
     ];
 }
 
-// Resolved by render_init, since on Windows and macOS they depend on the user.
+// Set by render_init; per-user on Windows and macOS.
 private __gshared string[] fontDirs;
 
-// Shipped next to the executable under the same file names, for a system that has
-// none of them. Never preferred over an installed font.
+// Bundled fonts beside the executable, same names. Last resort.
 private __gshared string bundledDir;
 
 version (OSX) {}
 else version (Posix) version = Fontconfig;
 
-/// Create the window's renderer.
-///
-/// Nothing forces a choice by default: SDL walks its driver list itself and ends
-/// on the software one, so a machine whose accelerated drivers all fail to
-/// create still gets a renderer. `SDL_RENDER_DRIVER` replaces that list, so a
-/// value SDL cannot honor is warned about and dropped.
-///
-/// Returns: null on failure, with the reason left in SDL_GetError.
+/// Create the window's renderer. SDL picks the driver, falling back to
+/// software. An unusable `SDL_RENDER_DRIVER` is warned about and ignored.
+/// Returns: null on failure (see SDL_GetError).
 SDL_Renderer* render_create(SDL_Window* window)
 {
     SDL_Renderer* renderer = SDL_CreateRenderer(window, null);
@@ -191,7 +176,7 @@ SDL_Renderer* render_create(SDL_Window* window)
     {
         logWarn(`renderer "%s" unavailable: %s (have: %-(%s, %)); letting SDL choose`,
             fromStringz(wanted), SDL_GetError().fromStringz, driverNames());
-        // Empty, not reset: a reset falls back to the environment variable.
+        // Empty, not reset: reset falls back to the env var.
         SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "", SDL_HINT_OVERRIDE);
         renderer = SDL_CreateRenderer(window, null);
     }
@@ -201,9 +186,9 @@ SDL_Renderer* render_create(SDL_Window* window)
     return renderer;
 }
 
-/// Bring up SDL3_ttf, the text engine, and the font faces. Call once after the
-/// renderer is created.
-/// Returns: null on success, else a reason worded for the user.
+/// Init SDL3_ttf, the text engine and font faces. Call once after
+/// render_create.
+/// Returns: null on success, else a user-facing reason.
 string render_init(SDL_Renderer* renderer)
 {
     if (TTF_Init() == false)
@@ -213,16 +198,14 @@ string render_init(SDL_Renderer* renderer)
     if (engine is null)
         return format("TTF_CreateRendererTextEngine: %s", SDL_GetError().fromStringz);
 
-    // Without this the renderer writes fills as-is: a translucent tint (the
-    // minimap's viewport marker) comes out solid, and the fully transparent
-    // MU_COLOR_PANELBG paints black over whatever the panel sits on.
+    // Otherwise translucent fills (minimap viewport) are opaque and the
+    // transparent MU_COLOR_PANELBG paints black.
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
-    // Nothing here consults SDL_GetError: a face is missing because nothing on
     fontDirs = font_dirs();
     bundledDir = buildPath(exeDir(), "assets", "fonts");
 
-    // the machine matched, which SDL never saw.
+    // Missing faces are reported without SDL_GetError: SDL wasn't involved.
     fontUI = openFace("UI", "sans-serif", 0, uiNames);
     if (fontUI is null)
     {
@@ -231,7 +214,7 @@ string render_init(SDL_Renderer* renderer)
             "fonts-dejavu will do.";
     }
 
-    // Missing the mono face is not fatal, the hex panel merely goes unaligned.
+    // No mono face: not fatal, hex panel is just unaligned.
     fontMono = openFace("mono", "monospace", 0, monoNames);
     if (fontMono is null)
     {
@@ -240,17 +223,14 @@ string render_init(SDL_Renderer* renderer)
         fontMono = fontUI;
     }
 
-    // A match is checked for the one glyph that was the point of asking: given a
-    // pattern nothing installed can satisfy, fontconfig still answers with its
-    // best effort rather than nothing.
-    // Attempt to match a glyph. fontconfig still answers
+    // Probe glyphs are verified: fontconfig returns a best effort even when
+    // nothing matches.
     addFallback("CJK", ":lang=ja", '一', cjkNames);
     addFallback("symbol",
         format(":charset=%04X", cast(uint) icons[MU_ICON_CLOSE].code),
         icons[MU_ICON_CLOSE].code, symNames);
 
-    // Once the chain is complete: TTF_FontHasGlyph follows fallbacks, so this
-    // asks the whole set at once.
+    // After the chain is built: TTF_FontHasGlyph checks fallbacks too.
     foreach (size_t i, ref immutable(Icon) icon; icons)
     {
         if (icon.glyph is null)
@@ -294,15 +274,14 @@ void render_quit()
     TTF_Quit();
 }
 
-/// The proportional face for general UI; assign to ctx.style.font after mu_init.
+/// Proportional UI face; set as ctx.style.font after mu_init.
 TTF_Font* render_font_ui() => fontUI;
 
-/// The monospace face reserved for the hex panel component. Push it into
-/// ctx.style.font around that component, then restore the UI face.
+/// Monospace face for the hex panel. Swap into ctx.style.font around it.
 TTF_Font* render_font_mono() => fontMono;
 
-/// Follow the window's pixel density (SDL_GetWindowPixelDensity); 0, its
-/// failure value, is ignored.
+/// Set the window pixel density; 0 (SDL_GetWindowPixelDensity failure) is
+/// ignored.
 void render_set_density(float d)
 {
     if (d <= 0 || d == density)
@@ -321,14 +300,11 @@ void render_set_density(float d)
     textCache = null;
 }
 
-/// Text measuring callbacks, handed to mu_Context. The font handle is a
-/// TTF_Font*, so measurement follows whichever face the widget selected.
+/// mu_Context text measuring callbacks. `font` is a TTF_Font*.
 extern (C) int render_text_width(mu_Font font, const(char)* str, int len)
 {
     if (len < 0) len = cast(int) strlen(str);
-    // TTF_CreateText reads a zero length as "the string is NUL-terminated",
-    // which would run off the end of a caller's slice; an empty string measures
-    // zero either way, so answer that here rather than handing it over.
+    // TTF_CreateText treats length 0 as NUL-terminated, running off the slice.
     if (len == 0) return 0;
     TTF_Text* text = cached_text(cast(TTF_Font*) font, str[0 .. len]);
     if (text is null)
@@ -346,12 +322,10 @@ extern (C) int render_text_height(mu_Font font)
     return toPoints(TTF_GetFontHeight(f));
 }
 
-/// Replay every ddui draw command onto the renderer for this frame.
+/// Replay ddui draw commands onto the renderer.
 ///
-/// Iterate with mu_get_next_command rather than mu_command_range: the latter
-/// walks the raw command buffer in insertion order, but ddui stitches its root
-/// containers into z-index order with JUMP commands. Following the jumps is
-/// what makes popups (menus, dropdowns) paint on top of the window content.
+/// Must use mu_get_next_command, not mu_command_range: only it follows the
+/// JUMP commands that order root containers by z-index (popups on top).
 void render_commands(SDL_Renderer* renderer, mu_Context* ctx)
 {
     mu_Command* cmd;
@@ -368,7 +342,7 @@ void render_commands(SDL_Renderer* renderer, mu_Context* ctx)
         case MU_COMMAND_ICON:
             draw_icon(cmd.icon.id, toPixels(cmd.icon.rect), cmd.icon.color);
             break;
-        case MU_COMMAND_SHIP: // The secret!
+        case MU_COMMAND_SHIP: // elite.d
             elite_draw(renderer, toPixels(cmd.rect.rect));
             break;
         case MU_COMMAND_CLIP:
@@ -386,8 +360,7 @@ void render_commands(SDL_Renderer* renderer, mu_Context* ctx)
 
 private:
 
-// Edges are mapped rather than sizes, so neighbouring rects still meet at a
-// fractional density.
+// Map edges, not sizes, so adjacent rects meet at fractional densities.
 mu_Rect toPixels(mu_Rect r)
 {
     int x = toPixels(r.x), y = toPixels(r.y);
@@ -395,10 +368,9 @@ mu_Rect toPixels(mu_Rect r)
 }
 int toPixels(int v) => cast(int) lround(v * density);
 
-// Rounded up, so a box sized to its text never clips it.
+// Round up so text-sized boxes don't clip.
 int toPoints(int v) => cast(int) ceil(v / density);
 
-// Only for the message above, so nothing caches it.
 string[] driverNames()
 {
     int count = SDL_GetNumRenderDrivers();
@@ -408,9 +380,8 @@ string[] driverNames()
     return names;
 }
 
-// A face for one role: fontconfig's answer for the pattern, then the known files,
-// installed before bundled. `probe` is a codepoint the face has to carry, or 0
-// to take whatever comes back.
+// Open a face: fontconfig match first, then known files, installed before
+// bundled. `probe`: required codepoint, or 0.
 TTF_Font* openFace(string role, string pattern, dchar probe, const(string)[] names)
 {
     string matched = fc_match(pattern);
@@ -446,7 +417,7 @@ TTF_Font* openPath(string role, string path, dchar probe)
     return null;
 }
 
-// Open one fallback face and register it on both primaries.
+// Open a fallback face and add it to both primaries.
 void addFallback(string role, string pattern, dchar probe, const(string)[] names)
 {
     if (fallbackCount >= fallbacks.length)
@@ -463,8 +434,8 @@ void addFallback(string role, string pattern, dchar probe, const(string)[] names
         TTF_AddFallbackFont(fontMono, f);
 }
 
-// fontconfig, opened at runtime so that it stays a nicety rather than a link-time
-// dependency: SDL3_ttf does not pull it in, and a container may not have it.
+// fontconfig loaded at runtime: optional, SDL3_ttf doesn't need it and
+// containers may lack it.
 version (Fontconfig)
 {
     import core.sys.posix.dlfcn : RTLD_LAZY, dlopen, dlsym;
@@ -488,8 +459,7 @@ version (Fontconfig)
     private __gshared fcPatternDestroy_t    FcPatternDestroy;
     private __gshared bool fcTried;
 
-    // Returns: the file fontconfig matches the pattern to, or null when it has
-    //          nothing to say (library absent, or no font installed at all).
+    // Returns: matched file, or null (no library or no fonts).
     string fc_match(string pattern)
     {
         if (fcOpen() == false)
@@ -500,8 +470,7 @@ version (Fontconfig)
             return null;
         scope(exit) FcPatternDestroy(pat);
 
-        // The pair every fontconfig client runs before matching: the first applies
-        // the user's and the system's rules, the second fills what they left unset.
+        // Standard pre-match setup: apply config rules, then defaults.
         FcConfigSubstitute(null, pat, FcMatchPattern);
         FcDefaultSubstitute(pat);
 
@@ -538,7 +507,7 @@ version (Fontconfig)
         fcInit_t FcInit;
         bool bind(T)(ref T fn, string name)
         {
-            fn = cast(T) dlsym(lib, name.ptr); // string literals are NUL-terminated
+            fn = cast(T) dlsym(lib, name.ptr); // literals are NUL-terminated
             return fn !is null;
         }
         if (bind(FcInit, "FcInit") == false ||
@@ -565,7 +534,7 @@ version (Fontconfig)
 }
 else
 {
-    // Windows and macOS have no fontconfig to ask, so the file names are it.
+    // No fontconfig on Windows and macOS.
     string fc_match(string pattern) => null;
 }
 
@@ -592,12 +561,11 @@ version (Windows)
     {
         wchar* path;
         HRESULT hr = SHGetKnownFolderPath(&id, 0, null, &path);
-        scope(exit) CoTaskMemFree(path); // owed even on failure
+        scope(exit) CoTaskMemFree(path); // required even on failure
         return hr == 0 ? path.fromStringz.to!string : null;
     }
 
-    // Fonts installed without admin rights (Windows 10 1809+) land in the user's
-    // own folder, not the system one.
+    // Per-user font installs (Windows 10 1809+) go to the user's folder.
     string[] font_dirs()
     {
         string[] dirs;
@@ -627,7 +595,7 @@ else
 
 void draw_rect(SDL_Renderer* renderer, mu_Rect rect, mu_Color color)
 {
-    if (color.a == 0) // fully transparent: blending would leave the target as-is
+    if (color.a == 0) // transparent: nothing to draw
         return;
     SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
     SDL_FRect dst = SDL_FRect(rect.x, rect.y, rect.w, rect.h);

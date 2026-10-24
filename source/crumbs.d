@@ -1,24 +1,21 @@
-/// Prototype breadcrumb strip built on ddui's drawing primitives.
-///
-/// Kept local to vddhx for now, the way the tab strip in tabbar.d is.
+/// Breadcrumbs strip on ddui's drawing primitives.
 /// Authors: dd86k <dd@dax.moe>
 module crumbs;
 
 import ddui;
 import uitext : ui_elide;
 
-/// What sits between one component and the one inside it. Callers compose their
-/// trail with this and the strip reads it back to tell the components apart.
+/// Component separator. Callers join with it, the strip splits on it.
 enum string CRUMB_SEP = " / ";
 
 private:
 
-enum mu_Color CRUMB_DIM  = mu_Color(130, 130, 145, 255); // the way in
-enum mu_Color CRUMB_LAST = mu_Color(190, 190, 205, 255); // where the caret is
-enum string   CRUMB_CUT  = "... ";                       // components dropped
+enum mu_Color CRUMB_DIM  = mu_Color(130, 130, 145, 255); // ancestors
+enum mu_Color CRUMB_LAST = mu_Color(190, 190, 205, 255); // innermost
+enum string   CRUMB_CUT  = "... ";                       // shown when components are dropped
 
-enum int CRUMB_PAD   = 2; // above and below the text
-enum int CRUMB_INSET = 4; // either end of the strip
+enum int CRUMB_PAD   = 2; // above and below text
+enum int CRUMB_INSET = 4; // both ends
 
 public:
 
@@ -28,18 +25,12 @@ int crumb_bar_height(mu_Context* ctx)
     return ctx.text_height(ctx.style.font) + CRUMB_PAD * 2;
 }
 
-/// Draw a breadcrumb strip across the width it is given, taking a layout row of
-/// its own the way tab_bar does.
+/// Draw a breadcrumb strip in its own layout row, like tab_bar.
 ///
-/// `trail` is the whole path, outermost first ("PNG / IDAT / length"), and its
-/// innermost component is drawn brighter: that is the one the caller is asking
-/// about, the rest being how it was reached.
-///
-/// Too long for the strip, the trail loses components from the root end and says
-/// so with a leading ellipsis - the outermost is both the least specific and the
-/// easiest to recover, being what the whole document is. A lone component with no
-/// room left is cut short rather than dropped: an empty strip reads as a document
-/// nothing was parsed in, which is a different thing to say.
+/// `trail` is outermost first ("PNG / IDAT / length"). The last component is
+/// highlighted. If too long, components are dropped from the root end behind
+/// an ellipsis. A lone component is truncated and never dropped.
+/// An empty strip would mean nothing was parsed.
 void crumb_bar(mu_Context* ctx, string trail, mu_Color back)
 {
     import std.string : indexOf, lastIndexOf;
@@ -58,8 +49,7 @@ void crumb_bar(mu_Context* ctx, string trail, mu_Color back)
     int endX = r.x + r.w - CRUMB_INSET;
     int cutW = ctx.text_width(font, CRUMB_CUT.ptr, cast(int) CRUMB_CUT.length);
 
-    // Whole components go before any one of them is cut short, so what is left is
-    // still something the user can read off rather than a truncated root.
+    // Drop whole components before truncating any.
     size_t from;
     bool cut;
     while (x + (cut ? cutW : 0) +
@@ -96,8 +86,7 @@ void crumb_bar(mu_Context* ctx, string trail, mu_Color back)
 
 unittest
 {
-    // What the strip puts on screen at a given width: the text of every draw in
-    // order, and none of it may cross the strip's own edges.
+    // Returns the drawn text. No draw may cross the strip edges.
     enum int CW = 8;
     static extern (C) int width(mu_Font f, const(char)* s, int len)
     {
@@ -113,11 +102,9 @@ unittest
     ctx.style.padding = 0;
     ctx.style.spacing = 0;
 
-    // A window keeps the rect it was created with, so each width needs a container
-    // of its own or the second one is drawn at the first one's size.
+    // Windows keep their creation rect, so each width needs its own container.
     int seq;
-    // Widths in glyphs of room, so the insets can be retuned without every case
-    // below having to be worked out again.
+    // Widths in glyphs so insets can change without redoing the cases.
     string drawn(string trail, int glyphs)
     {
         import std.format : sformat;
@@ -141,7 +128,7 @@ unittest
         while (mu_get_next_command(&ctx, &cmd))
         {
             if (cmd.type == MU_COMMAND_RECT)
-                strip = cmd.rect.rect; // the background, drawn before any text
+                strip = cmd.rect.rect; // background, drawn first
             if (cmd.type != MU_COMMAND_TEXT)
                 continue;
             const(char)* s = mu_command_text(&ctx, cmd);
@@ -153,17 +140,16 @@ unittest
         return text;
     }
 
-    // Room for all 18 of its glyphs: the whole trail, in two draws reading as one.
+    // Fits exactly; drawn in two parts.
     assert(drawn("PNG / IHDR / width", 18) == "PNG / IHDR / width");
 
-    // Tightening the strip drops components from the root end, innermost last.
+    // Drops from the root end first.
     assert(drawn("PNG / IHDR / width", 17) == "... IHDR / width");
     assert(drawn("PNG / IHDR / width", 12) == "... width");
 
-    // With nothing left to drop the last component is cut short instead. The stub
-    // face charges a glyph per byte, so the 3-byte ellipsis costs three of them.
+    // Last component left is truncated. Stub font "..." costs 3 chars.
     assert(drawn("signature", 8) == "signa\xe2\x80\xa6");
 
-    // Nothing to say draws the strip and stops, leaving a background and no text.
+    // Empty: background only.
     assert(drawn("", 40) == "");
 }

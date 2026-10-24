@@ -16,9 +16,8 @@ private __gshared SDL_LogOutputFunction sdlDefault;
 private __gshared void* sdlDefaultData;
 private __gshared string logFolder;
 
-/// Set the level, open the log file, and log what a bug report needs first.
-/// Console appenders must already be added, so a file that fails to open can
-/// still be reported.
+/// Set the level, open the log file, log the basics for bug reports.
+/// Add console appenders first so a file open failure can be reported.
 void logging_init(LogLevel level, bool file)
 {
     logSetLevel(level);
@@ -45,8 +44,7 @@ void logging_sdl(LogLevel level)
     logInfo("SDL %s, SDL_ttf %s", versionText(SDL_GetVersion()), versionText(TTF_Version()));
 }
 
-// One file per session, the previous kept as .old so the run that crashed
-// survives the relaunch that follows it.
+// One file per session; previous kept as .old so a crash log survives relaunch.
 private string openFile(LogLevel level)
 {
     import std.file : exists, mkdirRecurse, rename;
@@ -63,7 +61,7 @@ private string openFile(LogLevel level)
         if (exists(path))
             rename(path, path ~ ".old");
     }
-    catch (Exception e) // Windows refuses while another instance holds it: share it
+    catch (Exception e) // Windows: another instance holds it, share it
         logDebugging("%s: %s", path, e.msg);
 
     try
@@ -81,7 +79,7 @@ private string openFile(LogLevel level)
     return path;
 }
 
-// XDG keeps logs under state rather than config; Windows has no such split.
+// XDG: logs go under state, not config.
 private string stateFolder()
 {
     import os.path : getHomeFolder, getUserConfigFolder;
@@ -94,7 +92,7 @@ private string stateFolder()
         import std.process : environment;
 
         string xdg = environment.get("XDG_STATE_HOME");
-        if (xdg.length && isAbsolute(xdg)) // the spec says to ignore relative ones
+        if (xdg.length && isAbsolute(xdg)) // XDG spec: ignore relative paths
             return xdg;
         string home = getHomeFolder();
         return home ? buildPath(home, ".local", "state") : null;
@@ -128,8 +126,8 @@ extern (C) private void onSdlLog(void* user, int category, SDL_LogPriority prior
 {
     import core.thread : Thread;
 
-    // ddlogger formats into a stack buffer, but a failing appender still
-    // allocates its exception: threads druntime never met (SDL's own) must not.
+    // A failing appender allocates its exception; SDL threads unknown to druntime
+    // must not allocate.
     if (Thread.getThis() is null)
     {
         sdlDefault(sdlDefaultData, category, priority, message);

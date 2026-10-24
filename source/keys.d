@@ -1,9 +1,7 @@
-/// Key binding checks: synthetic SDL events through input_event, so the routing
-/// in input.d is exercised rather than stepped around. Run with
+/// Key binding checks: synthetic SDL events through input_event, so input.d
+/// routing is exercised. Run with
 /// `SDL_VIDEODRIVER=offscreen dub run -b screenshots -- --screenshot --keys`.
-///
-/// Events carry keycodes, so SDL's own scancode-to-keycode translation (the
-/// keyboard layout) is outside of what this can see.
+/// NOTE: Events carry keycodes; keyboard layout translation isn't covered.
 module keys;
 
 version (Screenshots):
@@ -86,10 +84,9 @@ immutable Modifier[] MODIFIERS = [
     Modifier(SDL_KMOD_LALT,   SDLK_LALT),
 ];
 
-// The way SDL delivers a chord: each modifier key arrives as its own event first,
-// the mask growing as they go down and shrinking (already without the key being
-// released) as they come up. muiKey leans on that symmetry, so a shortcut taken
-// here would hide the bug class this exists for.
+// Mimics SDL chord delivery: each modifier arrives as its own event, mask
+// growing on press and shrinking on release. muiKey depends on this; don't
+// shortcut it.
 void press(SDL_Keycode code, uint mod = SDL_KMOD_NONE)
 {
     SDL_Keymod held;
@@ -152,8 +149,7 @@ void keys_omnibar()
     expect(p.omni && p.mode == OmniMode.inspect, "Alt+I raises the inspector");
     press(SDLK_ESCAPE);
 
-    // The box owns the keyboard: Ctrl+T would otherwise open a tab, the brackets
-    // step bookmarks, and Tab walk ddui's focus off the query.
+    // Box has keyboard focus: Ctrl+T, brackets and Tab must not leak through.
     press(SDLK_F, CTRL);
     type("utf1");
     expect(ui_probe().query == "utf1", "text reaches the find box");
@@ -286,9 +282,8 @@ void keys_quit()
     SDL_FlushEvent(SDL_EVENT_QUIT);
 }
 
-/// `nav` is zeros but for a needle at NEEDLE_A and NEEDLE_B, so finds and skips
-/// have known answers; `drop` and `edit` are copies of it to open beside, `saved`
-/// a destination that does not exist yet.
+/// `nav`: zeros with needles at NEEDLE_A and NEEDLE_B. `drop`, `edit`: copies.
+/// `saved`: doesn't exist yet.
 struct Files
 {
     string nav, drop, edit, saved, fresh;
@@ -382,7 +377,7 @@ void keys_navigate()
     press(SDLK_LEFT, CTRL);
     expect(ui_probe().cursor < NEEDLE_A, "Ctrl+Left skips back");
 
-    // Matches are selected; where the caret sits in one is the panel's business.
+    // Matches are selected; caret position within is up to the panel.
     size_t low() { Probe p = ui_probe(); return p.cursor < p.anchor ? p.cursor : p.anchor; }
     press(SDLK_HOME, CTRL);
     press(SDLK_F, CTRL);

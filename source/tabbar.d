@@ -1,6 +1,4 @@
-/// Prototype tab strip built on ddui's control primitives.
-///
-/// Kept local to vddhx for now, the way the menubar prototype in menu.d is.
+/// Prototype tab strip on ddui's control primitives.
 /// Authors: dd86k <dd@dax.moe>
 module tabbar;
 
@@ -10,145 +8,119 @@ import std.math : abs;
 import ddui;
 import uitext : ui_elide;
 
-/// One tab's presentation. The strip is drawn from a slice of these, which the
-/// caller rebuilds each frame from whatever it has open.
+/// Tab display data, rebuilt by the caller each frame.
 struct TabItem
 {
-    /// Text on the tab, elided with an ellipsis when the tab is too narrow.
+    /// Elided when too narrow.
     string label;
-    /// Unsaved changes: the close box shows a dot until it is hovered.
+    /// Unsaved: close box shows a dot until hovered.
     bool modified;
-    /// How many views the document behind this tab has open in all. Above one the
-    /// tab says so: without it, two tabs named the same are indistinguishable from
-    /// two copies of a file, when in truth they share an editor, an undo history
-    /// and a set of bookmarks.
+    /// Views open on this tab's document. Shown when > 1 so shared tabs (same
+    /// editor, undo, bookmarks) aren't mistaken for separate copies.
     int views;
-    /// How far along a job running in the tab is, 0 to 100, drawn as a bar under
-    /// the label. -1 for none.
+    /// Job progress 0-100, drawn as a bar under the label. -1: none.
     int progress = -1;
-    /// Edits refused: a padlock ahead of the label.
+    /// Edits refused: padlock before the label.
     bool locked;
 }
 
-/// Persistent strip state; keep one across frames. The scroll offset and the
-/// in-progress drag live here.
+/// Persistent strip state (scroll, drag). Keep across frames.
 struct TabBar
 {
-    /// Width a tab shrinks to before the strip scrolls instead of shrinking more.
+    /// Tabs shrink to this, then the strip scrolls.
     int minWidth = 120;
-    /// Width a tab grows to at most, so one long name cannot eat the whole strip.
     int maxWidth = 220;
 
-    /// Colour of whatever the strip sits on top of, which the active tab takes so
-    /// the two read as one surface. Left transparent, the window background is
-    /// used, which is wrong when the strip caps a panel with a canvas of its own.
+    /// Background under the strip; the active tab uses it to blend in.
+    /// Transparent: window background.
     mu_Color content;
 
-    /// Mute the active tab's accent edge, for a strip that is not the one taking
-    /// keys: with several side by side, only the lit accent says which of their
-    /// front tabs the keyboard is in.
+    /// Mute the active tab's accent: only the focused strip is lit.
     bool unfocused;
 
-    /// Short text drawn left of the first tab, empty for none: the pane's ordinal,
-    /// so the key that jumps to a pane by number is a thing to read rather than to
-    /// count out. Lit with the accent while the strip has the keyboard.
+    /// Text left of the first tab (pane number), empty for none. Accent-lit while
+    /// focused.
     string badge;
 
     private:
 
-    // The tab the pointer is resting on this frame and where it sits, for a caller
-    // with more to say about it than fits on a tab. -1 for none. See tab_hover.
+    // Hovered tab and its rect, -1 for none. See tab_hover.
     int hovered = -1;
     mu_Rect hoverRect;
 
-    // Pixels the strip is scrolled right by when the tabs overflow it.
+    // Scroll offset when tabs overflow.
     int scrollX;
 
-    // Each tab's slot width this frame, in display order. Three passes want the
-    // answer (the scroll follow, the drop index and the draw loop) and measuring a
-    // label is a text_width call, so it is measured once into storage that only
-    // ever grows.
+    // Slot widths this frame, in display order. Used by three passes; measured
+    // once since text_width is costly. Only grows.
     int[] slots;
 
-    // The tab the left button went down on, or -1 when nothing is held.
+    // Tab under a pressed left button, -1 if none.
     int held = -1;
 
-    // Where the pointer was when the button went down, against which the drag
-    // threshold is measured, and the grab point inside the tab, so a tab picked up
-    // by its right edge does not jump under the pointer. Both axes, since a tab
-    // pulled straight down into another pane must not shift sideways.
+    // Press position (drag threshold) and grab offset within the tab, so it
+    // doesn't jump. Both axes: dragging down into another pane mustn't shift it.
     mu_Vec2 heldAt;
     int grabDX;
     int grabDY;
 
-    // Until the pointer has moved far enough for a drag, the tab stays in its slot.
+    // Set once past the drag threshold.
     bool dragging;
 
-    // The drag has left this strip altogether, so it stops reordering, stops
-    // painting the tab, and leaves both to the caller. See tab_drag_out.
+    // Dragged out of the strip; caller draws and places it. See tab_drag_out.
     bool detached;
 
-    // Where the dragged tab is, in window coordinates: its slot on the row, or
-    // wherever the pointer has taken it once detached.
+    // Dragged tab rect, window coordinates.
     mu_Rect ghost;
 }
 
-/// What the user did to the strip this frame.
 enum TabAction
 {
-    none,   /// Nothing was clicked.
-    select, /// The tab at the reported index was clicked: bring it to the front.
-    close,  /// Its close box was clicked (or the tab middle-clicked): close it.
-    add,    /// The trailing + button: open a new tab.
-    move,   /// A tab was dragged: move it from the reported index to `target`.
-    detach, /// A tab was dragged out of the strip and let go: it is leaving, and
-            /// where it goes is for the caller to decide from the pointer.
+    none,
+    select, /// Bring `index` to front.
+    close,  /// Close box or middle click.
+    add,    /// + button.
+    move,   /// Move from `index` to `target`.
+    detach, /// Dragged out and released; caller decides where.
 }
 
-// The active tab takes the window body's own colour from the style, so it reads
-// as joined to the content below; these are the rest of the palette.
+// The active tab uses the window body colour so it joins the content.
 private enum mu_Color TAB_IDLE    = mu_Color( 38,  38,  44, 255);
 private enum mu_Color TAB_HOVER   = mu_Color( 60,  60,  70, 255);
-private enum mu_Color TAB_ACCENT  = mu_Color(110, 170, 255, 255); // active tab's top edge
-private enum mu_Color TAB_DIM     = mu_Color(170, 170, 185, 255); // inactive label / icon
+private enum mu_Color TAB_ACCENT  = mu_Color(110, 170, 255, 255); // active tab top edge
+private enum mu_Color TAB_DIM     = mu_Color(170, 170, 185, 255); // inactive label/icon
 private enum mu_Color TAB_CLOSEBG = mu_Color( 90,  90, 105, 255); // hovered close box
 
-private enum int TAB_LIFT     = 3; // pixels an inactive tab sits below the strip top
-private enum int TAB_ACCENT_H = 2; // thickness of the active tab's accent edge
-private enum int TAB_HEADROOM = 4; // space above a tab's content, clear of the accent
-private enum int TAB_DOT      = 6; // side of the unsaved-changes dot
-private enum int TAB_GAP      = 3; // strip colour showing between two tabs
-private enum int TAB_PAD      = 4; // added to style.padding for a tab's own insets
-private enum int TAB_INSET    = 4; // strip colour left of the first tab
-private enum int TAB_BAR_H    = 3; // thickness of the job progress bar
-private enum int TAB_LOCK_W   = 8; // padlock body width; the shackle sits inset on it
+private enum int TAB_LIFT     = 3; // inactive tab offset from strip top
+private enum int TAB_ACCENT_H = 2;
+private enum int TAB_HEADROOM = 4; // above content, clear of the accent
+private enum int TAB_DOT      = 6;
+private enum int TAB_GAP      = 3; // between tabs
+private enum int TAB_PAD      = 4; // added to style.padding
+private enum int TAB_INSET    = 4; // left of first tab
+private enum int TAB_BAR_H    = 3; // progress bar height
+private enum int TAB_LOCK_W   = 8; // padlock body width
 
-// Pixels the pointer must travel with the button down before a click on a tab
-// becomes a drag. Without a threshold every click would jitter the order by a
-// pixel of hand shake on the way back up.
+// Drag threshold, so hand jitter on click doesn't reorder.
 private enum int TAB_DRAG_MIN = 4;
 
-/// Height one strip takes: a menubar's, plus headroom under the accent edge and
-/// the lift an inactive tab sits down by, so its label clears the bottom too.
-/// For a caller reasoning about where a strip sits before it is drawn.
+/// Strip height: menubar height plus accent headroom and inactive tab lift.
 int tab_bar_height(mu_Context* ctx)
 {
     return ctx.style.size.y + ctx.style.padding * 2 + TAB_HEADROOM + TAB_LIFT;
 }
 
-/// Draw and drive a strip of tabs from `items`, in display order, `selected`
-/// being the active one (-1 for none) and `bar` state the caller persists.
+/// Draw and handle a tab strip. `selected`: active tab (-1 for none), `bar`:
+/// persistent state.
 ///
-/// Consumes one layout row of its own. Tabs are sized to their labels within
-/// [minWidth, maxWidth]; when the row does not fit they all drop to one even
-/// share, and past minWidth the strip scrolls, keeping the selected tab in view.
+/// Takes its own layout row. Tabs are sized to labels within
+/// [minWidth, maxWidth]; on overflow they share evenly, then scroll past
+/// minWidth, keeping `selected` visible.
 ///
-/// A tab dragged sideways reorders the strip: TabAction.move comes back each time
-/// it passes a neighbour, one step at a time, and the caller is assumed to carry
-/// the move out, since the next frame's items are what the strip lays out against.
-/// Returns: What the user did this frame - only one thing can be clicked per
-///          frame - with `index` the tab it refers to (else -1) and, for a move,
-///          `target` the index it is going to.
+/// Dragging reorders: TabAction.move is returned per neighbour passed; the
+/// caller must apply it, since the next frame lays out from the new items.
+/// Returns: The action (one per frame), with `index` the tab (else -1) and
+///          `target` the destination for a move.
 TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     const(TabItem)[] items, int selected, out int index, out int target)
 {
@@ -156,10 +128,8 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     target = -1;
     TabAction action;
 
-    // A release ends any drag, wherever the pointer let go. First of everything,
-    // so a strip that empties out mid-drag cannot leave a tab held. Letting go
-    // outside the strip hands the tab over, so what was held is remembered across
-    // the reset and reported once the tab count is known.
+    // Release ends any drag. Checked first so a strip emptied mid-drag can't keep
+    // a tab held. Release outside hands the tab over, reported once count is known.
     int handed = -1;
     if ((ctx.mouse_down & MU_MOUSE_LEFT) == 0)
     {
@@ -180,33 +150,29 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     mu_Rect strip = mu_layout_next(ctx);
     mu_draw_rect(ctx, strip, ctx.style.colors[MU_COLOR_TITLEBG]);
 
-    // Before the early return below: a pane is still that pane's number when its
-    // strip has nothing to show.
+    // Before the early return: an empty pane still shows its number.
     int badgeW = tab_badge(ctx, bar, strip, th, font);
 
-    // Settled afresh every frame from where the pointer is now, so a tab that closes
-    // or scrolls out from under it cannot leave a stale one reported.
+    // Reset every frame so a closed or scrolled-away tab isn't reported.
     bar.hovered = -1;
 
     if (items.length == 0)
         return action;
 
-    // Ids are scoped under `name`, so two strips in one window cannot collide.
+    // Scope ids under `name` so strips don't collide.
     mu_push_id(ctx, name, cast(int) strlen(name));
     scope(exit) mu_pop_id(ctx);
 
-    // The + button is pinned to the right end; the tabs share the lane left of it,
-    // starting a little in so the first tab is not welded to the window edge.
+    // + pinned right; tabs share the lane left of it, inset from the edge.
     int newW = h; // square
     mu_Rect newR = mu_Rect(strip.x + strip.w - newW, strip.y, newW, h);
     int laneX = strip.x + TAB_INSET + badgeW;
     mu_Rect lane = mu_Rect(laneX, strip.y, strip.x + strip.w - newW - laneX, h);
 
-    int closeW = th;         // the close box: a square one glyph high
-    int inset  = pad + TAB_PAD; // a tab's own left, middle and right insets
+    int closeW = th;         // one glyph high square
+    int inset  = pad + TAB_PAD; // tab insets
 
-    // Natural width first; if the row overflows, every tab takes one even share
-    // instead, floored at minWidth, and whatever is still over is scrolled to.
+    // Natural widths; on overflow, even share floored at minWidth, then scroll.
     int count = cast(int) items.length;
     if (bar.slots.length < count)
         bar.slots.length = count;
@@ -224,22 +190,18 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     }
     const(int)[] slots = bar.slots[0 .. count];
 
-    if (bar.held >= count) // tabs closed under a held one
+    if (bar.held >= count) // tabs closed under the held one
         bar.held = -1;
 
-    // Measured from where the button went down rather than frame to frame, so a
-    // slow drag crosses the threshold just the same, and settled before the draw
-    // loop so the tab lifts out on the frame the pointer takes it.
-    //
-    // Either axis counts: reordering only cares about sideways travel, but a tab
-    // is also dragged straight down out of its strip into a pane below it.
+    // Measured from the press point so slow drags still trigger; settled before
+    // drawing so the tab lifts on the same frame. Either axis: tabs can be dragged
+    // down into a pane below.
     if (bar.held >= 0 && bar.dragging == false &&
         (abs(ctx.mouse_pos.x - bar.heldAt.x) >= TAB_DRAG_MIN ||
          abs(ctx.mouse_pos.y - bar.heldAt.y) >= TAB_DRAG_MIN))
         bar.dragging = true;
 
-    // Scroll the least that brings the selected tab fully into the lane, so
-    // switching by keyboard never leaves the caret's file off screen.
+    // Minimal scroll to keep the selected tab fully visible.
     if (selected >= 0 && selected < count)
     {
         int x0;
@@ -256,23 +218,21 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     mu_push_clip_rect(ctx, lane);
     int origin = lane.x - bar.scrollX;
     int x = origin;
-    mu_Rect dragRect;   // the dragged tab's slot, kept for the second pass
-    bool dragHeld;      // whether there is one to draw
+    mu_Rect dragRect;   // for the second pass
+    bool dragHeld;
     foreach (size_t i, ref const(TabItem) it; items)
     {
-        // The slot carries the gap to the next tab, the tab itself being what is
-        // left of it, so the strip shows between the two.
+        // Slot includes the gap after the tab.
         int w = slots[i];
         mu_Rect r = mu_Rect(x, lane.y, w - TAB_GAP, h);
         x += w;
 
-        // A dragged tab is painted last from wherever the pointer has it, so it is
-        // not culled on its slot either, which can be off the lane mid-swap.
+        // Dragged tab is painted last at the pointer, so don't cull it by slot.
         bool floating = bar.dragging && bar.held == cast(int) i;
         if (floating == false && (r.x + r.w <= lane.x || r.x >= lane.x + lane.w))
-            continue; // scrolled out of sight: nothing to draw or hit-test
+            continue; // scrolled out
 
-        // Two ids per tab: the body and the close box inside it.
+        // Ids for the body and close box.
         int[2] key = [ cast(int) i, 0 ];
         mu_Id id = mu_get_id(ctx, key.ptr, key.sizeof);
         key[1] = 1;
@@ -280,8 +240,7 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
 
         mu_Rect closeR = tab_close_rect(r, closeW);
 
-        // Body first: the box sits inside it, and the later call is the one that
-        // leaves hover on the box when both match.
+        // Body first: the later call keeps hover on the box when both match.
         mu_update_control(ctx, id, r, 0);
         mu_update_control(ctx, cid, closeR, 0);
 
@@ -305,8 +264,7 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
             {
                 action = TabAction.select;
                 index  = cast(int) i;
-                // The press is also where a drag would start from, so take hold of
-                // the tab now and let the threshold above decide which it was.
+                // A press may start a drag; the threshold above decides.
                 bar.held     = cast(int) i;
                 bar.heldAt   = ctx.mouse_pos;
                 bar.grabDX   = ctx.mouse_pos.x - r.x;
@@ -326,26 +284,25 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
         {
             dragRect = r;
             dragHeld = true;
-            continue; // painted below, once every other tab is down
+            continue; // painted last
         }
         tab_paint(ctx, bar, it, r, cast(int) i == selected, bodyHot, closeHot,
             closeW, inset, th, font);
     }
 
-    // Where the dragged tab has got to, and which slot that puts it in. The move
-    // is reported the moment it passes a neighbour, so the strip the user sees is
-    // always the order they would get by letting go.
+    // Report the move as soon as it passes a neighbour, so the strip always shows
+    // the order it would drop into.
     if (bar.dragging && bar.held >= 0 && bar.held < count)
     {
-        int from = bar.held; // `items` is still in this frame's order
+        int from = bar.held; // still this frame's order
         int w = slots[from] - TAB_GAP;
 
         bar.detached = tab_inside(strip, ctx.mouse_pos) == false;
 
         if (bar.detached)
         {
-            // Free of the row, so it follows the pointer in both axes. Drawn by
-            // the caller, outside a clip the tab could not escape from in here.
+            // Detached: follows the pointer on both axes; the caller draws it outside
+            // our clip.
             bar.ghost = mu_Rect(ctx.mouse_pos.x - bar.grabDX,
                 ctx.mouse_pos.y - bar.grabDY, w, h);
         }
@@ -359,7 +316,7 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
                 action = TabAction.move;
                 index  = from;
                 target = to;
-                bar.held = to; // the caller reorders; next frame lays out the result
+                bar.held = to; // caller reorders
             }
             bar.ghost = mu_Rect(floatX, lane.y, w, h);
             if (dragHeld)
@@ -369,15 +326,14 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     }
     mu_pop_clip_rect(ctx);
 
-    // A tab let go outside the strip. Reported after everything else, so a strip
-    // losing its tab cannot also claim a click this frame.
+    // Released outside the strip. Reported last so no click is also claimed.
     if (handed >= 0 && handed < count)
     {
         action = TabAction.detach;
         index  = handed;
     }
 
-    // Trailing + button, outside the lane's clip so scrolling never hides it.
+    // + button, outside the lane clip so scrolling never hides it.
     mu_Id nid = mu_get_id(ctx, "+".ptr, 1);
     mu_update_control(ctx, nid, newR, 0);
     if (ctx.mouse_pressed == MU_MOUSE_LEFT && ctx.focus == nid)
@@ -393,12 +349,8 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
     return action;
 }
 
-/// The tab the pointer is resting on (`index`, into the slice the strip was handed)
-/// and where it sits in window coordinates, for a caller wanting to say more about
-/// it than the tab has room for.
-///
-/// False while a tab is in hand: what the pointer is over during a drag is a
-/// destination, not something being asked about.
+/// Hovered tab (`index` into the items) and its rect in window coordinates.
+/// False while dragging.
 bool tab_hover(ref const(TabBar) bar, out int index, out mu_Rect r)
 {
     index = bar.hovered;
@@ -406,13 +358,9 @@ bool tab_hover(ref const(TabBar) bar, out int index, out mu_Rect r)
     return bar.hovered >= 0 && bar.dragging == false;
 }
 
-/// Whether a tab is being dragged out of `bar`'s strip, and if so which one
-/// (`index`, into the slice the strip was handed) and where the pointer has it
-/// (`r`, in window coordinates).
-///
-/// For a caller that owns several strips: while this holds, the tab belongs to
-/// neither the strip it came from nor any it has reached, so somebody above them
-/// both has to draw it and work out where it would land.
+/// Whether a tab is dragged out of the strip: `index` into the items, `r` at
+/// the pointer (window coordinates). While true, the caller owning the strips
+/// must draw it and pick the drop target.
 bool tab_drag_out(ref const(TabBar) bar, out mu_Rect r, out int index)
 {
     r = bar.ghost;
@@ -420,11 +368,8 @@ bool tab_drag_out(ref const(TabBar) bar, out mu_Rect r, out int index)
     return bar.detached && bar.held >= 0;
 }
 
-/// Paint a dragged-out tab at `r`, for the caller drawing what tab_drag_out
-/// reported. Drawn as an active, hovered tab, so it reads as the thing in hand.
-///
-/// Call it where the tab should land in the paint order, under a clip that admits
-/// it: the strip it came from clips to its own lane, which will not.
+/// Paint a dragged-out tab at `r` (as reported by tab_drag_out), as active and
+/// hovered. Call under a clip that admits it; the source strip's clip won't.
 void tab_ghost(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it, mu_Rect r)
 {
     mu_Font font = ctx.style.font;
@@ -435,11 +380,8 @@ void tab_ghost(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it, mu
 
 private:
 
-// Draw the pane ordinal at the strip's left end and report how much width it took,
-// nothing and zero when the strip carries no badge (one pane needs no number).
-//
-// Not a control: it is a label saying where this pane is in the order the jump keys
-// count, and clicking a pane is what clicking its panel already does.
+// Draw the pane number at the strip's left; returns its width (0 if no badge).
+// A label, not a control.
 int tab_badge(mu_Context* ctx, ref const(TabBar) bar, mu_Rect strip, int th, mu_Font font)
 {
     if (bar.badge.length == 0)
@@ -452,9 +394,8 @@ int tab_badge(mu_Context* ctx, ref const(TabBar) bar, mu_Rect strip, int th, mu_
     return tw + TAB_PAD * 2 + TAB_INSET;
 }
 
-// The count drawn on a tab whose document has views elsewhere, empty for a document
-// with only this one. Formatted into the caller's buffer, since it is wanted twice a
-// frame - once to reserve the room, once to draw it - and neither wants a heap.
+// View count for a shared document, empty if only one. Into `buf`: needed
+// twice per frame (measure, draw), no heap.
 const(char)[] tab_tag(ref const(TabItem) it, return ref char[8] buf)
 {
     if (it.views <= 1)
@@ -462,9 +403,8 @@ const(char)[] tab_tag(ref const(TabItem) it, return ref char[8] buf)
     return sformat(buf, "x%d", it.views);
 }
 
-// The strip's own hit test, for deciding a drag has left it: ddui's mu_mouse_over
-// also asks whether the pointer is inside the current clip and hover root, and the
-// whole question here is about a pointer that has gone somewhere else.
+// Plain hit test; mu_mouse_over also checks clip and hover root, which don't
+// apply to a pointer that left.
 bool tab_inside(mu_Rect r, mu_Vec2 p)
 {
     return p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h;
@@ -473,19 +413,17 @@ bool tab_inside(mu_Rect r, mu_Vec2 p)
 unittest
 {
     static immutable mu_Rect r = mu_Rect(10, 20, 100, 30);
-    assert(tab_inside(r, mu_Vec2(10, 20)));   // top-left corner
+    assert(tab_inside(r, mu_Vec2(10, 20)));   // top-left
     assert(tab_inside(r, mu_Vec2(60, 35)));
-    assert(tab_inside(r, mu_Vec2(109, 49)));  // last pixel in
-    assert(tab_inside(r, mu_Vec2(110, 35)) == false); // one past the right edge
-    assert(tab_inside(r, mu_Vec2(60, 50))  == false); // one past the bottom
+    assert(tab_inside(r, mu_Vec2(109, 49)));  // last pixel
+    assert(tab_inside(r, mu_Vec2(110, 35)) == false); // past right
+    assert(tab_inside(r, mu_Vec2(60, 50))  == false); // past bottom
     assert(tab_inside(r, mu_Vec2(9, 35))   == false);
     assert(tab_inside(r, mu_Vec2(60, 19))  == false);
 }
 
-// Width one tab asks for: its label, the close box, the two insets ahead of them
-// and the gap to the next tab, held between the strip's two bounds. Room for the
-// close box is kept whether or not it is drawn, so a label never shifts under the
-// pointer.
+// Requested tab width: label, close box, insets and gap, clamped to bounds.
+// Close box room is always reserved so labels don't shift on hover.
 int tab_width(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     int closeW, int inset)
 {
@@ -500,14 +438,11 @@ int tab_width(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     return mu_clamp(tw + closeW + inset * 2 + TAB_GAP, bar.minWidth, bar.maxWidth);
 }
 
-// Where the tab dragged to `centre` belongs in the strip, `from` being the one it
-// is, `widths` every slot in display order and `originX` the left edge they are
-// laid out from (in `centre`'s own space).
+// Target index for the tab dragged to `centre`. `from`: its index, `widths`:
+// slots in display order, `originX`: left edge they start from.
 //
-// The dragged tab is left out of that layout, which is what makes the answer
-// stable: laid out with the others, moving it would move the very slots the next
-// frame decides against, and a tab wider or narrower than its neighbour would swap
-// back and forth on a pointer holding still.
+// The dragged tab is excluded from the layout, otherwise moving it shifts
+// the slots and tabs of unequal widths oscillate.
 int tab_drop_index(const(int)[] widths, int from, int originX, int centre)
 {
     int index;
@@ -515,9 +450,9 @@ int tab_drop_index(const(int)[] widths, int from, int originX, int centre)
     foreach (size_t i, int w; widths)
     {
         if (cast(int) i == from)
-            continue; // the gap it came out of is not a place to land
+            continue; // skip its own gap
         if (x + w / 2 >= centre)
-            break;    // this one's middle is still to the right: gone far enough
+            break;    // middle still to the right
         x += w;
         ++index;
     }
@@ -526,56 +461,50 @@ int tab_drop_index(const(int)[] widths, int from, int originX, int centre)
 
 unittest
 {
-    // Dragging the first of three right: it holds its place until past the middle
-    // of the second, then takes one step per neighbour.
+    // First of three dragged right: moves past each middle.
     static immutable int[3] even = [ 100, 100, 100 ];
     assert(tab_drop_index(even, 0, 0,  40) == 0);
-    assert(tab_drop_index(even, 0, 0,  49) == 0); // still short of the middle
+    assert(tab_drop_index(even, 0, 0,  49) == 0); // short of the middle
     assert(tab_drop_index(even, 0, 0,  60) == 1);
     assert(tab_drop_index(even, 0, 0, 160) == 2);
-    assert(tab_drop_index(even, 0, 0, 999) == 2); // past the end, clamped by the walk
+    assert(tab_drop_index(even, 0, 0, 999) == 2); // clamped
 
-    // ... and the last one left, the same thresholds mirrored.
+    // Last one dragged left, mirrored.
     assert(tab_drop_index(even, 2, 0, 160) == 2);
     assert(tab_drop_index(even, 2, 0, 140) == 1);
     assert(tab_drop_index(even, 2, 0,  40) == 0);
     assert(tab_drop_index(even, 2, 0, -99) == 0);
 
-    // The middle one, which can go either way.
+    // Middle one, either way.
     assert(tab_drop_index(even, 1, 0, 120) == 1);
     assert(tab_drop_index(even, 1, 0, 160) == 2);
     assert(tab_drop_index(even, 1, 0,  40) == 0);
 
-    // The scroll offset and the lane inset both land in originX.
+    // Scroll and inset via originX.
     assert(tab_drop_index(even, 0, 500, 540) == 0);
     assert(tab_drop_index(even, 0, 500, 560) == 1);
-    assert(tab_drop_index(even, 0, -50, 10) == 1); // scrolled right by 50
+    assert(tab_drop_index(even, 0, -50, 10) == 1); // scrolled 50
 
-    // Uneven widths: the case a layout including the dragged tab oscillates on.
-    // The wide tab's middle is 100 either way round, so the answer holds once the
-    // narrow one has passed it.
+    // Uneven widths: the oscillation case. Stable once past the wide tab's
+    // middle (100 either way).
     static immutable int[2] wideFirst  = [ 200, 90 ];
     static immutable int[2] narrowFirst = [ 90, 200 ];
     assert(tab_drop_index(wideFirst,   1, 0, 190) == 1);
     assert(tab_drop_index(wideFirst,   1, 0,  90) == 0); // steps in front
-    assert(tab_drop_index(narrowFirst, 0, 0,  90) == 0); // and stays there
+    assert(tab_drop_index(narrowFirst, 0, 0,  90) == 0); // stays
     assert(tab_drop_index(narrowFirst, 0, 0, 110) == 1); // back only past the middle
 
-    // One tab has nowhere to go.
+    // Single tab.
     static immutable int[1] one = [ 100 ];
     assert(tab_drop_index(one, 0, 0, 0)    == 0);
     assert(tab_drop_index(one, 0, 0, 5000) == 0);
 }
 
-// Where a dragged tab's left edge is allowed to be: `wanted` is where the pointer
-// would put it, `lane` the visible strip (the + button excluded), `originX` the
-// lane less the scroll, `total` every slot added up.
+// Clamp a dragged tab's left edge. `wanted`: from the pointer, `lane`: visible
+// strip (excluding +), `originX`: lane minus scroll, `total`: sum of slots.
 //
-// The pointer can wander anywhere in the strip, but a tab that followed it out
-// into the bare part of a wide lane would visibly come away from the row it is
-// being dropped into. So it stops where its slot would be were it last in the
-// strip - or at the lane's edge when the tabs overflow and that comes first,
-// the far end then being somewhere the lane has to scroll to reach.
+// Stops at the last slot position so it doesn't drift away from the row, or
+// at the lane edge if the row overflows.
 int tab_float_x(int wanted, mu_Rect lane, int originX, int total, int slotW)
 {
     int lo = mu_max(lane.x, originX);
@@ -585,38 +514,35 @@ int tab_float_x(int wanted, mu_Rect lane, int originX, int total, int slotW)
 
 unittest
 {
-    // A short row in a wide lane: the tab stops on the last slot rather than
-    // carrying on past it. Three 100px slots from 0, so that slot starts at 200.
+    // Short row in a wide lane: stops at the last slot (200).
     static immutable mu_Rect wide = mu_Rect(0, 0, 800, 20);
-    assert(tab_float_x(150,  wide, 0, 300, 100) == 150); // inside the row, as asked
-    assert(tab_float_x(200,  wide, 0, 300, 100) == 200); // exactly the last slot
-    assert(tab_float_x(400,  wide, 0, 300, 100) == 200); // out in the bare strip
+    assert(tab_float_x(150,  wide, 0, 300, 100) == 150); // in the row
+    assert(tab_float_x(200,  wide, 0, 300, 100) == 200); // last slot
+    assert(tab_float_x(400,  wide, 0, 300, 100) == 200); // clamped
     assert(tab_float_x(9999, wide, 0, 300, 100) == 200);
-    assert(tab_float_x(-50,  wide, 0, 300, 100) == 0);   // and off the left end
+    assert(tab_float_x(-50,  wide, 0, 300, 100) == 0);   // left end
 
-    // The lane's own inset is respected on both ends.
+    // Lane inset on both ends.
     static immutable mu_Rect inset = mu_Rect(40, 0, 800, 20);
     assert(tab_float_x(20,  inset, 40, 300, 100) == 40);
     assert(tab_float_x(400, inset, 40, 300, 100) == 240); // 40 + 300 - 100
 
-    // A row wider than the lane: now the lane edge is what stops it, since the
-    // row's far end is off screen until the strip scrolls to it.
+    // Row wider than lane: stops at the lane edge.
     static immutable mu_Rect tight = mu_Rect(0, 0, 250, 20);
     assert(tab_float_x(400, tight, 0, 900, 100) == 153); // 250 - (100 - TAB_GAP)
-    assert(tab_float_x(100, tight, 0, 900, 100) == 100); // still in the lane
+    assert(tab_float_x(100, tight, 0, 900, 100) == 100); // in lane
 
-    // Scrolled right by 200: the row starts off the left of the lane, so the left
-    // stop is the lane edge rather than the row's own start.
+    // Scrolled 200: left stop is the lane edge.
     assert(tab_float_x(-300, tight, -200, 900, 100) == 0);
     assert(tab_float_x(50,   tight, -200, 900, 100) == 50);
 
-    // A lane too narrow for one tab gives an answer rather than an inverted range.
+    // Lane narrower than a tab: no inverted range.
     static immutable mu_Rect sliver = mu_Rect(10, 0, 20, 20);
     assert(tab_float_x(500, sliver, 10, 300, 100) == 10);
 }
 
-// A padlock TAB_LOCK_W wide at `x`, centred on a text line `th` high at `y`. Rects
-// rather than a glyph, the UI font not being sure to carry one.
+// Padlock TAB_LOCK_W wide at `x`, centred on a `th` line at `y`. Drawn with
+// rects; the UI font may lack a glyph.
 void tab_lock(mu_Context* ctx, int x, int y, int th, mu_Color ink)
 {
     enum int BODY_H = 6, SHACKLE_H = 4, STROKE = 2;
@@ -627,23 +553,21 @@ void tab_lock(mu_Context* ctx, int x, int y, int th, mu_Color ink)
     mu_draw_rect(ctx, mu_Rect(x, top + SHACKLE_H, TAB_LOCK_W, BODY_H), ink);
 }
 
-// Flush with the tab's right edge: an inset there only wastes room a label could use.
+// Flush right; an inset would waste label room.
 mu_Rect tab_close_rect(mu_Rect r, int closeW)
 {
     return mu_Rect(r.x + r.w - closeW,
         r.y + TAB_HEADROOM + (r.h - TAB_HEADROOM - closeW) / 2, closeW, closeW);
 }
 
-// Paint one tab in `r`. Split out of the strip's loop so a tab being dragged can
-// be drawn from the pointer once every other tab is down, and so land on top.
+// Paint one tab. Separate so the dragged tab can be drawn last, on top.
 void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     mu_Rect r, bool active, bool bodyHot, bool closeHot,
     int closeW, int inset, int th, mu_Font font)
 {
     mu_Rect closeR = tab_close_rect(r, closeW);
 
-    // The active tab runs the strip's full height in the body's own colour, so it
-    // reads as joined to the content below; the others sit lower and darker.
+    // Active: full height, body colour. Others: lower and darker.
     mu_Color face = active ? (bar.content.a ? bar.content :
                               ctx.style.colors[MU_COLOR_WINDOWBG]) :
                     bodyHot || closeHot ? TAB_HOVER : TAB_IDLE;
@@ -657,7 +581,7 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
 
     int textX = r.x + inset;
     int textW = closeR.x - inset - textX;
-    // One line for every tab, active or not, so a label does not jump on switching.
+    // Same baseline for all tabs so labels don't jump.
     int textY = r.y + TAB_HEADROOM + (r.h - TAB_HEADROOM - th) / 2;
 
     if (it.locked && textW > TAB_LOCK_W + inset)
@@ -667,9 +591,8 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
         textW -= TAB_LOCK_W + inset;
     }
 
-    // The shared-views count, dropped when the label would have to be elided to fit
-    // it: tab_width reserves the room, but a strip squeezed to even shares has less
-    // than it asked for, and the name tells tabs apart where the count only hints.
+    // View count, dropped if it would force eliding the label (even-share layout
+    // may give less than tab_width asked).
     char[8] tagbuf = void;
     const(char)[] tag = tab_tag(it, tagbuf);
     if (tag.length && textW > 0)
@@ -691,8 +614,7 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
             mu_draw_text(ctx, font, label, mu_Vec2(textX, textY), ink);
     }
 
-    // Spans the whole tab rather than the label, which a short name would leave
-    // too narrow to read as moving.
+    // Full tab width; a short label would make it too small.
     if (it.progress >= 0)
     {
         int barX = r.x + inset;
@@ -705,8 +627,7 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
 
     if (it.modified && closeHot == false)
     {
-        // A dot sits where the X would and hovering swaps them, so the state shows
-        // without the row filling up with crosses.
+        // Dot in place of the X, swapped on hover.
         mu_draw_rect(ctx, mu_Rect(closeR.x + (closeR.w - TAB_DOT) / 2,
             closeR.y + (closeR.h - TAB_DOT) / 2, TAB_DOT, TAB_DOT), ink);
     }

@@ -1,29 +1,26 @@
-/// The disks and volumes this machine has, for the omnibar's Open Disk prompt.
-///
-/// Listing asks for no access to the media themselves, so it works unelevated;
-/// opening one is what may need more.
+/// Disk and volume enumeration for the Open Disk prompt. Works unelevated.
 module disks;
 
 import std.format : format;
 
+/// Represents an instance of a disk that can be opened.
 struct Disk
 {
-    /// What FileDocument opens.
+    /// Path for FileDocument.
     string path;
-    /// Model, or volume label; empty when the system has neither.
+    /// Model or volume label. Optional and can be empty.
     string name;
-    /// Bytes, 0 when unknown.
+    /// Size in bytes, 0 if unknown.
     long size;
-    /// A partition or volume rather than a whole device.
+    /// If set: Partition or volume. Otherwise, disk.
     bool part;
 }
 
-version (Windows)    enum bool DISKS_LISTED = true;
-else version (linux) enum bool DISKS_LISTED = true;
-else                 enum bool DISKS_LISTED = false;
+version (Windows)    enum bool DISKS_LISTED = true;     /// If disk enumeration is supported
+else version (linux) enum bool DISKS_LISTED = true;     /// Ditto
+else                 enum bool DISKS_LISTED = false;    /// Ditto
 
-/// Every disk, each followed by its partitions. Empty where DISKS_LISTED is false
-/// or nothing could be read.
+/// Returns list of disks, each followed by its partitions. Empty if DISKS_LISTED==false or unreadable.
 Disk[] disks_list()
 {
     try
@@ -32,7 +29,7 @@ Disk[] disks_list()
         return null;
 }
 
-/// `size` as the largest binary unit it reaches, "931.5 GiB".
+/// Human size in binary units, e.g. "931.5 GiB".
 string disks_size(long size)
 {
     static immutable string[] UNITS = [ "B", "KiB", "MiB", "GiB", "TiB", "PiB" ];
@@ -72,7 +69,7 @@ Disk[] disks_scan()
 
     foreach (string dev; devs)
     {
-        // Memory-backed: swap, ramdisks, and the loops every snap mounts.
+        // Skip memory-backed: swap, ramdisks, snap loops.
         if (dev.startsWith("loop") || dev.startsWith("ram") || dev.startsWith("zram"))
             continue;
         string sys = "/sys/block/" ~ dev;
@@ -102,13 +99,13 @@ Disk[] disks_scan()
 
 version (linux)
 {
-    /// sdb before sda10, by putting the shorter name first.
+    /// Sorts sdb before sda10 (shorter name first).
     bool byNumber(string a, string b)
     {
         return a.length != b.length ? a.length < b.length : a < b;
     }
 
-    /// The `/sys` value as text, trimmed; empty when it is not there.
+    /// Trimmed `/sys` value, empty if missing.
     string sysText(string path)
     {
         import std.file : readText;
@@ -128,8 +125,7 @@ version (linux)
             return 0;
     }
 
-    /// Filesystem labels by device name, out of udev's `/dev/disk/by-label`, where
-    /// a name escapes its spaces and slashes as `\x20`.
+    /// Labels by device name from `/dev/disk/by-label` (names escaped, e.g. `\x20`).
     string[string] labelsByDevice()
     {
         import std.conv : to;
@@ -156,7 +152,7 @@ version (linux)
                 labels[baseName(readLink(e.name))] = cast(string) label;
             }
         }
-        catch (Exception) {} // no udev, as in most containers
+        catch (Exception) {} // no udev (containers)
         return labels;
     }
 }
@@ -169,9 +165,8 @@ Disk[] disks_scan()
 
     Disk[] list;
 
-    // Numbered from zero but with gaps where a disk was pulled, so every slot a
-    // machine plausibly has is tried. Access 0 opens without admin, and both
-    // ioctls below are FILE_ANY_ACCESS.
+    // Because there might be some gaps (e.g., after disk removal) try enumerating
+    // all plausible slots starting from 0. 0 might work unelevated.
     foreach (int i; 0 .. 64)
     {
         string path = format(`\\.\PhysicalDrive%d`, i);
@@ -183,8 +178,8 @@ Disk[] disks_scan()
         list ~= Disk(path, deviceModel(h), deviceSize(h));
     }
 
-    // Volumes by letter. Their length ioctl wants read access, so the size is the
-    // filesystem's, which is what Explorer shows for one anyway.
+    // The volume length ioctl needs read access, so use the filesystem size
+    // (matches Explorer).
     DWORD letters = GetLogicalDrives();
     foreach (int i; 0 .. 26)
     {
@@ -230,8 +225,7 @@ version (Windows)
         return *cast(long*) &buf[24];
     }
 
-    /// Vendor and product out of the STORAGE_DEVICE_DESCRIPTOR, which carries them
-    /// as offsets to C strings within itself.
+    /// Vendor and product from STORAGE_DEVICE_DESCRIPTOR (self-relative offsets).
     string deviceModel(HANDLE h)
     {
         import std.string : strip;

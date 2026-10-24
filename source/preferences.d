@@ -1,8 +1,7 @@
-/// Saved settings: what new documents and views start with, plus the window chrome,
-/// kept in a .vddhxrc written in ddhx's `key value` syntax.
+/// Saved settings (.vddhxrc, ddhx's `key value` syntax): defaults for new
+/// documents and views, plus window chrome.
 ///
-/// The file is rewritten line by line rather than regenerated, so comments, order
-/// and keys this build does not know survive the dialog saving over them.
+/// Saving edits lines in place, preserving comments, order and unknown keys.
 /// Authors: dd86k <dd@dax.moe>
 module preferences;
 
@@ -11,22 +10,21 @@ import ddlogger;
 import ddhx.charset : Charset, ASCII, findCharset;
 import hexview : HEX_COLUMNS_MAX;
 
-/// Saved settings. Documents and views copy these when created and never look
-/// back, so changing one leaves what is already open alone.
+/// Copied into documents and views on creation; changes don't affect open ones.
 struct Prefs
 {
-    int columns = 16;   /// 0 fits the row to the pane.
-    immutable(Charset)* charset = &ASCII;
-    Endian endian = Endian.littleEndian;
-    bool insert;
-    bool minimap = true;
-    bool crumbs = true;
+    int columns = 16;   /// Elements per row. 0 to fit to pane.
+    immutable(Charset)* charset = &ASCII;   /// Change charset default.
+    Endian endian = Endian.littleEndian;    /// Change endianness default.
+    bool insert;            /// Change insert mode default.
+    bool minimap = true;    /// Show minimap.
+    bool crumbs = true;     /// Show breadcrumbs.
 }
 
 /// Ditto.
 __gshared Prefs prefs;
 
-/// Every key the file may hold, in the order a fresh file lists them.
+/// All keys, in the order a new file lists them.
 immutable string[] PREFS_KEYS = [
     "columns", "charset", "endian", "writemode", "minimap", "breadcrumbs",
 ];
@@ -37,8 +35,8 @@ private enum string FILENAME = ".vddhxrc";
 private __gshared string[] lines;
 private __gshared string savePath;
 
-/// Read the first .vddhxrc found, the way ddhx looks for its own. A bad line is
-/// logged and skipped: one typo should not throw out the rest of the file.
+/// Read the first .vddhxrc found, same lookup as ddhx. Bad lines are logged
+/// and skipped.
 void prefs_load()
 {
     import std.file : readText;
@@ -61,8 +59,7 @@ void prefs_load()
         return;
     }
 
-    // A system-wide file is someone else's to change: saving writes a user copy,
-    // starting from its lines so the copy does not shadow them with nothing.
+    // Don't overwrite a system-wide file: save a user copy, seeded with its lines.
     if (prefs_system(path) == false)
         savePath = path;
 
@@ -70,8 +67,7 @@ void prefs_load()
     prefs_parse(prefs, lines, path);
 }
 
-/// Write `prefs` back. Errors are logged, not thrown: losing a setting is not worth
-/// interrupting whatever changed it.
+/// Write `prefs` back. Errors are logged, not thrown.
 /// Returns: False if the file could not be written.
 bool prefs_save()
 {
@@ -89,7 +85,7 @@ bool prefs_save()
     try
     {
         mkdirRecurse(dirName(savePath));
-        // Through a temporary, so a failed write cannot leave half a file.
+        // Write via temp file to avoid partial writes.
         string tmp = savePath ~ ".tmp";
         write(tmp, prefs_text(lines));
         rename(tmp, savePath);
@@ -102,14 +98,14 @@ bool prefs_save()
     return true;
 }
 
-/// Where prefs_save writes, null when there is no config folder to write in.
+/// prefs_save target, null if there is no config folder.
 string prefs_path()
 {
     return savePath;
 }
 
-/// Set one key from its text, as the file writes it.
-/// Returns: False for an unknown key or a value it does not take.
+/// Set one key from its file text.
+/// Returns: False for an unknown key or invalid value.
 bool prefs_set(ref Prefs p, string key, string value)
 {
     switch (key)
@@ -144,7 +140,7 @@ bool prefs_set(ref Prefs p, string key, string value)
         default:             return false;
         }
     case "writemode":
-        // ddhx's "readonly" and "digit" have no vddhx counterpart yet.
+        // TODO: ddhx's "readonly" and "digit".
         switch (value)
         {
         case "overwrite": p.insert = false; return true;
@@ -157,7 +153,7 @@ bool prefs_set(ref Prefs p, string key, string value)
     }
 }
 
-/// One key's value as the file writes it.
+/// One key's value in file syntax.
 string prefs_get(ref const(Prefs) p, string key)
 {
     import std.conv : to;
@@ -176,7 +172,7 @@ string prefs_get(ref const(Prefs) p, string key)
 
 private:
 
-// ddhx's pair and no other, see its configuration.boolean.
+// Same values as ddhx's configuration.boolean.
 bool prefs_bool(string value, ref bool field)
 {
     switch (value)
@@ -205,7 +201,7 @@ string prefs_user_path()
     return dir ? buildPath(dir, APPNAME, FILENAME) : null;
 }
 
-// The key a line sets, or null for a blank line or a comment.
+// Key set by a line, null for blank lines and comments.
 string prefs_line_key(string line, out string value)
 {
     import std.string : strip;
@@ -219,7 +215,7 @@ string prefs_line_key(string line, out string value)
     try
         args = arguments(text);
     catch (Exception)
-        return text; // still a key-ish line; the caller reports it
+        return text; // key-like; caller reports it
     if (args.length == 0)
         return null;
     if (args.length > 1)
@@ -240,9 +236,8 @@ void prefs_parse(ref Prefs p, const(string)[] text, string path)
     }
 }
 
-// Each key's last line is the one in force, so that is the one rewritten. A key
-// with no line only gets one once it differs from the default, which keeps a file
-// nobody touched empty.
+// Rewrites each key's last line (the effective one). Missing keys are added
+// only when non-default, so an untouched file stays empty.
 void prefs_merge(ref string[] text, ref const(Prefs) p)
 {
     static immutable Prefs defaults;
@@ -288,7 +283,7 @@ unittest
     assert(p.columns == 24);
     assert(p.charset == &CP437);
 
-    // Only the line in force changes; untouched defaults add nothing.
+    // Only the effective line changes; untouched defaults add nothing.
     p.columns = 0;
     p.minimap = false;
     prefs_merge(text, p);

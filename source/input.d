@@ -1,4 +1,4 @@
-/// SDL input events into ddui and the UI: every key binding lives here.
+/// SDL input events into ddui and the UI. All key bindings live here.
 module input;
 
 import std.string : fromStringz;
@@ -9,14 +9,12 @@ import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_KEY_UP, OMNI_KEY_DOWN, OMNI_KEY_PAGEUP, OMNI_KEY_PAGEDOWN;
 import ui;
 
-/// Route one input event: pointer, wheel, text, drops and keys. Anything else
-/// (quit, window, renderer) is the loop's and is ignored here.
+/// Route one input event (pointer, wheel, text, drops, keys). Others are the
+/// main loop's.
 void input_event(mu_Context* ctx, ref const(SDL_Event) event)
 {
-    // Before the dispatch below, so an event that has something to say
-    // still leaves its own message up. Modifiers alone are not an
-    // acknowledgement: the Ctrl of a Ctrl+F is the user acting on the
-    // message rather than dismissing it unread.
+    // Dismiss the status message before dispatch, so the event can post its own.
+    // Modifiers alone don't dismiss (Ctrl of Ctrl+F acts on the message).
     if ((event.type == SDL_EVENT_KEY_DOWN && modifierKey(event.key.key) == false) ||
         event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
         ui_status_dismiss();
@@ -27,19 +25,16 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
         mu_input_mousemove(ctx, cast(int) event.motion.x, cast(int) event.motion.y);
         break;
     case SDL_EVENT_MOUSE_WHEEL:
-        // Shift turns a plain wheel sideways, for mice without a tilt.
+        // Shift+wheel scrolls sideways, for mice without tilt.
         if (SDL_GetModState() & SDL_KMOD_SHIFT)
             mu_input_scroll(ctx, cast(int)(event.wheel.y * -30), 0);
         else
             mu_input_scroll(ctx, cast(int)(event.wheel.x * 30), cast(int)(event.wheel.y * -30));
         break;
     case SDL_EVENT_TEXT_INPUT:
-        // Bookmarks step on the bare brackets, as they do in ddhx, bound
-        // to the character typed rather than a keycode: outside US ANSI
-        // they are rarely a key of their own (fr-ca puts them behind
-        // AltGr, whose unshifted keycode is not a bracket at all), and
-        // this is what the layout actually produced. The omnibar is a text
-        // box, so it keeps its own brackets.
+        // Brackets step bookmarks, like ddhx. Bound to the typed character, not the
+        // keycode: on many layouts they're behind AltGr (e.g. fr-ca). The omnibar
+        // keeps its brackets.
         if (ui_omni_active() == false && event.text.text && event.text.text[0] && event.text.text[1] == 0)
         {
             if (event.text.text[0] == ']')
@@ -56,15 +51,14 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
         mu_input_text(ctx, event.text.text);
         break;
     case SDL_EVENT_DROP_POSITION:
-        // Light up the pane being pointed at, so where the file would land
-        // is visible before the button comes up.
+        // Highlight the drop target pane.
         ui_drop_hover(cast(int) event.drop.x, cast(int) event.drop.y);
         break;
     case SDL_EVENT_DROP_BEGIN, SDL_EVENT_DROP_COMPLETE:
         ui_drop_clear();
         break;
     case SDL_EVENT_DROP_FILE:
-        // SDL3 owns the path string (no free), so copy it before it goes.
+        // SDL owns the string; copy it.
         if (event.drop.data)
             ui_drop_file(event.drop.data.fromStringz.idup,
                 cast(int) event.drop.x, cast(int) event.drop.y);
@@ -80,10 +74,8 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
             mu_input_mouseup(ctx, x, y, btn);
         break;
     case SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP:
-        // The omnibar next: Ctrl+E raises it on the tab switcher, one key
-        // per prefixed mode raises it straight on that one, and each key
-        // puts away the mode it opens. Ctrl+G, Ctrl+F and Alt+I are what
-        // ddhx binds goto, find and the inspector to.
+        // Omnibar: Ctrl+E opens the tab switcher, other keys open their mode directly
+        // and toggle it closed. Ctrl+G, Ctrl+F, Alt+I match ddhx.
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)
         {
             if (event.key.key == SDLK_E)
@@ -113,9 +105,7 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
             ui_omni_toggle(OMNI_INSPECT);
             break;
         }
-        // While it is up it owns the keyboard, its keys going through
-        // ddui's text-editing map rather than the panel's, whose chords
-        // and hex digits would fight what is being typed.
+        // While open it owns the keyboard; panel chords and hex digits would interfere.
         if (ui_omni_active())
         {
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)
@@ -132,27 +122,22 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
                 mu_input_keyup(ctx, okey);
             break;
         }
-        // After the omnibar, whose own Escape closes it: only then does the
-        // key reach a walk the focused tab is waiting on.
+        // After the omnibar, which handles its own Escape.
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE &&
             ui_job_cancel())
             break;
-        // Alt+1..9 picks a tab within the focused pane, counting the way
-        // Ctrl+1..9 counts panes: one modifier per level of the grid, so a
-        // number key is never ambiguous about which it means. After the
-        // omnibar, whose text these would otherwise be typed into.
+        // Alt+1..9: tab in focused pane (Ctrl+1..9 is panes). After the omnibar,
+        // which would take them as text.
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_ALT &&
             event.key.key >= SDLK_1 && event.key.key <= SDLK_9)
         {
             ui_select_tab(event.key.key - SDLK_1);
             break;
         }
-        // Menu chords: the File and Edit entries, keyed the way every GUI
-        // toolkit keys them.
+        // Menu shortcuts.
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)
         {
-            // Through SDL's queue rather than ending the loop here, so it
-            // meets the same unsaved-changes check as the other routes.
+            // Push SDL_EVENT_QUIT so it goes through the unsaved-changes check.
             if (event.key.key == SDLK_Q)
             {
                 SDL_Event quit; // .init zeroes the union
@@ -165,8 +150,7 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
                 ui_open_dialog();
                 break;
             }
-            // Ctrl+Tab is caught here so it never reaches ddui as a focus
-            // step.
+            // Handle Ctrl+Tab here so ddui doesn't take it as a focus step.
             if (event.key.key == SDLK_T)
             {
                 ui_new_tab();
@@ -182,12 +166,8 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
                 ui_cycle_tab(event.key.mod & SDL_KMOD_SHIFT ? -1 : 1);
                 break;
             }
-            // Ctrl+\ is what VS Code splits with, Shift stacking the new
-            // pane under the old one instead of alongside; Ctrl+1..9 is
-            // the editor-group binding rather than the browser tab one.
-            // On a layout that puts backslash behind AltGr neither fires,
-            // and the omnibar's "Split Pane Right" / "Down" are the route
-            // that always works.
+            // Ctrl+\ splits (VS Code), Shift splits down; Ctrl+1..9 focuses panes.
+            // Layouts with backslash behind AltGr can use the omnibar's split commands.
             if (event.key.key == SDLK_BACKSLASH)
             {
                 if (event.key.mod & SDL_KMOD_SHIFT)
@@ -201,8 +181,7 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
                 ui_focus_pane(event.key.key - SDLK_1);
                 break;
             }
-            // Shift forces the Save As dialog; plain Ctrl+S writes in
-            // place, falling back to the dialog when there is no path yet.
+            // Ctrl+S saves in place (dialog if no path); Shift forces Save As.
             if (event.key.key == SDLK_S)
             {
                 if (event.key.mod & SDL_KMOD_SHIFT)
@@ -219,9 +198,8 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
                     ui_cut();
                 break;
             }
-            // Shift copies the text lane instead of the hex one. Caught
-            // here because Shift leaves the keycode alone: left to muiKey
-            // both chords would arrive as MU_KEY_COPY.
+            // Shift copies the text lane. Handled here: Shift doesn't change the keycode,
+            // so muiKey would give MU_KEY_COPY for both.
             if (event.key.key == SDLK_C)
             {
                 if (event.key.mod & SDL_KMOD_SHIFT)
@@ -248,9 +226,8 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
                     ui_mark_toggle();
                 break;
             }
-            // ddhx's skip-back / skip-forward, caught here so the arrow
-            // never reaches the panel, which would step one nibble.
-            // Shift selects the run crossed rather than jumping over it.
+            // ddhx skip back/forward; intercepted so the panel doesn't step a nibble.
+            // Shift selects the skipped run.
             if (event.key.key == SDLK_LEFT || event.key.key == SDLK_RIGHT)
             {
                 ui_skip_element(event.key.key == SDLK_LEFT, (event.key.mod & SDL_KMOD_SHIFT) != 0);
@@ -269,8 +246,7 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
     }
 }
 
-/// Keys that cannot be a keystroke on their own, either half of a chord or a mode
-/// the keyboard latches. Only used to decide what dismisses a status message.
+/// Modifier and lock keys. Only used to decide what dismisses a status message.
 private bool modifierKey(SDL_KeyCode key)
 {
     switch (key)
@@ -287,14 +263,11 @@ private bool modifierKey(SDL_KeyCode key)
     }
 }
 
-/// Map an SDL3 keycode for the omnibar's text box (0 if unmapped).
+/// SDL3 keycode to omnibar key (0 if unmapped).
 ///
-/// The panel's map below sends arrows and paging keys as HEX_KEY_* bits, several
-/// of which collide with ddui's editing keys (HEX_KEY_HOME shares a bit with
-/// MU_KEY_DELETE): right for the grid, wrong for a text box.
-///
-/// Copy / cut / paste / select-all are mapped from the bare letters, ddui only
-/// honouring those bits while Ctrl is held.
+/// Separate from muiKey: its HEX_KEY_* bits collide with ddui's editing keys
+/// (HEX_KEY_HOME == MU_KEY_DELETE). ddui only honours copy/cut/paste/select-all
+/// while Ctrl is held.
 private int omniKey(SDL_KeyCode key)
 {
     switch (key)
@@ -310,12 +283,11 @@ private int omniKey(SDL_KeyCode key)
     case SDLK_END:                   return MU_KEY_END;
     case SDLK_DELETE:                return MU_KEY_DELETE;
     case SDLK_C:                     return MU_KEY_COPY;      // with Ctrl
-    case SDLK_X:                     return MU_KEY_CUT;       // ditto
-    case SDLK_V:                     return MU_KEY_PASTE;     // ditto
-    case SDLK_A:                     return MU_KEY_SELECTALL; // ditto
-    // Reached before the Ctrl+Tab that cycles tabs, which is tested further down
-    // the event handler: while the box is up it owns the keyboard, and this is the
-    // key that fills it in from the row the list is on.
+    case SDLK_X:                     return MU_KEY_CUT;
+    case SDLK_V:                     return MU_KEY_PASTE;
+    case SDLK_A:                     return MU_KEY_SELECTALL;
+    // Fills in the selected row. Checked before Ctrl+Tab since the box owns the
+    // keyboard.
     case SDLK_TAB:                   return MU_KEY_TAB;
     case SDLK_UP:                    return OMNI_KEY_UP;
     case SDLK_DOWN:                  return OMNI_KEY_DOWN;
@@ -325,7 +297,7 @@ private int omniKey(SDL_KeyCode key)
     }
 }
 
-/// Map an SDL3 mouse button to a ddui mouse flag (0 if unmapped).
+/// SDL3 mouse button to ddui flag (0 if unmapped).
 private int mouseButton(SDL_MouseButton button)
 {
     switch (button)
@@ -337,11 +309,9 @@ private int mouseButton(SDL_MouseButton button)
     }
 }
 
-/// Map an SDL3 keycode to ddui key flags (0 if unmapped). Modifiers come from
-/// their own keycodes rather than the event's mod mask, so each physical key
-/// toggles its bit symmetrically: on a modifier's key-up SDL3 reports the mask
-/// with that bit already cleared, which left the bit stuck held in ddui. ddui
-/// reads that held state itself, so Shift+Right needs only the arrow here.
+/// SDL3 keycode to ddui key flags (0 if unmapped). Modifiers come from their
+/// keycodes, not the event's mod mask: SDL3 clears the bit before key-up, which
+/// left it stuck in ddui.
 private int muiKey(SDL_KeyCode key)
 {
     switch (key)
@@ -362,8 +332,8 @@ private int muiKey(SDL_KeyCode key)
     case SDLK_PAGEDOWN:              return HEX_KEY_PGDN;
     case SDLK_INSERT:                return HEX_KEY_INS;
     case SDLK_DELETE:                return HEX_KEY_DEL;
-    case SDLK_Z:                     return HEX_KEY_UNDO; // undo when Ctrl is held
-    case SDLK_Y:                     return HEX_KEY_REDO; // redo when Ctrl is held
+    case SDLK_Z:                     return HEX_KEY_UNDO; // assumes with Ctrl
+    case SDLK_Y:                     return HEX_KEY_REDO; // assumes with Ctrl
     default:                         return 0;
     }
 }

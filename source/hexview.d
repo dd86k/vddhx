@@ -1,20 +1,16 @@
-/// A hex panel widget for ddui.
+/// Hex panel widget for ddui: offset, hex and text columns in a monospace face.
 ///
-/// The classic three columns (offset / hex / ASCII) in a monospace face, tinted
-/// through a caller-supplied colour scheme, with a selection the caller can read
-/// back. It rides on a ddui panel container for clipping and wheel routing, but
-/// scrolls in row units - a multi-gigabyte file overflows a pixel offset - and
-/// draws its rows by hand, so only the bytes on screen are ever touched.
+/// Uses a ddui panel for clipping and wheel routing, but scrolls in rows (pixel
+/// offsets overflow on multi-gigabyte files) and draws rows manually, touching
+/// only visible bytes.
 /// Authors: dd86k <dd@dax.moe>
 module hexview;
 
 import ddui;
 import core.time : MonoTime, msecs;
 
-/// Extra ddui key bits for the hex panel's caret. ddui's own MU_KEY_* flags
-/// stop at (1 << 5); these carry on from there so both can share ctx.key_down.
-/// main.d maps the arrow / paging keys onto them. Kept as a bitmask (rather than
-/// distinct codes) to match how ddui feeds keys, one OR per pressed key.
+/// Caret key bits, above ddui's MU_KEY_* (to 1 << 5) so both share
+/// ctx.key_down. Mapped by main.d. Bitmask to match ddui's key input.
 enum
 {
     HEX_KEY_LEFT  = (1 << 6),   // @suppress(dscanner.style.undocumented_declaration)
@@ -31,151 +27,117 @@ enum
     HEX_KEY_REDO  = (1 << 17),  // @suppress(dscanner.style.undocumented_declaration)
 }
 
-/// Per-byte colour hook. Return the colour for the byte at `offset` (its value
-/// is passed so the common "colour by value" schemes need no buffer access).
-/// `user` is the pointer handed to HexView.colorUser, for schemes that need
-/// outside context (a type map, a diff mask, a search hit set...).
+/// Glyph colour for the byte at `offset`. `value` saves a buffer read;
+/// `user` is HexView.colorUser.
 alias HexColorFn = mu_Color function(size_t offset, ubyte value, void* user);
 
-/// Per-byte background hook (`user` is HexView.backUser). Return the wash to fill
-/// the byte's cell with before its glyphs go down, or any colour with alpha 0 for
-/// none; runs of one colour are drawn as a single band.
+/// Background for the byte at `offset` (`user`: HexView.backUser), alpha 0 for
+/// none. Same-colour runs draw as one band.
 ///
-/// Separate from HexColorFn because the two answer different questions: the
-/// foreground says what a byte *is*, the background what has been *done* to it
-/// (marked, hit by a find). Overloading the first for the second costs it on
-/// exactly the bytes the user singled out.
+/// Separate from HexColorFn: foreground is what a byte is, background is what
+/// was done to it (marked, found).
 alias HexBackFn = mu_Color function(size_t offset, ubyte value, void* user);
 
-/// Ditto, asked of a whole span for the minimap: the wash for the run of `length`
-/// bytes from `at`, or alpha 0 when no byte in it carries one.
-///
-/// The ribbon cannot go through HexBackFn per byte, one cell standing for a
-/// segment that may be gigabytes, nor through the sampled read hex_dominant uses,
-/// which would step over a short mark. So it asks the span outright.
+/// Ditto for a minimap span: wash for `length` bytes from `at`, alpha 0 if none.
+/// Needed since cells may cover gigabytes and sampling would miss short marks.
 alias HexBackSpanFn = mu_Color function(long at, long length, void* user);
 
-/// Text-lane hook: the characters byte `value` reads as, empty for one the set has
-/// no character for, which draws as a dot. `user` is HexView.textUser; null falls
-/// back to printable ASCII.
-///
-/// A slice rather than a char because a single-byte set still reaches outside
-/// ASCII - CP437's box drawing, EBCDIC's accents - and one column of those arrives
-/// as several UTF-8 bytes.
+/// Text lane: characters for `value`, empty to draw a dot. `user` is
+/// HexView.textUser. A slice since single-byte sets reach beyond ASCII (CP437,
+/// EBCDIC) and encode as several UTF-8 bytes.
 alias HexTextFn = const(char)[] function(ubyte value, void* user);
 
-/// The extent of one structure span, and the colour its border is drawn in.
+/// A structure field or record the panel draws a border around, as returned
+/// by HexSpanFn. Not the selection.
 struct HexSpan
 {
+    /// Absolute document offset (not shifted by baseAddress). Cells with the
+    /// same start share one border.
     long start;
-    long length;
-    mu_Color edge;
+    long length;    /// In bytes.
+    mu_Color edge;  /// Border colour.
 }
 
-/// Structure hook: the span covering `pos` at nesting level `level`, counted inwards
-/// from the outermost - 0 the record at the top, 1 whatever of it holds the byte - or
-/// false when nothing covers it. `user` is HexView.spanUser.
+/// Structure hook: span covering `pos` at `level`, counted from the outermost
+/// (0: top-level record), or false. `user` is HexView.spanUser.
 ///
-/// From the outside rather than from the byte, because that is the question a border
-/// grouping a record asks. A chunk's length field and a byte deep in its payload sit
-/// at different depths, so counting outwards from each would put them in different
-/// boxes; counted inwards they are both in the chunk, which is where they are.
-///
-/// It answers with an extent rather than a colour to join neighbouring cells by, which
-/// is what separates it from HexBackFn: two fields of one kind side by side are two
-/// fields, and joining them by what they look like would draw one box where the
-/// document has two. Cells join only when their spans begin in the same place.
-///
-/// It is asked by offset alone, never about a byte's value, so the panel can ask it
-/// about the rows above and below the one it is drawing - which is what lets a field
-/// spanning several rows come out as one region rather than as a box per row.
+/// Counted from the top so all bytes of a record share a border regardless of
+/// depth. Returns an extent, not a colour: adjacent same-kind fields are still
+/// separate boxes; cells join only when their spans start at the same place.
+/// Offset-only, so rows above and below can be queried to merge multi-row
+/// spans.
 alias HexSpanFn = bool function(long pos, int level, ref HexSpan span, void* user);
 
-/// On-demand byte source, for showing a slice of something too large to hold in
-/// memory. Fill `buf` from document offset `pos` and return the bytes actually
-/// read (a short slice at EOF is fine); `user` is HexView.readUser. With this set
-/// the panel pulls only the on-screen rows through it and ignores `data`.
+/// On-demand byte source: fill `buf` from `pos`, return what was read (short at
+/// EOF). `user` is HexView.readUser. When set, only visible rows are read and
+/// `data` is ignored.
 alias HexReadFn = ubyte[] function(long pos, ubyte[] buf, void* user);
 
-/// Overwrite hook: set the byte at document offset `pos` to `value`. Supply this
-/// alongside insertFn and removeFn to make a HexView editable; see
-/// HexView.replaceFn. `user` is HexView.writeUser.
+/// Overwrite the byte at `pos`. With insertFn and removeFn, makes a HexView
+/// editable. `user` is HexView.writeUser.
 alias HexReplaceFn = void function(long pos, ubyte value, void* user);
 
-/// Insert hook: splice `value` in as a fresh byte at document offset `pos`,
-/// shifting the rest of the document up by one. See HexView.insertFn.
+/// Insert a byte at `pos`.
 alias HexInsertFn = void function(long pos, ubyte value, void* user);
 
-/// Remove hook: drop `len` bytes starting at document offset `pos`. See
-/// HexView.removeFn.
+/// Remove `len` bytes at `pos`.
 alias HexRemoveFn = void function(long pos, long len, void* user);
 
-/// Undo / redo hooks: step the document's edit history one entry, returning the
-/// offset the change touched (undo: the start of the region, redo: its end) so the
-/// panel can move the caret onto it, or -1 when there is nothing left to step.
+/// Step edit history; returns the touched offset (undo: region start, redo: its
+/// end) for the caret, or -1 if nothing left.
 alias HexUndoFn = long function(void* user);
 /// Ditto.
 alias HexRedoFn = long function(void* user);
 
-// Minimap ribbon geometry, plain-scrollbar geometry, and sampling budget.
 private enum
 {
-    MINIMAP_WIDTH = 16,  // ribbon width in pixels
-    MINIMAP_BLOCK = 3,   // pixels per cell (the pixelisation)
-    MINIMAP_PROBE = 256, // bytes sampled per cell, a fixed read budget
-    MINIMAP_VIEW_MIN = 14, // floor for the viewport marker so it stays a region
-    MINIMAP_VIEW_OUT = 2,  // px the marker overhangs each ribbon edge, for visibility
-    SCROLLBAR_WIDTH = 14,   // plain scroll strip width (minimap off)
-    SCROLLBAR_THUMB_MIN = 24, // floor for the plain thumb so it stays grabbable
-    WASH_EDGE_LIFT = 200, // how much brighter a wash's outline is, in percent
-    SPAN_PAD = 1, // gap a structure border keeps off its cells, so it reads as a box
-                  // round the bytes rather than as another gridline between them
-    MARGIN_HEX  = 2,    // px marging (bleed) for hex cells
-    MARGIN_TEXT = 1,    // px marging (bleed) for text characters
-                        // making this 2 makes overlapping lines visible due to a created gap
+    MINIMAP_WIDTH = 16,         // pixels
+    MINIMAP_BLOCK = 3,          // pixels per cell
+    MINIMAP_PROBE = 256,        // bytes sampled per cell
+    MINIMAP_VIEW_MIN = 14,      // min viewport marker height
+    MINIMAP_VIEW_OUT = 2,       // marker overhang per side
+    SCROLLBAR_WIDTH = 14,       // plain scrollbar (minimap off)
+    SCROLLBAR_THUMB_MIN = 24,   // min thumb height
+    WASH_EDGE_LIFT = 200,       // wash outline brightness, percent
+    SPAN_PAD = 1,               // border inset, so it boxes the cells instead of looking like a gridline
+    MARGIN_HEX  = 2,            // hex cell bleed
+    MARGIN_TEXT = 1,            // text cell bleed
+                                // NOTE: 2 leaves a visible gap where lines overlap
 }
 
-/// Wash behind the selected bytes, in the grid and on the minimap ribbon. The
-/// topmost of the panel's backgrounds: see the rendering priority in hex_draw_row.
+/// Selection wash, grid and minimap. Highest priority: see hex_draw_row.
 enum mu_Color HEX_SEL_WASH = mu_Color(48, 84, 140, 255);
 
-/// Widest row the panel will draw or fit itself to. Past this an offset stops
-/// being findable by eye, which is what the grid is for.
+/// Max row width, drawn or auto-fitted.
 enum int HEX_COLUMNS_MAX = 256;
 
-/// State and configuration for one hex panel. Persist it across frames (the
-/// selection lives here); the byte buffer and options can change frame to frame.
+/// Panel state and config. Persist across frames; data and options may change
+/// per frame.
 struct HexView
 {
-    /// The bytes on display when readFn is null. May be empty.
+    /// Displayed bytes when readFn is null.
     const(ubyte)[] data;
-    /// Bytes per row. Powers of two read most naturally; 16 is conventional.
+    /// Number of elements (usually bytes) per row.
     int columns = 16;
-    /// Fit `columns` to the panel instead of holding it, remeasured as the window
-    /// resizes. The count arrived at is written back to `columns`, so what a row
-    /// holds is one field either way - including between frames, where a caret move
-    /// has to divide by it and no panel has been measured yet.
+    /// Fit `columns` to the panel width. The result is written to `columns`, so
+    /// caret math between frames still works.
     bool autoColumns;
-    /// Address printed for the first byte, so a slice can show file offsets.
+    /// Address of the first byte, for showing file offsets of a slice.
     long baseAddress;
-    /// Minimum hex digits in the offset column, 8 fitting a 32-bit span. The panel
-    /// widens past this on its own when the highest address needs more.
+    /// Minimum offset digits; widened as needed.
     int offsetDigits = 8;
-    /// Show the minimap ribbon down the right edge, coloured through the same
-    /// scheme as the bytes; false shows a wider plain scrollbar instead. Read each
-    /// frame, so a toolbar can flip it.
+    /// Minimap ribbon; false shows a plain scrollbar instead. Read per frame.
     bool minimap = true;
 
-    /// Caret byte index (the moving end of the selection).
+    /// Caret, the moving end of the selection.
     size_t cursor;
-    /// Anchor byte index (the fixed end). The selection spans [anchor, cursor].
+    /// Fixed end. Selection is [anchor, cursor].
     size_t anchor;
-    /// Whether a caret / selection exists yet. Set on the first click or key.
+    /// Caret exists; set on the first click or key.
     bool active;
 
-    /// Hand the panel keyboard focus on the next frame it draws, for a caller that
-    /// puts a document in front from outside a frame - opening a file, switching
-    /// tabs - after which typing should land in the bytes. Cleared once honoured.
+    /// Take keyboard focus on the next draw (after opening a file or switching
+    /// tabs outside a frame). Cleared once done.
     bool takeFocus;
 
     /// Optional per-byte colour scheme. Null falls back to hex_classify.
@@ -185,157 +147,120 @@ struct HexView
 
     /// Optional per-byte background wash, drawn under the glyphs. See HexBackFn.
     HexBackFn backFn;
-    /// Span form of the same, for the minimap ribbon. Supply it alongside backFn to
-    /// have the wash show up there too; null leaves the ribbon coloured by class
-    /// alone. See HexBackSpanFn.
+    /// Minimap form of backFn; null leaves the ribbon class-coloured.
     HexBackSpanFn backSpanFn;
     /// Opaque pointer forwarded to both background hooks.
     void* backUser;
 
-    /// Optional character set for the text lane. Null reads printable ASCII and
-    /// draws the rest as dots. See HexTextFn.
+    /// Optional: printable ASCII, dots for the rest.
     HexTextFn textFn;
     /// Opaque pointer forwarded to textFn.
     void* textUser;
-    /// What the lane is headed with, naming the set textFn decodes.
+    /// Text lane header, the charset name.
     const(char)[] textLabel = "ascii";
 
-    /// Optional structure hook, drawing a border round the record each byte belongs
-    /// to. See HexSpanFn.
+    /// See HexSpanFn.
     HexSpanFn spanFn;
     /// Opaque pointer forwarded to spanFn.
     void* spanUser;
-    /// How many nesting levels get a border, outermost first; 0 draws none. One box
-    /// per record groups; a box per field as well only makes a grid out of a grid.
+    /// Bordered nesting levels from the outermost; 0 for none. More than 1 just
+    /// makes a grid of the grid.
     int spanDepth = 1;
 
-    /// Optional on-demand byte source. When set, the panel reads only the
-    /// visible rows through it and `data` is ignored; see HexReadFn.
+    /// See HexReadFn.
     HexReadFn readFn;
     /// Opaque pointer forwarded to readFn.
     void* readUser;
-    /// The owner's count of changes to the bytes behind readFn, bumped on every
-    /// edit: the cached window is only read again when it moves or this does.
-    /// Null reads every frame.
+    /// Owner's edit counter; the cached window is reread when it or the scroll
+    /// changes. Null: reread every frame.
     const(uint)* revision;
-    /// Total document size in bytes. Only consulted when readFn is set. The panel
-    /// keeps it in step with its own edits so a growing or shrinking file stays
-    /// consistent within the frame that changed it.
+    /// Document size, with readFn. Updated by the panel's own edits so it's
+    /// consistent within the frame.
     long dataSize;
 
-    /// Optional write hooks. Supply all three to make the panel editable: typing
-    /// hex digits edits the byte under the caret, Backspace/Delete remove bytes,
-    /// and Insert flips between overwrite and insert. Edits are addressed by
-    /// document offset against the same source the reads come from, so editing
-    /// implies the readFn path.
+    /// Write hooks; all three make the panel editable (hex digits, Backspace/
+    /// Delete, Insert toggles mode). Addressed by document offset, so editing
+    /// requires readFn.
     HexReplaceFn replaceFn;
     /// Ditto.
     HexInsertFn insertFn;
     /// Ditto.
     HexRemoveFn removeFn;
-    /// Opaque pointer forwarded to the write hooks (the editor, in practice).
+    /// Data pointer for the write and undo hooks.
     void* writeUser;
 
-    /// Optional undo / redo hooks, letting Ctrl+Z and Ctrl+Y (or Ctrl+Shift+Z) walk
-    /// the editor's history with the caret following the change. They take
-    /// HexView.writeUser like the write hooks. See HexUndoFn.
+    /// Undo/Redo hooks for Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z), caret follows. Takes writeUser.
     HexUndoFn undoFn;
     /// Ditto.
     HexRedoFn redoFn;
 
-    /// Insert vs overwrite entry. Overwrite (the default) edits the nibble under
-    /// the caret in place; insert splices a fresh byte in and pushes the rest up.
+    /// Insert splices bytes in; overwrite (default) edits in place.
     bool insertMode;
 
-    /// Refuse edits, the write hooks staying bound: the caret still moves.
+    /// Refuse edits. The caret can still move.
     bool readOnly;
 
-    /// Take no pointer or key input at all, only the wheel: whatever the caret is
-    /// waiting on will put it where it belongs.
+    /// Ignore all pointer and key input except the wheel.
     bool locked;
 
-    /// Byte the pointer is resting on this frame, or -1 for none. Written by hex_view
-    /// on every frame it draws, for a caller with something to say about the byte
-    /// under the pointer rather than the one under the caret.
-    ///
-    /// Only one panel can hold the pointer, so a caller with several of them can find
-    /// the hovered one by asking each rather than being told.
+    /// Byte under the pointer this frame, or -1. Set by hex_view. Only one panel
+    /// can be hovered.
     long hoverByte = -1;
 
     private:
 
-    // Index of the first visible row, the single source of truth for what is on
-    // screen. In rows rather than pixels, the grid's full pixel height blowing past
-    // a 32-bit int on a multi-gigabyte file. hex_view owns it.
+    // First visible row. Rows, not pixels: the pixel height overflows int on
+    // large files. Owned by hex_view.
     long topRow;
-    // Leftover wheel pixels below one row height, carried between frames so a slow
-    // wheel still advances when a notch is shorter than a row.
+    // Sub-row wheel remainder.
     int wheelAccum;
-    // Glyph columns the grid is scrolled right by, for a pane narrower than its
-    // rows. In glyphs rather than pixels so the left edge never halves one.
+    // Horizontal scroll, in glyphs so the edge never splits one.
     int leftCol;
     int wheelAccumX;
-    // Rows that fit on screen, measured by hex_view each frame. Kept here so a
-    // caret move driven from outside a frame (hex_set_caret) can scroll to it
-    // without the caller knowing the panel's geometry.
+    // Rows that fit, measured per frame; for hex_set_caret scrolling between
+    // frames.
     int visRows = 1;
-    // Where those rows start and how tall one is, measured alongside them. Ditto,
-    // for a caller that has to say how much of the panel something drawn over it
-    // covers, which it can only know in pixels.
+    // Row area top and row height, for callers measuring overlap in pixels.
     int bodyY;
     int rowHeight = 1;
-    // Ditto, sideways: glyph columns that fit, and the layout they were measured
-    // against, so hex_reveal can find the caret's pair between frames.
+    // Visible glyph columns and their layout, for hex_reveal between frames.
     int visCols = int.max;
     HexLayout gridLay;
-    // Grid width the last frame had, minus the scroll strip: what an auto column
-    // count is fitted to. Zero until the first frame measures one.
+    // Last grid width minus scrollbar, for auto columns. 0 until measured.
     int bodyW;
 
-    // Nibble sub-position within the caret byte: false means the next hex digit is
-    // the byte's high nibble, true its low. Reset on any caret move. editByte holds
-    // what the high nibble wrote, so the low one folds in without re-reading.
+    // Next hex digit is the low nibble; reset on caret moves. editByte holds the
+    // high nibble's result.
     bool editLow;
     ubyte editByte;
 
-    // Whether the mouse button now held went down inside this panel's grid, which
-    // is what a selection drag needs. Focus alone will not do: it can arrive
-    // between frames (see takeFocus), and a button held for something else - a tab
-    // being dragged across the window - would then sweep out a selection.
+    // Button went down inside this grid. Focus alone isn't enough: it can arrive
+    // between frames (takeFocus) while a button is held for something else (tab
+    // drag).
     bool dragSel;
-    // Edge scrolling while that drag is held past the grid: whole rows owed so far,
-    // and when they were last counted, so the pace follows the clock and not the
-    // frame rate.
+    // Edge scrolling during a drag: rows owed and last update, clock-paced.
     double edgeRows = 0;
     MonoTime edgeAt;
 
-    // Reused scratch for the visible window when reading through readFn, refilled
-    // every frame, so a huge document costs only a screenful of bytes here.
-    ubyte[] windowBuf;   // capacity, kept across frames
+    // Visible window read through readFn, refilled per frame.
+    ubyte[] windowBuf;   // kept across frames
     size_t windowStart;  // document offset of windowBuf[0]
-    size_t windowLen;    // valid bytes currently in windowBuf
-    uint windowRev;      // *revision when windowBuf was filled
-    void* windowUser;    // readUser it was filled from
+    size_t windowLen;    // valid bytes
+    uint windowRev;      // *revision at fill
+    void* windowUser;    // readUser at fill
 
-    // One colour per vertical minimap cell, each the dominant class of the file
-    // segment it covers. Rebuilt only when the document size or the cell count
-    // changes, so a still view redraws it for free.
+    // Minimap cell colours (dominant class per segment). Rebuilt only on size or
+    // cell count change.
     mu_Color[] mapCells;
-    size_t mapForSize;   // document size the cache was built for
-    int mapForCells;     // cell count the cache was built for
-    ubyte[] mapProbe;    // reused per-cell sampling scratch
+    size_t mapForSize;   // size at build
+    int mapForCells;     // cell count at build
+    ubyte[] mapProbe;    // sampling scratch
 }
 
-/// Copy `src` into a second panel onto the same bytes, for splitting a view in
-/// two: the caret, selection, scroll position, column count and entry mode all
-/// carry over, and the two then move independently.
-///
-/// A plain struct copy will not do - the scratch buffers refilled every frame
-/// would have each panel drawing through whatever the other last put there - so
-/// they are dropped here and reallocated on the new panel's first frame.
-///
-/// The hooks come across carrying the source panel's user pointers, so a caller
-/// routing them per view has to point them at the new one before it draws.
+/// Copy a panel for a split view: caret, selection, scroll, columns and mode
+/// carry over. Per-frame scratch buffers are dropped (sharing them would mix
+/// the panels' reads). Hooks keep the source's user pointers; repoint them
+/// before drawing.
 HexView hex_split(ref HexView src)
 {
     HexView v = src;
@@ -375,27 +300,24 @@ unittest
     assert(b.insertMode);
     assert(b.topRow == 9);
 
-    // The scratch does not: the two panels must not share a byte of it.
+    // Scratch isn't shared...
     assert(b.windowBuf is null);
     assert(b.windowLen == 0);
     assert(b.mapCells is null);
     assert(b.mapForCells == 0);
 
-    // ... and the source keeps its own.
+    // ...and the source keeps its own.
     assert(a.windowBuf.length == 64);
     assert(a.mapCells.length == 8);
 }
 
-/// Whether a selection drag is running a panel past its edge. Nothing else moves
-/// while the pointer holds still out there, so the loop must keep drawing.
+/// Whether a drag is edge-scrolling; the loop must keep drawing.
 bool hex_edge_scrolling()
 {
     return edgeLast != MonoTime.init && MonoTime.currTime - edgeLast < 100.msecs;
 }
 
-/// Scroll the view back to the top. Call when a fresh document is loaded so the
-/// panel never inherits the previous file's scroll offset and strands the caret
-/// (which the caller has just reset to the first byte) off screen.
+/// Scroll to the top. Call on loading a document so the caret isn't stranded.
 void hex_reset_scroll(ref HexView v)
 {
     v.topRow     = 0;
@@ -404,24 +326,16 @@ void hex_reset_scroll(ref HexView v)
     v.wheelAccumX = 0;
 }
 
-/// Document offset of the first byte on screen.
-///
-/// For a caller keeping two panels in step - a byte-for-byte comparison. In
-/// offsets rather than rows because two panels need not agree on their bytes per
-/// row, and it is the byte the user is looking at that has to match.
+/// Offset of the first visible byte. For syncing panels (diff); offsets, since
+/// panels may differ in columns.
 long hex_top_offset(ref const(HexView) v)
 {
     int cols = v.columns > 0 ? v.columns : 16;
     return v.topRow * cols;
 }
 
-/// Ditto, the other way: scroll so that the row holding `offset` is the first on
-/// screen. Rounded down, a panel scrolling by whole rows, and the pending sub-row
-/// wheel movement is dropped rather than dragging the panel off the row it was
-/// just put on.
-///
-/// No clamping here - what fits on screen is only known while drawing - so an
-/// offset past the end is safe to ask for and the next frame pulls it back.
+/// Scroll so the row holding `offset` is on top (rounded down to the row),
+/// dropping pending wheel movement. Unclamped; the next frame clamps it.
 void hex_set_top_offset(ref HexView v, long offset)
 {
     int cols = v.columns > 0 ? v.columns : 16;
@@ -440,7 +354,7 @@ unittest
     assert(v.topRow == 16);
     assert(hex_top_offset(v) == 0x100);
 
-    // One mid-row puts that row on top: 0x10a is in the row starting at 0x100.
+    // Mid-row offset: its row goes on top (0x10a -> 0x100).
     hex_set_top_offset(v, 0x10a);
     assert(hex_top_offset(v) == 0x100);
 
@@ -448,12 +362,11 @@ unittest
     hex_set_top_offset(v, 0x200);
     assert(v.wheelAccum == 0);
 
-    // A negative offset is the top, not a negative row.
+    // Negative: top.
     hex_set_top_offset(v, -32);
     assert(v.topRow == 0);
 
-    // Two panels at different widths agree on the byte, not on the row: the same
-    // offset is row 16 in one and row 8 in the other.
+    // Panels of different widths agree on the byte: row 16 in one, 8 in the other.
     HexView wide;
     wide.columns = 32;
     hex_set_top_offset(wide, hex_top_offset(v) + 0x100);
@@ -461,7 +374,7 @@ unittest
     assert(hex_top_offset(wide) == 0x100);
 }
 
-/// Total byte count on display, from the editor size or the in-memory slice.
+/// Byte count: editor size or slice length.
 size_t hex_total(ref const(HexView) v)
 {
     if (v.readFn)
@@ -469,8 +382,7 @@ size_t hex_total(ref const(HexView) v)
     return v.data.length;
 }
 
-// One byte at a document offset, from the window scratch or the in-memory slice.
-// Offsets outside the filled window read as zero (e.g. an unmapped page).
+// Byte at an offset, from the window or slice. Outside the window reads 0.
 private ubyte hex_byte(ref const(HexView) v, size_t idx)
 {
     if (v.readFn)
@@ -481,20 +393,18 @@ private ubyte hex_byte(ref const(HexView) v, size_t idx)
     return v.data[idx];
 }
 
-/// Lowest selected byte index (== highest when it is a bare caret).
+/// Lowest selected index (== highest for a bare caret).
 size_t hex_sel_low(ref const(HexView) v)
 {
     return v.cursor < v.anchor ? v.cursor : v.anchor;
 }
 
-/// Highest selected byte index.
 size_t hex_sel_high(ref const(HexView) v)
 {
     return v.cursor > v.anchor ? v.cursor : v.anchor;
 }
 
-/// Map a hex digit to its 0-15 value, or -1 for anything else. Public so a caller
-/// reading hex text of its own (a clipboard paste) agrees on what a digit is.
+/// Hex digit value 0-15, or -1. Public for callers parsing hex (paste).
 int hex_nibble(char c)
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -511,30 +421,27 @@ unittest
     assert(hex_nibble('f') == 15);
     assert(hex_nibble('A') == 10);
     assert(hex_nibble('F') == 15);
-    assert(hex_nibble('g') == -1); // past 'f'
-    assert(hex_nibble('/') == -1); // just below '0'
+    assert(hex_nibble('g') == -1);
+    assert(hex_nibble('/') == -1);
     assert(hex_nibble(' ') == -1);
 }
 
-/// Drop the caret on `pos`, collapsing the selection onto it and scrolling it
-/// into view. For callers that change the document from outside the panel - a
-/// paste, say - and need the caret to follow the result. Set dataSize first so
-/// the clamp sees the new size.
+/// Collapse the selection to `pos` and scroll to it. For outside changes
+/// (paste). Set dataSize first.
 void hex_set_caret(ref HexView v, size_t pos)
 {
     size_t total = hex_total(v);
-    if (pos > total) // the append slot past the last byte is a valid caret
+    if (pos > total) // append slot is valid
         pos = total;
     v.cursor  = pos;
     v.anchor  = pos;
     v.active  = true;
-    v.editLow = false; // an outside edit ends any half-typed byte
+    v.editLow = false; // cancels a half-typed byte
     hex_reveal(v, pos, v.columns > 0 ? v.columns : 16, v.visRows);
 }
 
-/// Ditto, leaving the anchor where it is so the selection grows over `pos`
-/// instead of collapsing onto it: the Shift half of a chord the panel does not
-/// handle itself.
+/// Ditto, keeping the anchor so the selection extends (Shift chords handled
+/// outside).
 void hex_extend_caret(ref HexView v, size_t pos)
 {
     size_t total = hex_total(v);
@@ -546,10 +453,7 @@ void hex_extend_caret(ref HexView v, size_t pos)
     hex_reveal(v, pos, v.columns > 0 ? v.columns : 16, v.visRows);
 }
 
-/// Which row the panel is scrolled to, and how to put it back. For a caller holding
-/// a position to return to - the omnibar, restoring a browse it moved the caret for;
-/// where the panel sits is its own business the rest of the time, and the next draw
-/// clamps whatever is set here against the document.
+/// Scroll row, to save and restore (omnibar browsing). Clamped on next draw.
 long hex_top(ref const(HexView) v)
 {
     return v.topRow;
@@ -560,13 +464,9 @@ void hex_set_top(ref HexView v, long row)
     v.topRow = row;
 }
 
-/// Scroll `pos`'s row to the middle of the panel, taking everything above `coversTo`
-/// - a window y, for a floating box drawn over the grid - as hidden.
-///
-/// What hex_set_caret's own reveal cannot do: that scrolls the least that brings a
-/// row inside the panel, so a caret moved from the omnibar lands wherever it was
-/// nearest - which is under the box, that being what moved it. Only the panel knows
-/// where its rows fall, so the caller says what covers them and this counts them.
+/// Centre `pos`'s row in the part of the panel below window y `coversTo` (a
+/// floating box over the grid). hex_set_caret scrolls minimally, which can land
+/// under the box.
 void hex_center(ref HexView v, size_t pos, int coversTo = 0)
 {
     int hidden;
@@ -574,7 +474,7 @@ void hex_center(ref HexView v, size_t pos, int coversTo = 0)
         hidden = (coversTo - v.bodyY + v.rowHeight - 1) / v.rowHeight;
 
     int rows = v.visRows - hidden;
-    if (rows < 1) // covered but for a sliver: put the row in what is left of it
+    if (rows < 1) // mostly covered: use what's left
         rows = 1;
 
     int cols = v.columns > 0 ? v.columns : 16;
@@ -589,31 +489,29 @@ unittest
     v.columns = 16;
     v.visRows = 20;
     v.bodyY = 100;
-    v.rowHeight = 10; // so the panel runs from y=100 to y=300
+    v.rowHeight = 10; // panel from y=100 to 300
 
-    // Nothing over it: row 50 sits ten rows down, the middle of twenty.
+    // Uncovered: row 50 goes 10 rows down (middle of 20).
     hex_center(v, 50 * 16);
     assert(v.topRow == 40);
-    hex_center(v, 50 * 16, 90); // a box ending above the grid covers no row of it
+    hex_center(v, 50 * 16, 90); // box above the grid covers nothing
     assert(v.topRow == 40);
 
-    // Half of it covered, the row goes to the middle of the half that is left: ten
-    // rows hidden, then five of the ten below them.
+    // Half covered: middle of the remaining half (10 hidden, then 5).
     hex_center(v, 50 * 16, 200);
     assert(v.topRow == 35);
 
-    // A row is covered as soon as any of it is: one pixel further down and the row
-    // it clips counts as hidden.
+    // Partially covered rows count as hidden.
     hex_center(v, 50 * 16, 190);
     assert(v.topRow == 36);
     hex_center(v, 50 * 16, 191);
     assert(v.topRow == 35);
 
-    // Near the top there is nothing to scroll back to.
+    // Near the top: no scroll.
     hex_center(v, 3 * 16);
     assert(v.topRow == 0);
 
-    // Covered whole, the row lands on the last sliver rather than nowhere.
+    // Fully covered: last sliver.
     hex_center(v, 50 * 16, 300);
     assert(v.topRow == 30);
 }
@@ -631,54 +529,48 @@ unittest
     assert(hex_sel_low(v) == 3);
     assert(hex_sel_high(v) == 9);
 
-    // A bare caret: low and high collapse onto the same byte.
+    // Bare caret: low == high.
     v.cursor = 7;
     v.anchor = 7;
     assert(hex_sel_low(v) == 7);
     assert(hex_sel_high(v) == 7);
 }
 
-/// Default colour scheme: dim the padding zeros, keep printable ASCII bright, and tell
-/// control bytes apart from the ones ASCII does not cover, so structure in a binary
-/// (strings, runs of zeros, tables) is legible at a glance.
-///
-/// Reads a byte as ASCII, this being the panel's own default; a host colouring by some
-/// other encoding hands in a colorFn of its own.
+/// Default colours by ASCII class: dim zeros, bright printable, controls
+/// distinct from non-ASCII. Other encodings supply their own colorFn.
 mu_Color hex_classify(size_t offset, ubyte value, void* user)
 {
     if (value == 0)
-        return mu_Color(90, 90, 100, 255);         // padding / null
+        return mu_Color(90, 90, 100, 255);         // zero
     if (value >= 0x20 && value < 0x7f)
-        return mu_Color(220, 220, 220, 255);        // printable ASCII
+        return mu_Color(220, 220, 220, 255);        // printable
     if (value == '\t' || value == '\n' || value == '\r')
-        return mu_Color(120, 170, 200, 255);        // whitespace controls
+        return mu_Color(120, 170, 200, 255);        // whitespace
     if (value < 0x20 || value == 0x7f)
-        return mu_Color(200, 130, 90, 255);         // other control bytes, DEL included
-    return mu_Color(150, 190, 130, 255);            // outside ASCII (>= 0x80)
+        return mu_Color(200, 130, 90, 255);         // control, DEL
+    return mu_Color(150, 190, 130, 255);            // >= 0x80
 }
 
 unittest
 {
-    assert(hex_coleq(hex_classify(0, 0, null),    mu_Color(90, 90, 100, 255)));  // null
-    assert(hex_coleq(hex_classify(0, 'A', null),  mu_Color(220, 220, 220, 255))); // printable
-    assert(hex_coleq(hex_classify(0, '\n', null), mu_Color(120, 170, 200, 255))); // whitespace
-    assert(hex_coleq(hex_classify(0, 0x01, null), mu_Color(200, 130, 90, 255)));  // control
+    assert(hex_coleq(hex_classify(0, 0, null),    mu_Color(90, 90, 100, 255)));
+    assert(hex_coleq(hex_classify(0, 'A', null),  mu_Color(220, 220, 220, 255)));
+    assert(hex_coleq(hex_classify(0, '\n', null), mu_Color(120, 170, 200, 255)));
+    assert(hex_coleq(hex_classify(0, 0x01, null), mu_Color(200, 130, 90, 255)));
     assert(hex_coleq(hex_classify(0, 0x7f, null), mu_Color(200, 130, 90, 255)));  // DEL
-    assert(hex_coleq(hex_classify(0, 0x80, null), mu_Color(150, 190, 130, 255))); // unmapped
+    assert(hex_coleq(hex_classify(0, 0x80, null), mu_Color(150, 190, 130, 255)));
 }
 
-/// Draw and drive a hex panel.
+/// Draw and handle a hex panel.
 ///
-/// Consumes a fixed header row plus a fill row from the current layout, so it
-/// wants a column or window with a bounded height to sit in. `font` is a monospace
-/// face handle (a TTF_Font*), and `reserveBottom` pixels are kept free below the
-/// panel for a caller-drawn status bar (0 fills to the container floor).
-/// Returns: MU_RES_CHANGE when the selection moved this frame, else 0.
+/// Takes a header row and a fill row from the layout; needs a bounded height.
+/// `font`: monospace TTF_Font*. `reserveBottom`: pixels kept free below for a
+/// status bar (0 fills).
+/// Returns: MU_RES_CHANGE if the selection moved, else 0.
 int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
     int reserveBottom = 0)
 {
-    // One glyph advance and one line height drive every placement below, and on a
-    // mono face measuring "0" is enough to get them.
+    // Monospace: "0" gives the advance.
     int charW = ctx.text_width(font, "0", 1);
     int rowH  = ctx.text_height(font);
     if (charW <= 0) charW = 1;
@@ -686,12 +578,9 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
 
     size_t total = hex_total(v);
 
-    // An auto count is fitted to the last frame's grid: the header is laid out
-    // before the body it labels exists, and the two have to agree on the count
-    // within a frame. A resize therefore lands a frame late, which is a frame
-    // nobody sees. The offset column is measured at its widest here - the document's
-    // last byte rather than its last row - so the fit can only come out
-    // conservative, never a column wider than the pane.
+    // Auto columns use last frame's width: the header is laid out before the body
+    // and both need the same count, so resizes lag a frame. Fitted with the widest
+    // offset (last byte), so it can't overflow.
     if (v.autoColumns && v.bodyW > 0)
         v.columns = hex_fit_columns(v.bodyW, charW,
             hex_fit_digits(cast(ulong)(v.baseAddress + total), v.offsetDigits));
@@ -699,36 +588,30 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
     int cols = v.columns > 0 ? v.columns : 16;
     long rows  = (cast(long) total + cols - 1) / cols;
 
-    // Widen the offset column to fit the last row's label. Without this a document
-    // past 0xffffffff loses its top nibbles to hex_format's fixed width.
+    // Widen for the last row's offset, else offsets past 0xffffffff lose digits.
     long lastRowOff = v.baseAddress + (rows > 0 ? (rows - 1) * cols : 0);
     int offsetDigits = hex_fit_digits(cast(ulong) lastRowOff, v.offsetDigits);
 
     HexLayout lay = hex_layout(offsetDigits, cols, charW);
 
-    // Fixed above the scroll area, so it never scrolls away vertically. Filled
-    // here, ahead of the panel whose frame borders it from a pixel inside this
-    // rect, and labelled after it: input in there can scroll the grid sideways,
-    // and the labels have to follow within the same frame. The fill is the panel's
-    // canvas rather than the caller's window colour, a transparent one drawing
-    // nothing and leaving that colour showing anyway.
+    // Header above the scroll area. Filled now, before the panel (whose border
+    // overlaps by a pixel), labelled after it since input can scroll sideways this
+    // frame. Uses the panel canvas colour; a transparent fill shows the window.
     int head = -1;
     mu_layout_row(ctx, 1, &head, rowH);
     mu_Rect headRect = mu_layout_next(ctx);
     mu_draw_rect(ctx, headRect, ctx.style.colors[MU_COLOR_PANELBG]);
 
-    // A negative row height fills to the container floor; pushing it up by
-    // reserveBottom plus a spacing gap leaves exactly that band free below, where
-    // the caller's next widget lands.
+    // Negative height fills to the floor; minus reserveBottom and spacing leaves
+    // the band free.
     int fill = -1;
     int panelH = reserveBottom > 0 ? -(reserveBottom + ctx.style.spacing + 1) : -1;
     mu_layout_row(ctx, 1, &fill, panelH);
 
     int res = 0;
 
-    // ddui tracks scroll offsets in 32-bit pixels, which the full height of a
-    // multi-gigabyte grid overflows. So the panel runs NOSCROLL and owns the strip
-    // on its right edge: the minimap ribbon, or a plain thumb with it off.
+    // ddui scroll is 32-bit pixels, which overflows on large files. So NOSCROLL,
+    // with our own strip: minimap or plain thumb.
     mu_begin_panel_ex(ctx, name, MU_OPT_NOSCROLL);
     {
         mu_Container* cnt = mu_get_current_container(ctx);
@@ -736,23 +619,20 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
 
         int visibleRows = body_.h / rowH;
         if (visibleRows < 1) visibleRows = 1;
-        // An editable full last row pushes the append slot onto a row of its own,
-        // which has to be reachable or the caret parks out of view.
+        // Editable with a full last row: the append slot needs its own row.
         long scrollRows = hex_editable(v) ? cast(long) total / cols + 1 : rows;
         long maxTop = scrollRows > visibleRows ? scrollRows - visibleRows : 0;
-        v.visRows = visibleRows; // for hex_set_caret, between frames
+        v.visRows = visibleRows; // for hex_set_caret
         v.bodyY = body_.y;
         v.rowHeight = rowH;
 
-        // Carve the scroll strip off the right edge; the grid takes the rest.
         int stripW = v.minimap ? MINIMAP_WIDTH : SCROLLBAR_WIDTH;
         mu_Rect strip = mu_Rect(body_.x + body_.w - stripW, body_.y, stripW, body_.h);
         body_.w -= stripW;
-        v.bodyW = body_.w; // what the next frame fits an auto count to
+        v.bodyW = body_.w; // for next frame's auto columns
 
-        // NOSCROLL means ddui no longer routes the wheel, so re-arm the target
-        // while the mouse is over the panel. It still folds the notch delta into
-        // cnt.scroll.y at frame end, which is drained into whole rows here.
+        // NOSCROLL: re-arm the wheel target while hovered. ddui still folds the delta
+        // into cnt.scroll.y; drained into rows here.
         if (mu_mouse_over(ctx, cnt.body_))
             ctx.scroll_target = cnt;
         if (cnt.scroll.y != 0)
@@ -780,8 +660,7 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
         int maxLeft = mu_max(0, lay.totalCols - v.visCols);
         v.leftCol = mu_clamp(v.leftCol, 0, maxLeft);
 
-        // Input can move the caret and reveal it, nudging topRow and leftCol;
-        // re-clamp after.
+        // Input may reveal the caret, moving topRow/leftCol; re-clamp.
         res = hex_input(ctx, name, v, lay, body_, rowH, cols, visibleRows);
         v.topRow = mu_clamp(v.topRow, 0L, maxTop);
         v.leftCol = mu_clamp(v.leftCol, 0, maxLeft);
@@ -797,8 +676,7 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
         mu_end_panel(ctx);
     }
 
-    // The same strip the panel carves off, so the two agree on the last usable
-    // column.
+    // Same strip width as the panel, so they agree on the last column.
     hex_header(ctx, v, lay, headRect, font, v.minimap ? MINIMAP_WIDTH : SCROLLBAR_WIDTH);
 
     return res;
@@ -806,21 +684,19 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
 
 private:
 
-// Character-grid origins, in glyph columns, shared by hit-testing and drawing.
-// The grid is one monospace sheet: offset column, a two-space gap, the hex pairs
-// (a blank between each, an extra after every 8), a two-space gap, then ASCII.
+// Grid geometry in glyph columns, for hit-testing and drawing: offset, two
+// spaces, hex pairs (space between, extra every 8), two spaces, text.
 struct HexLayout
 {
     int offsetDigits;
-    int hexStart;   // first glyph column of the hex area
-    int asciiStart; // first glyph column of the ASCII area
-    int totalCols;  // full grid width, for content_size.x
-    int charW;      // glyph advance, cached for pixel maths
+    int hexStart;
+    int asciiStart;
+    int totalCols;  // for content_size.x
+    int charW;      // cached
 }
 
-// Hex digits needed to print `maxOffset`, floored at `min`. ulong.max lands on
-// 16, which is also the widest the offset scratch in hex_draw_row holds, so no
-// separate cap is needed.
+// Hex digits for `maxOffset`, at least `min`. Max is 16 (ulong.max), which
+// the offset buffer in hex_draw_row fits.
 int hex_fit_digits(ulong maxOffset, int min)
 {
     import core.bitop : bsr;
@@ -833,21 +709,18 @@ int hex_fit_digits(ulong maxOffset, int min)
 unittest
 {
     assert(hex_fit_digits(0, 8) == 8);
-    assert(hex_fit_digits(0xffffffff, 8) == 8);  // fills 32 bits exactly, no growth
-    assert(hex_fit_digits(0x100000000, 8) == 9); // one past 0xffffffff
-    assert(hex_fit_digits(ulong.max, 8) == 16);  // the natural cap
+    assert(hex_fit_digits(0xffffffff, 8) == 8);  // exactly 32 bits
+    assert(hex_fit_digits(0x100000000, 8) == 9);
+    assert(hex_fit_digits(ulong.max, 8) == 16);
     assert(hex_fit_digits(0xf, 1) == 1);
     assert(hex_fit_digits(0x10, 1) == 2);
     assert(hex_fit_digits(0xfff, 2) == 3);
 
-    assert(hex_fit_digits(0, 0) == 8); // a bad floor falls back to 8
+    assert(hex_fit_digits(0, 0) == 8); // bad floor: 8
     assert(hex_fit_digits(0, -4) == 8);
 }
 
-// Most columns whose grid still fits `availW` pixels, at least one: the offset
-// column, the two two-space gaps, and per byte three glyphs of hex, one of text
-// and a group space every eight. The same arithmetic hex_layout lays out with,
-// solved the other way round.
+// Max columns fitting `availW` pixels, min 1. Inverse of hex_layout.
 int hex_fit_columns(int availW, int charW, int offsetDigits)
 {
     if (charW <= 0) charW = 1;
@@ -866,8 +739,7 @@ int hex_fit_columns(int availW, int charW, int offsetDigits)
 
 unittest
 {
-    // The fit and the layout are one sum: what comes back has to be the widest
-    // count whose grid ends inside the pane, and one more has to overrun it.
+    // Result fits, one more overflows.
     static void fits(int availW, int charW, int digits)
     {
         int cols = hex_fit_columns(availW, charW, digits);
@@ -881,20 +753,19 @@ unittest
         foreach (int cw; [7, 8, 11])
             fits(w, cw, 8);
 
-    // The conventional grid at an 8-digit offset is 77 columns of glyphs.
+    // 16 columns, 8-digit offset: 77 glyphs.
     assert(hex_fit_columns(77 * 8, 8, 8) == 16);
     assert(hex_fit_columns(77 * 8 - 1, 8, 8) == 15);
 
-    // A wider offset column is that many fewer bytes to the row.
+    // Wider offset: fewer bytes.
     assert(hex_fit_columns(77 * 8, 8, 16) < 16);
 
-    // Nothing fits, and a row is still a row: a panel too narrow for one byte
-    // draws the byte and clips it, rather than dividing offsets by zero.
+    // Too narrow: still 1 (clipped), no division by zero.
     assert(hex_fit_columns(0, 8, 8) == 1);
     assert(hex_fit_columns(-100, 8, 8) == 1);
-    assert(hex_fit_columns(1000, 0, 8) >= 1);   // a font that measures nothing
+    assert(hex_fit_columns(1000, 0, 8) >= 1);   // zero-width font
 
-    // And it stops before the grid stops being readable.
+    // Capped.
     assert(hex_fit_columns(int.max, 1, 8) == HEX_COLUMNS_MAX);
 }
 
@@ -905,15 +776,14 @@ HexLayout hex_layout(int offsetDigits, int cols, int charW)
     lay.offsetDigits = offsetDigits;
     lay.charW = charW;
     lay.hexStart = offsetDigits + 2;
-    // Each byte: 2 digits + 1 space = 3 cols; +1 extra space per completed group
-    // of 8. The last byte needs no trailing group space, hence (cols - 1) / 8.
+    // 3 glyphs per byte, plus a space per completed group of 8.
     int hexCols = cols * 3 + (cols - 1) / 8;
     lay.asciiStart = lay.hexStart + hexCols + 2;
     lay.totalCols = lay.asciiStart + cols;
     return lay;
 }
 
-// Glyph column where byte `i`'s hex pair begins.
+// Glyph column of byte `i`'s hex pair.
 int hex_col_for(ref const(HexLayout) lay, int i)
 {
     return lay.hexStart + i * 3 + i / 8;
@@ -921,23 +791,22 @@ int hex_col_for(ref const(HexLayout) lay, int i)
 
 unittest
 {
-    // 8-digit offset, 16 columns, 1px glyphs.
     HexLayout lay = hex_layout(8, 16, 1);
     assert(lay.offsetDigits == 8);
-    assert(lay.hexStart == 10);          // 8 offset digits + 2-space gap
-    assert(lay.asciiStart == 61);        // hexStart + 49 hex cols + 2-space gap
-    assert(lay.totalCols == 77);         // asciiStart + 16 ascii glyphs
+    assert(lay.hexStart == 10);          // 8 digits + 2
+    assert(lay.asciiStart == 61);        // + 49 hex + 2
+    assert(lay.totalCols == 77);         // + 16 text
 
-    assert(hex_col_for(lay, 0) == 10);   // first pair at hexStart
-    assert(hex_col_for(lay, 1) == 13);   // +3 cols per byte (2 digits + space)
-    assert(hex_col_for(lay, 8) == 35);   // +1 extra group space after the first 8
+    assert(hex_col_for(lay, 0) == 10);
+    assert(hex_col_for(lay, 1) == 13);   // +3 per byte
+    assert(hex_col_for(lay, 8) == 35);   // +1 group space after 8
 
     assert(hex_layout(0, 16, 1).offsetDigits == 8);
 }
 
 immutable char[16] HEX_DIGITS = "0123456789abcdef";
 
-// Write `digits` hex chars of `value` into buf (most significant first).
+// `digits` hex chars of `value` into buf, most significant first.
 void hex_format(char* buf, ulong value, int digits)
 {
     for (int i = digits - 1; i >= 0; --i)
@@ -954,20 +823,18 @@ unittest
     assert(buf[0 .. 8] == "deadbeef");
 
     hex_format(buf.ptr, 0, 4);
-    assert(buf[0 .. 4] == "0000"); // zero-padded to width
+    assert(buf[0 .. 4] == "0000"); // zero-padded
 
     hex_format(buf.ptr, 0x100000000UL, 9);
     assert(buf[0 .. 9] == "100000000");
 
     hex_format(buf.ptr, 0x100000000UL, 4);
-    assert(buf[0 .. 4] == "0000"); // too narrow: only the low nibbles survive
+    assert(buf[0 .. 4] == "0000"); // truncated to low nibbles
 }
 
-// Whether `chars` glyphs starting at `x` lie within `startX .. endX`. Text is
-// clipped by the pixel, so a label straddling a pane's edge comes out as half a
-// glyph, which reads as a digit rather than as nothing; a narrow or scrolled
-// pane stops on the last whole one instead. Rects (washes, the caret) are left
-// to the clip rect, having no half-legible state to fall into.
+// Whether `chars` glyphs at `x` fit within `startX .. endX`. Text clipped
+// mid-glyph is misleading, so partially visible labels are skipped. Rects are
+// left to the clip.
 bool hex_fits(int x, int chars, int charW, int startX, int endX)
 {
     return x >= startX && x + chars * charW <= endX;
@@ -975,20 +842,16 @@ bool hex_fits(int x, int chars, int charW, int startX, int endX)
 
 unittest
 {
-    assert(hex_fits(0, 2, 8, 0, 16));       // exactly reaches the edge
+    assert(hex_fits(0, 2, 8, 0, 16));       // reaches the edge
     assert(hex_fits(0, 2, 8, 0, 15) == false);
     assert(hex_fits(100, 5, 8, 0, 200));
-    assert(hex_fits(180, 5, 8, 0, 200) == false); // straddles it
-    assert(hex_fits(-8, 2, 8, 0, 200) == false);  // half scrolled out the left
+    assert(hex_fits(180, 5, 8, 0, 200) == false); // straddles
+    assert(hex_fits(-8, 2, 8, 0, 200) == false);  // half scrolled off
 }
 
-// Fixed column titles: the offset heading and the 00..0F byte-lane numbers,
-// drawn dim so they read as chrome rather than data, in `r`, a row laid out
-// above the grid and already filled in.
-//
-// `stripW` is the scroll strip the grid below gives up on its right edge; the
-// header row spans it, so without subtracting it a narrow pane labels one more
-// column than hex_paint has room to draw.
+// Dim column titles (offset, byte lanes) in `r`, the pre-filled header row.
+// `stripW`: the scroll strip under the header; subtract it or the header
+// labels a column the grid can't draw.
 void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     mu_Rect r, mu_Font font, int stripW)
 {
@@ -1008,15 +871,14 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     {
         int x = originX + hex_col_for(lay, i) * charW;
         if (x + 2 * charW > endX)
-            break; // columns only go rightwards
+            break; // past the edge
         if (hex_fits(x, 2, charW, r.x, endX) == false)
             continue;
         hex_format(cell.ptr, i & 0xff, 2);
         mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(x, r.y), dim);
     }
 
-    // The lane's heading names the set it is decoded through, that being the only
-    // place the setting shows: the bytes themselves are what changed.
+    // Text lane header shows the charset (its only display).
     const(char)[] label = v.textLabel.length ? v.textLabel : "ascii";
     int ax = originX + lay.asciiStart * charW;
     if (hex_fits(ax, cast(int) label.length, charW, r.x, endX))
@@ -1027,9 +889,7 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
 
 unittest
 {
-    // Drive real frames at widths that cut the grid mid-column and check every
-    // text command the header and the rows emit: none may cross the pane's edge,
-    // where the clip rect would halve a glyph.
+    // Real frames at widths cutting columns: no text may cross the pane edge.
     enum int CW = 8;
     static extern (C) int width(mu_Font f, const(char)* s, int len)
     {
@@ -1050,14 +910,11 @@ unittest
     v.columns = 16;
     HexLayout lay = hex_layout(8, 16, CW);
 
-    // The strip the grid gives up on its right edge: the header spans it, so it
-    // has to end that much earlier or it labels a column with no bytes under it.
+    // Header spans the strip; it must end before it.
     enum int STRIP = MINIMAP_WIDTH;
 
-    // Two-glyph draws on line `topY` are the header's column labels and the grid's
-    // byte pairs; the offset (8) and "ascii" (5) are longer, the ASCII lane
-    // shorter. Returns how many, and checks none of the line leaves
-    // `startX .. endX`.
+    // Count two-glyph draws on line `topY` (header labels, hex pairs) and check
+    // all text stays in `startX .. endX`.
     int columnsOn(int topY, int startX, int endX)
     {
         int drawn, columns;
@@ -1068,17 +925,16 @@ unittest
                 continue;
             ++drawn;
             int w = width(null, mu_command_text(&ctx, cmd), -1);
-            assert(cmd.text.pos.x >= startX);   // nor the scrolled-off one
-            assert(cmd.text.pos.x + w <= endX); // no glyph crosses the edge
+            assert(cmd.text.pos.x >= startX);
+            assert(cmd.text.pos.x + w <= endX);
             if (w == 2 * CW && cmd.text.pos.y == topY)
                 ++columns;
         }
-        assert(drawn > 0); // or the bounds above pass by drawing nothing
+        assert(drawn > 0); // else the checks pass vacuously
         return columns;
     }
 
-    // The header takes a full layout row, so its rect - not the window's - is what
-    // the grid has to be measured against.
+    // Measure against the header row rect, not the window.
     mu_Rect headerRect(int paneW)
     {
         mu_Rect r;
@@ -1095,7 +951,7 @@ unittest
         return r;
     }
 
-    // Scrolled sideways too, by whole pairs and to the middle of one.
+    // Also scrolled, by whole pairs and mid-pair.
     foreach (int leftCol; [0, 11, 13, 30])
     foreach (int paneW; [180, 260, 337, 400, 512, 640])
     {
@@ -1123,18 +979,15 @@ unittest
         mu_end(&ctx);
         int gridCols = columnsOn(20, hr.x, endX);
 
-        // The header must label exactly the columns the grid has room to draw.
+        // Header labels exactly the drawable columns.
         assert(headerCols > 0);
         assert(headerCols == gridCols);
     }
 }
 
-// Map a mouse position (screen space) to a byte index, or -1 if it misses a
-// cell. Both the hex pairs and the ASCII column are hittable.
-//
-// `snap` takes the gap after a hex pair as part of that pair, for anything tracking
-// the pointer as it moves: a third of the hex lane is gaps, and a hover that drops
-// out in each of them never settles.
+// Screen position to byte index, or -1. Hex and text columns are hittable.
+// `snap` assigns the gap after a pair to it, for hover tracking (a third of
+// the hex lane is gaps).
 long hex_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
     int cols, size_t total, int mx, int my, bool snap = false)
 {
@@ -1146,12 +999,10 @@ long hex_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
     long row = topRow + localY / rowH;
     int col = localX / lay.charW;
 
-    // ASCII column: one glyph per byte, contiguous.
     int ai = col - lay.asciiStart;
     if (ai >= 0 && ai < cols)
         return hex_index(row, cols, ai, total);
 
-    // Hex column: two glyphs per byte with gaps; walk the lanes to find a hit.
     for (int i; i < cols; ++i)
     {
         int start = hex_col_for(lay, i);
@@ -1161,11 +1012,8 @@ long hex_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
     return -1;
 }
 
-// hex_hit for a click or drag, which must not miss anywhere across the rows: a
-// click in a gap otherwise left the old selection standing, and a drag drifting
-// through one froze it until it drifted back. A gap takes the byte to its left,
-// the strip before the ASCII column the last pair, and anything past EOF the last
-// byte.
+// hex_hit for clicks and drags, never missing: gaps take the left byte, the
+// space before text the last pair, past EOF the last byte.
 long hex_drag_hit(ref const(HexLayout) lay, mu_Rect body, long topRow, int rowH,
     int cols, size_t total, int mx, int my)
 {
@@ -1191,24 +1039,23 @@ unittest
 {
     HexLayout lay = hex_layout(8, 16, 1);
     mu_Rect body = mu_Rect(0, 0, 200, 100);
-    int gap = hex_col_for(lay, 3) + 2; // the blank after pair 3
+    int gap = hex_col_for(lay, 3) + 2; // after pair 3
     assert(hex_hit(lay, body, 0, 1, 16, 100, gap, 2) == -1);
     assert(hex_drag_hit(lay, body, 0, 1, 16, 100, gap, 2) == 2 * 16 + 3);
-    int group = hex_col_for(lay, 8) - 1; // the extra blank after every 8
+    int group = hex_col_for(lay, 8) - 1; // group space after 8
     assert(hex_drag_hit(lay, body, 0, 1, 16, 100, group, 0) == 7);
     assert(hex_drag_hit(lay, body, 0, 1, 16, 100, 0, 0) == 0);              // offset column
     assert(hex_drag_hit(lay, body, 0, 1, 16, 100, lay.asciiStart - 1, 0) == 15);
     assert(hex_drag_hit(lay, body, 0, 1, 16, 100, lay.asciiStart + 99, 0) == 15);
     assert(hex_drag_hit(lay, body, 0, 1, 16, 100, gap, 50) == 99);          // past EOF
-    assert(hex_drag_hit(lay, body, 0, 1, 16, 100, gap, -1) == -1);          // above
+    assert(hex_drag_hit(lay, body, 0, 1, 16, 100, gap, -1) == -1);
 }
 
-// When any panel last edge-scrolled. A stamp rather than a flag, so a panel that
-// stops being drawn mid-drag cannot keep the loop free-running.
+// Last edge scroll time. A timestamp, so a panel no longer drawn mid-drag
+// can't keep the loop running.
 MonoTime edgeLast;
 
-// Rows a second for a pointer `past` pixels beyond the grid, doubling every two
-// rows further out: a nudge creeps, a long pull crosses gigabytes in seconds.
+// Rows per second for a pointer `past` pixels beyond the grid, doubling every two rows.
 double hex_edge_rate(int past, int rowH)
 {
     import std.math : exp2;
@@ -1220,13 +1067,13 @@ double hex_edge_rate(int past, int rowH)
 unittest
 {
     assert(hex_edge_rate(1, 20) > 8 && hex_edge_rate(1, 20) < 9);
-    assert(hex_edge_rate(-40, 20) == 16);  // either direction alike
+    assert(hex_edge_rate(-40, 20) == 16);  // symmetric
     assert(hex_edge_rate(400, 20) == 8192);
     assert(hex_edge_rate(int.max, 1) == hex_edge_rate(int.min + 1, 1)); // capped
 }
 
-// Whole rows to scroll this frame, signed like `past`. The first frame past the
-// edge only starts the clock.
+// Rows to scroll this frame, signed like `past`. The first frame starts the
+// clock.
 long hex_edge_scroll(ref HexView v, int past, int rowH)
 {
     MonoTime now = MonoTime.currTime;
@@ -1236,7 +1083,7 @@ long hex_edge_scroll(ref HexView v, int past, int rowH)
         v.edgeAt = now;
         return 0;
     }
-    // A stall (a slow frame, the window dragged) is not owed in rows.
+    // Don't catch up after stalls.
     double dt = (now - v.edgeAt).total!"usecs" / 1e6;
     if (dt > 0.1)
         dt = 0.1;
@@ -1267,31 +1114,28 @@ long hex_index(long row, int cols, int i, size_t total)
 unittest
 {
     assert(hex_index(0, 16, 0, 100) == 0);
-    assert(hex_index(1, 16, 2, 100) == 18);  // row*cols + i
-    assert(hex_index(6, 16, 3, 100) == 99);  // last valid byte
-    assert(hex_index(-1, 16, 0, 100) == -1); // negative row misses
-    assert(hex_index(6, 16, 4, 100) == -1);  // 100 >= total, past EOF
-    assert(hex_index(10, 16, 0, 100) == -1); // whole row past EOF
+    assert(hex_index(1, 16, 2, 100) == 18);
+    assert(hex_index(6, 16, 3, 100) == 99);  // last byte
+    assert(hex_index(-1, 16, 0, 100) == -1);
+    assert(hex_index(6, 16, 4, 100) == -1);  // past EOF
+    assert(hex_index(10, 16, 0, 100) == -1);
 }
 
-// Mouse and keyboard handling. Returns MU_RES_CHANGE when the selection moved.
+// Mouse and keyboard. Returns MU_RES_CHANGE if the selection moved.
 int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     ref const(HexLayout) lay, mu_Rect body, int rowH, int cols, int visibleRows)
 {
     mu_Id id = mu_get_id(ctx, name, cast(int) hex_strlen(name));
-    // Focus handed over between frames (see takeFocus) is claimed before
-    // mu_update_control, which is what keeps ddui from dropping it at frame end.
+    // Claim focus from takeFocus before mu_update_control, or ddui drops it.
     if (v.takeFocus)
     {
         v.takeFocus = false;
         mu_set_focus(ctx, id);
     }
-    // Hold focus so the caret keeps taking keys after the click is released,
-    // and join the tab ring so the panel is reachable without a mouse.
+    // Hold focus after release; tab stop for keyboard access.
     mu_update_control(ctx, id, body, MU_OPT_HOLDFOCUS | MU_OPT_TABSTOP);
 
-    // The button coming up ends any selection drag this panel had begun. Ahead of
-    // the bail-outs below, so an empty read-only panel cannot leave it set.
+    // Release ends this panel's drag. Before the early returns below.
     if ((ctx.mouse_down & MU_MOUSE_LEFT) == 0)
         v.dragSel = false;
     if (v.dragSel == false)
@@ -1306,23 +1150,18 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     int res = 0;
     size_t total = hex_total(v);
     bool editable = hex_editable(v);
-    // An empty read-only panel has nothing to drive; an empty editable one still
-    // takes digits to build a file from scratch, so only bail when both hold.
+    // Empty editable panels still take digits; only bail if read-only too.
     if (total == 0 && editable == false)
         return 0;
 
-    // Editing lets the caret park one slot past the last byte, an append point at
-    // EOF; a read-only view keeps it on a real byte.
+    // Editable: caret may sit on the append slot.
     long caretMax = editable ? cast(long) total : cast(long) total - 1;
 
     bool shift = (ctx.key_down & MU_KEY_SHIFT) != 0;
 
-    // Press places the caret, drag extends it. mu_mouse_over honours the panel
-    // clip, so presses on the scrollbar or header do not land here, and the drag
-    // arm asks whether the press landed in this grid rather than whether the panel
-    // has focus. See HexView.dragSel.
-    //
-    // The hits measure from where the grid starts, scrolled out of view or not.
+    // Press places the caret, drag extends. mu_mouse_over respects the clip
+    // (scrollbar, header excluded). Drags require the press in this grid, not
+    // focus: see HexView.dragSel. Hits are measured from the unscrolled origin.
     mu_Rect grid = body;
     grid.x -= v.leftCol * lay.charW;
     v.hoverByte = mu_mouse_over(ctx, body) ?
@@ -1331,7 +1170,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
 
     if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, body))
     {
-        v.dragSel = true; // this panel owns the drag until the button comes up
+        v.dragSel = true; // owns the drag until release
 
         long hit = hex_drag_hit(lay, grid, v.topRow, rowH, cols, total,
             ctx.mouse_pos.x, ctx.mouse_pos.y);
@@ -1341,14 +1180,13 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
             if (shift == false || v.active == false)
                 v.anchor = v.cursor;
             v.active = true;
-            v.editLow = false; // fresh caret starts on a byte's high nibble
+            v.editLow = false; // high nibble first
             res |= MU_RES_CHANGE;
         }
     }
     else if (v.dragSel && (ctx.mouse_down & MU_MOUSE_LEFT) && v.active)
     {
-        // Held past the top or bottom row, the view runs that way and the caret
-        // rides the edge row, so the selection grows past what fits on screen.
+        // Dragged past top/bottom: scroll, caret rides the edge row.
         int top = body.y;
         int bottom = body.y + visibleRows * rowH - 1;
         int my = ctx.mouse_pos.y;
@@ -1373,8 +1211,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         }
     }
 
-    // Keyboard caret. Shift keeps the anchor to grow a selection, otherwise it
-    // collapses onto the caret.
+    // Keyboard: Shift keeps the anchor.
     if (ctx.focus == id && ctx.key_pressed && v.active)
     {
         long dst = cast(long) v.cursor;
@@ -1383,9 +1220,8 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         int page = mu_max(1, (visibleRows - 1) * cols);
         bool ctrl = (ctx.key_down & MU_KEY_CTRL) != 0;
 
-        // Ctrl+Up/Down scrolls the grid and leaves the caret alone, so the caret can
-        // end up off screen; hex_paint only draws the rows in view, so it vanishes
-        // until it is scrolled back to. The caller re-clamps topRow after this.
+        // Ctrl+Up/Down scrolls without moving the caret (may go off screen). Caller
+        // re-clamps topRow.
         if (ctrl && (keys & (HEX_KEY_UP | HEX_KEY_DOWN)))
         {
             if (keys & HEX_KEY_UP)   v.topRow -= 1;
@@ -1393,8 +1229,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
             keys &= ~(HEX_KEY_UP | HEX_KEY_DOWN);
         }
 
-        // Vertical and paging moves land on a fresh byte, so they restart nibble
-        // entry on the high nibble.
+        // Byte-wise moves reset to the high nibble.
         bool byteMove = (keys & (HEX_KEY_UP | HEX_KEY_DOWN | HEX_KEY_PGUP |
             HEX_KEY_PGDN | HEX_KEY_HOME | HEX_KEY_END)) != 0;
         if (keys & HEX_KEY_UP)    dst -= cols;
@@ -1405,15 +1240,12 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         if (keys & HEX_KEY_END)   dst = ctrl ? caretMax : dst + (cols - 1) - (dst % cols);  // Ctrl: EOF, else row end
         if (byteMove) low = false;
 
-        // Left / Right walk one nibble at a time when editing, the way typing
-        // advances. Extending a selection, or a read-only view with no nibble
-        // caret, steps a whole byte instead.
+        // Left/Right step a nibble when editing, a byte when extending or read-only.
         if (keys & (HEX_KEY_LEFT | HEX_KEY_RIGHT))
         {
             if (editable && shift == false)
             {
-                // The append slot past EOF has only a high nibble, so the walk caps
-                // at caretMax * 2; the low nibbles below stay reachable.
+                // The append slot has only a high nibble: cap at caretMax * 2.
                 long maxNib = caretMax * 2;
                 long nib = dst * 2 + (low ? 1 : 0);
                 if (keys & HEX_KEY_LEFT)  nib -= 1;
@@ -1444,15 +1276,14 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
 
     if (editable && ctx.focus == id && v.active)
     {
-        // Restart the current byte's entry, so the mode change applies from a
-        // clean nibble.
+        // Restart the byte's entry so the new mode applies cleanly.
         if (ctx.key_pressed & HEX_KEY_INS)
         {
             v.insertMode = v.insertMode == false;
             v.editLow = false;
         }
 
-        // Delete / Backspace drop the selection whole, else one byte.
+        // Delete/Backspace: the selection, else one byte.
         if (ctx.key_pressed & HEX_KEY_DEL)
         {
             hex_delete(v, false, cols, visibleRows);
@@ -1468,14 +1299,14 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         {
             int nib = hex_nibble(*p);
             if (nib < 0)
-                continue; // ignore any non-hex text (ascii-pane editing is not here)
+                continue; // hex digits only; no text lane editing
             hex_edit_nibble(v, nib, cols, visibleRows);
             res |= MU_RES_CHANGE;
         }
     }
 
-    // Ctrl+Z steps back, Ctrl+Y (or Ctrl+Shift+Z) forward. The hook refreshes
-    // dataSize as a side effect, so hex_total is current for the clamp below.
+    // Ctrl+Z back, Ctrl+Y (Ctrl+Shift+Z) forward. The hooks update dataSize for
+    // the clamp below.
     if (ctx.focus == id && v.active && (ctx.key_down & MU_KEY_CTRL) &&
         (v.undoFn || v.redoFn) && v.readOnly == false)
     {
@@ -1505,23 +1336,22 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     return res;
 }
 
-// Whether the panel carries the full set of write hooks needed to edit.
+// Whether all write hooks are set.
 bool hex_editable(ref const(HexView) v)
 {
     return v.readOnly == false && v.locked == false &&
         v.replaceFn && v.insertFn && v.removeFn;
 }
 
-// Apply one typed hex nibble at the caret, overwriting or inserting per the mode.
-// dataSize is kept live so hex_total stays right within the frame.
+// Apply a typed nibble at the caret, per mode. Keeps dataSize current.
 void hex_edit_nibble(ref HexView v, int nib, int cols, int visibleRows)
 {
     long pos = cast(long) v.cursor;
 
     if (v.editLow == false)
     {
-        // Insert mode, an empty document, or the caret parked at EOF all splice a
-        // fresh byte; otherwise overwrite in place, keeping the existing low nibble.
+        // Insert mode, empty document, or caret at EOF: insert a byte. Else overwrite,
+        // keeping the low nibble.
         if (v.insertMode || v.cursor >= hex_total(v))
         {
             v.editByte = cast(ubyte)(nib << 4);
@@ -1538,7 +1368,7 @@ void hex_edit_nibble(ref HexView v, int nib, int cols, int visibleRows)
     }
     else
     {
-        // Low nibble: fold into the byte written above, then step to the next.
+        // Low nibble: combine with the high, then advance.
         v.editByte = cast(ubyte)((v.editByte & 0xf0) | nib);
         v.replaceFn(pos, v.editByte, v.writeUser);
         v.editLow = false;
@@ -1549,8 +1379,7 @@ void hex_edit_nibble(ref HexView v, int nib, int cols, int visibleRows)
     }
 }
 
-// Delete the selection, or one byte, on Delete/Backspace. `back` true steps the
-// caret back before deleting (Backspace); false drops the byte under it (Delete).
+// Delete the selection or one byte. `back`: Backspace, else Delete.
 void hex_delete(ref HexView v, bool back, int cols, int visibleRows)
 {
     size_t total = hex_total(v);
@@ -1560,10 +1389,10 @@ void hex_delete(ref HexView v, bool back, int cols, int visibleRows)
     size_t low  = hex_sel_low(v);
     size_t high = hex_sel_high(v);
 
-    if (low != high) // a real range: drop it whole
+    if (low != high) // range: drop all
     {
         long len = cast(long)(high - low + 1);
-        if (high >= total) len = cast(long) total - cast(long) low; // clamp off the append slot
+        if (high >= total) len = cast(long) total - cast(long) low; // exclude the append slot
         v.removeFn(cast(long) low, len, v.writeUser);
         if (v.readFn) v.dataSize -= len;
         v.cursor = low;
@@ -1576,9 +1405,9 @@ void hex_delete(ref HexView v, bool back, int cols, int visibleRows)
         v.removeFn(cast(long) v.cursor, 1, v.writeUser);
         if (v.readFn) --v.dataSize;
     }
-    else // forward delete
+    else // Delete
     {
-        if (v.cursor >= total) // append slot: nothing under the caret
+        if (v.cursor >= total) // append slot: nothing to delete
             return;
         v.removeFn(cast(long) v.cursor, 1, v.writeUser);
         if (v.readFn) --v.dataSize;
@@ -1589,11 +1418,8 @@ void hex_delete(ref HexView v, bool back, int cols, int visibleRows)
     hex_reveal(v, v.cursor, cols, visibleRows);
 }
 
-// Scroll so the caret is in view after a keyboard move. Nudges the scroll
-// position; hex_view re-clamps it after input.
-//
-// Sideways it is the hex pair that gets brought in, being where digits land, and
-// a pair that fits from the far left goes back there so the offsets show again.
+// Scroll the caret into view after a keyboard move; hex_view re-clamps.
+// Horizontally reveals the hex pair, scrolling fully left if it fits there.
 void hex_reveal(ref HexView v, size_t cursor, int cols, int visibleRows)
 {
     long row = cast(long)(cursor / cols);
@@ -1614,23 +1440,22 @@ unittest
 {
     HexView v;
     v.data = new ubyte[64];
-    hex_reveal(v, 15, 16, 4); // no frame measured yet: nowhere to scroll
+    hex_reveal(v, 15, 16, 4); // nothing measured yet
     assert(v.leftCol == 0);
 
     v.gridLay = hex_layout(8, 16, 1);
     v.visCols = 20;
     hex_reveal(v, 15, 16, 4);
-    assert(v.leftCol == hex_col_for(v.gridLay, 15) + 2 - 20); // least that shows it
+    assert(v.leftCol == hex_col_for(v.gridLay, 15) + 2 - 20); // minimal scroll
     hex_reveal(v, 14, 16, 4);
-    assert(v.leftCol == hex_col_for(v.gridLay, 15) + 2 - 20); // already in view
+    assert(v.leftCol == hex_col_for(v.gridLay, 15) + 2 - 20); // already visible
     hex_reveal(v, 3, 16, 4);
     assert(v.leftCol == hex_col_for(v.gridLay, 3));
     hex_reveal(v, 0, 16, 4);
-    assert(v.leftCol == 0); // fits from the far left, offsets and all
+    assert(v.leftCol == 0); // fits from the left
 }
 
-/// Bytes `at .. at + len` from the panel's cached window, or null when the window
-/// does not hold all of them; the caller then reads the document itself.
+/// Bytes `at .. at + len` from the cached window, or null if not fully cached.
 public const(ubyte)[] hex_cached(ref const(HexView) v, size_t at, size_t len)
 {
     if (v.readFn is null)
@@ -1641,11 +1466,9 @@ public const(ubyte)[] hex_cached(ref const(HexView) v, size_t at, size_t len)
     return v.windowBuf[at - v.windowStart .. at - v.windowStart + len];
 }
 
-// Keep the window scratch covering the rows on screen, so painting reads only the
-// visible slice from the editor. It spans a screenful of slack either side,
-// page-aligned, and is read again only when the visible rows leave it or the
-// document's revision moves: a drag or a small scroll then reads nothing, and a
-// refill is one aligned read. No-op for the in-memory data path.
+// Keep the window covering visible rows plus a screen of slack each side,
+// page-aligned. Reread only when visible rows leave it or the revision
+// changes. No-op for in-memory data.
 void hex_fill_window(ref HexView v, mu_Rect body, long topRow, int rowH, int cols)
 {
     if (v.readFn is null)
@@ -1708,27 +1531,26 @@ unittest
     hex_fill_window(v, body, 1000, 16, 16);
     assert(reads == 1);
     assert(v.windowStart % 4096 == 0);
-    hex_fill_window(v, body, 1001, 16, 16); // a row's scroll stays inside
+    hex_fill_window(v, body, 1001, 16, 16); // small scroll stays inside
     assert(reads == 1);
-    assert(hex_cached(v, 1001 * 16, 4) == [0x90, 0x91, 0x92, 0x93]); // 1001 * 16 = 0x3e90
+    assert(hex_cached(v, 1001 * 16, 4) == [0x90, 0x91, 0x92, 0x93]); // 0x3e90
 
-    ++rev; // an edit
+    ++rev; // edit
     assert(hex_cached(v, 1001 * 16, 1) is null);
     hex_fill_window(v, body, 1001, 16, 16);
     assert(reads == 2);
 
-    hex_fill_window(v, body, 50_000, 16, 16); // far off
+    hex_fill_window(v, body, 50_000, 16, 16); // far away
     assert(reads == 3);
     assert(hex_cached(v, 0, 1) is null);
 }
 
-// Draw the minimap ribbon and let it drive the scroll position. It maps the whole
-// document onto its height, each block coloured by the dominant class of the
-// segment it covers; the mapping is by row, so it holds up on files of any size.
+// Minimap ribbon, also a scroll control. Maps the whole document by row, each
+// block the dominant class of its segment.
 void hex_minimap(mu_Context* ctx, ref HexView v, mu_Rect strip,
     long topRow, long maxTop, long rows, int visibleRows)
 {
-    mu_draw_rect(ctx, strip, mu_Color(20, 20, 28, 255)); // ribbon backdrop
+    mu_draw_rect(ctx, strip, mu_Color(20, 20, 28, 255)); // backdrop
 
     size_t total = hex_total(v);
     int cells = strip.h / MINIMAP_BLOCK;
@@ -1743,15 +1565,13 @@ void hex_minimap(mu_Context* ctx, ref HexView v, mu_Rect strip,
         mu_Rect cell = mu_Rect(strip.x, y, strip.w, MINIMAP_BLOCK);
         mu_draw_rect(ctx, cell, c);
 
-        // Backgrounds over it, in the grid's own priority. Not baked into mapCells,
-        // which is only rebuilt on a change of size or ribbon height.
+        // Washes on top, same priority as the grid. Not cached in mapCells.
         mu_Color wash = hex_map_wash(v, cast(long) i, cells, cast(long) total);
         if (wash.a)
             mu_draw_rect(ctx, cell, wash);
     }
 
-    // The visible row span mapped onto the ribbon. On big files that is a fraction
-    // of a pixel, hence the floor on its height.
+    // Viewport marker; floored height since it can be under a pixel.
     if (rows > 0)
     {
         int hy = strip.y + cast(int)(topRow * strip.h / rows);
@@ -1761,11 +1581,11 @@ void hex_minimap(mu_Context* ctx, ref HexView v, mu_Rect strip,
         if (hy < strip.y) hy = strip.y;
         mu_Rect view = mu_Rect(strip.x - MINIMAP_VIEW_OUT, hy,
             strip.w + MINIMAP_VIEW_OUT * 2, hh);
-        mu_draw_rect(ctx, view, mu_Color(150, 185, 235, 70)); // translucent region tint
-        mu_draw_box(ctx, view, mu_Color(190, 215, 255, 255));  // crisp region border
+        mu_draw_rect(ctx, view, mu_Color(150, 185, 235, 70)); // region tint
+        mu_draw_box(ctx, view, mu_Color(190, 215, 255, 255));  // region border
     }
 
-    // Click or drag anywhere on the ribbon to centre the view there.
+    // Click or drag to centre the view there.
     mu_Id id = mu_get_id(ctx, "!hexminimap".ptr, 11);
     mu_update_control(ctx, id, strip, 0);
     if (ctx.focus == id && (ctx.mouse_down & MU_MOUSE_LEFT) && maxTop > 0)
@@ -1776,19 +1596,15 @@ void hex_minimap(mu_Context* ctx, ref HexView v, mu_Rect strip,
     }
 }
 
-// The wash for minimap cell `index` of `cells`, over a document of `total` bytes,
-// or alpha 0 for none. Follows hex_draw_row's priority - selection over the hook's
-// wash - so the ribbon and the grid mark the same regions the same way, and asks
-// about the cell's whole span rather than the sample its class colour came from,
-// so a mark of a few bytes in a huge file still shows.
-//
-// Both come back lifted, the way a run's outline does: a wash is dark because it
-// has to hold glyphs, and three pixels of ribbon hold nothing.
+// Wash for minimap cell `index` of `cells` over `total` bytes, alpha 0 for
+// none. Same priority as hex_draw_row (selection over hook wash). Queries the
+// whole span, so tiny marks show. Lifted like outlines: the ribbon has no
+// glyphs to keep readable.
 mu_Color hex_map_wash(ref const(HexView) v, long index, int cells, long total)
 {
     long start = index * total / cells;
     long end   = (index + 1) * total / cells;
-    if (end <= start) // ditto hex_build_minimap: the cell stands on `start`
+    if (end <= start) // as in hex_build_minimap
         end = start + 1;
 
     size_t selLow  = hex_sel_low(v);
@@ -1811,10 +1627,10 @@ unittest
     v.data   = cast(const(ubyte)[]) "0123456789abcdef\x00\x01";
     v.active = true;
     v.anchor = 0;
-    v.cursor = 1; // a two-byte selection at the head
+    v.cursor = 1; // two bytes at the head
     long total = cast(long) v.data.length;
 
-    // One run, not one washed cell per selected byte with backdrop between them.
+    // One run, no gaps between selected cells.
     int runs;
     bool prev;
     foreach (int c; 0 .. CELLS)
@@ -1828,25 +1644,24 @@ unittest
     assert(hex_map_wash(v, 0, CELLS, total).a != 0);
 }
 
-// The plain scroll strip shown when the minimap is off: a track with a thumb sized
-// to the visible fraction, driven in row units like the minimap.
+// Plain scrollbar (minimap off), in row units.
 void hex_plainbar(mu_Context* ctx, ref HexView v, mu_Rect strip,
     long topRow, long maxTop, long rows, int visibleRows)
 {
-    mu_draw_rect(ctx, strip, mu_Color(20, 20, 28, 255)); // track
+    mu_draw_rect(ctx, strip, mu_Color(20, 20, 28, 255));
     if (rows <= 0 || strip.h <= 0)
         return;
 
-    // Floored so the thumb stays grabbable.
+    // Min size so it stays grabbable.
     int thumbH = cast(int)(cast(long) visibleRows * strip.h / rows);
     if (thumbH < SCROLLBAR_THUMB_MIN) thumbH = SCROLLBAR_THUMB_MIN;
     if (thumbH > strip.h) thumbH = strip.h;
     int travel = strip.h - thumbH;
     int ty = strip.y + (maxTop > 0 ? cast(int)(topRow * travel / maxTop) : 0);
     mu_draw_rect(ctx, mu_Rect(strip.x, ty, strip.w, thumbH),
-        mu_Color(90, 110, 150, 255)); // thumb
+        mu_Color(90, 110, 150, 255));
 
-    // Click or drag to move the thumb; its centre follows the cursor.
+    // Click or drag: thumb centre follows the pointer.
     mu_Id id = mu_get_id(ctx, "!hexscroll".ptr, 10);
     mu_update_control(ctx, id, strip, 0);
     if (ctx.focus == id && (ctx.mouse_down & MU_MOUSE_LEFT) && maxTop > 0 && travel > 0)
@@ -1857,9 +1672,8 @@ void hex_plainbar(mu_Context* ctx, ref HexView v, mu_Rect strip,
     }
 }
 
-// Rebuild the minimap colour cache: sample each segment with a fixed byte budget
-// and record its dominant colour. A 1 TB file and a 1 KB one both cost `cells`
-// small reads, and only when the size or the ribbon height changed.
+// Rebuild minimap colours: sample each segment with a fixed budget, keep the
+// dominant colour. Cost is `cells` small reads regardless of file size.
 void hex_build_minimap(ref HexView v, int cells)
 {
     size_t total = hex_total(v);
@@ -1882,9 +1696,8 @@ void hex_build_minimap(ref HexView v, int cells)
     {
         long start = c * len / cells;
         long end   = (c + 1) * len / cells;
-        // A document shorter than the ribbon has cells gives most of them an empty
-        // span. Each still stands on the byte at `start`, so a small file draws as
-        // bands; an uncoloured cell would show the backdrop and stripe the ribbon.
+        // More cells than bytes: empty spans use the byte at `start`, else uncoloured
+        // cells stripe the ribbon.
         long span = end > start ? end - start : 1;
         size_t take = span < MINIMAP_PROBE ? cast(size_t) span : MINIMAP_PROBE;
         ubyte[] chunk = hex_probe(v, start, v.mapProbe[0 .. take]);
@@ -1894,26 +1707,24 @@ void hex_build_minimap(ref HexView v, int cells)
 
 unittest
 {
-    enum int CELLS = 176; // a 600px window's worth, where the striping showed
+    enum int CELLS = 176; // 600px window, where striping showed
 
     HexView v;
     v.data = cast(const(ubyte)[]) "0123456789abcdef\x00\x01";
     hex_build_minimap(v, CELLS);
 
-    // Every cell takes a colour even though there are ten times as many cells as
-    // bytes: an uncoloured one lets the backdrop through and stripes the ribbon.
+    // All cells coloured despite 10x more cells than bytes.
     assert(v.mapCells.length == CELLS);
     foreach (mu_Color c; v.mapCells)
         assert(c.a != 0);
 
-    // And they still walk the document in order, ends included.
+    // In order, ends included.
     assert(hex_coleq(v.mapCells[0], hex_dominant(v, v.data[0 .. 1], 0)));
     assert(hex_coleq(v.mapCells[CELLS - 1],
         hex_dominant(v, v.data[$ - 1 .. $], cast(long) v.data.length - 1)));
 }
 
-// Read up to buf.length bytes at document offset `pos`, from the editor window
-// source or the in-memory slice. Returns the bytes actually available.
+// Read up to buf.length bytes at `pos`; returns what's available.
 ubyte[] hex_probe(ref HexView v, long pos, ubyte[] buf)
 {
     if (v.readFn)
@@ -1928,10 +1739,8 @@ ubyte[] hex_probe(ref HexView v, long pos, ubyte[] buf)
     return buf[0 .. n];
 }
 
-// Dominant colour of a sampled chunk, classified through the panel's own scheme so
-// the ribbon and the byte grid agree on how a region looks. The class layer only:
-// the backgrounds go over it in hex_map_wash, which is asked of the whole span
-// because a vote taken over a sample can miss what it is marking.
+// Dominant colour of a sample, via the panel's scheme so ribbon and grid
+// match. Class only; washes are added by hex_map_wash.
 mu_Color hex_dominant(ref const(HexView) v, const(ubyte)[] chunk, long baseOff)
 {
     if (chunk.length == 0)
@@ -1940,8 +1749,7 @@ mu_Color hex_dominant(ref const(HexView) v, const(ubyte)[] chunk, long baseOff)
     HexColorFn colorFn = v.colorFn ? v.colorFn : &hex_classify;
     void* user = cast(void*) v.colorUser;
 
-    // hex_classify yields a handful of colours, so a short list covers the tally;
-    // any beyond the cap just miss the vote.
+    // Few colours from hex_classify; extras past the cap don't vote.
     mu_Color[8] pal = void;
     int[8] hits;
     int n;
@@ -1976,12 +1784,11 @@ unittest
 {
     mu_Color a = mu_Color(1, 2, 3, 4);
     assert(hex_coleq(a, mu_Color(1, 2, 3, 4)));
-    assert(hex_coleq(a, mu_Color(9, 2, 3, 4)) == false); // r differs
-    assert(hex_coleq(a, mu_Color(1, 2, 3, 5)) == false); // a differs, must still count
+    assert(hex_coleq(a, mu_Color(9, 2, 3, 4)) == false);
+    assert(hex_coleq(a, mu_Color(1, 2, 3, 5)) == false); // alpha counts
 }
 
-// Draw the visible rows. Only the slice inside the viewport is emitted, so the
-// command count stays bounded regardless of buffer size.
+// Draw visible rows only, so command count is bounded.
 void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     mu_Rect body, long topRow, int rowH, int cols, mu_Font font)
 {
@@ -1990,8 +1797,7 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     int charW = lay.charW;
     int originX = body.x - v.leftCol * charW;
 
-    // An empty document still draws its first offset and a caret, so it reads as an
-    // insertion point ready to build a file from scratch.
+    // Empty document: draw the first offset and a caret.
     if (rows == 0)
     {
         char[24] off = void;
@@ -2021,8 +1827,7 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
             row, cols, rowH, charW, selLow, selHigh, font);
     }
 
-    // The caret parked one slot past the last byte sits in no row's byte range, so
-    // it is drawn here, in a cell that may open a fresh row.
+    // Caret on the append slot is outside every row's range; draw it here.
     if (v.active && v.cursor == total)
     {
         long row = cast(long)(total / cols);
@@ -2051,18 +1856,12 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     if (hex_fits(originX, digits, charW, startX, endX))
         mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, y), offColor);
 
-    // Backgrounds under the glyphs, in rendering priority: the hook's wash, the
-    // selection over it, the wash's own outline over that.
-    //
-    // The selection takes the fill, being where the user is looking *now*. But an
-    // opaque fill would leave a mark under it with nothing on screen, and that
-    // happens exactly when the mark was just set - so the outline goes over the
-    // selection and the mark keeps its shape either way.
+    // Backgrounds by priority: hook wash, selection, then the wash outline. The
+    // outline goes over the selection so a fresh mark under it stays visible.
     if (backFn)
         hex_wash_fill(ctx, v, lay, backFn, originX, y, rowStart, count, charW, rowH);
 
-    // A row's selected bytes are contiguous, so at most one band. A bare caret
-    // draws no wash, only the outline below.
+    // Selection is contiguous: at most one band. A bare caret has no wash.
     if (v.active && selLow != selHigh && selHigh >= rowStart && selLow < rowStart + count)
     {
         int lo = selLow  > rowStart ? cast(int)(selLow - rowStart) : 0;
@@ -2073,15 +1872,13 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     if (backFn)
         hex_wash_outline(ctx, v, lay, backFn, originX, y, rowStart, count, cols, charW, rowH);
 
-    // Structure borders, under the glyphs and drawn from the outside in, so a record
-    // groups its fields rather than every field carrying a box of its own. What tells
-    // the fields apart is their colour; what the border says is where a record begins
-    // and ends, which is the one thing colour cannot.
+    // Structure borders under the glyphs, outermost first: borders mark records,
+    // colours mark fields.
     if (v.spanFn)
         for (int level; level < v.spanDepth; ++level)
             hex_span_outline(ctx, v, lay, originX, y, rowStart, count, cols, charW, rowH, level);
 
-    // Each hex pair and its ASCII glyph share the byte's colour.
+    // Hex pair and text glyph share the byte colour.
     char[2] cell = void;
     char[1] ch = void;
     for (int i; i < count; ++i)
@@ -2107,8 +1904,7 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
         hex_draw_caret(ctx, lay, originX, y, cast(int)(v.cursor - rowStart), charW, rowH, hex_caret_nib(v));
 }
 
-// What a byte reads as in the text lane. `scratch` carries the single-character
-// answers out, mu_draw_text taking a pointer and a length rather than a string.
+// Text lane characters for a byte; `scratch` holds single-char results.
 const(char)[] hex_text(ref const(HexView) v, ubyte b, char[] scratch)
 {
     if (v.textFn)
@@ -2131,7 +1927,7 @@ unittest
 {
     static const(char)[] upper(ubyte value, void* user)
     {
-        // Both answers a set gives: a character, and none at all.
+        // A set mapping one character and leaving the rest unmapped.
         return value == 'a' ? "A" : null;
     }
 
@@ -2144,13 +1940,11 @@ unittest
 
     v.textFn = &upper;
     assert(hex_text(v, 'a', ch) == "A");
-    assert(hex_text(v, 'b', ch) == "."); // the set has no character for it
+    assert(hex_text(v, 'b', ch) == "."); // unmapped
     assert(hex_text(v, 0, ch) == ".");
 }
 
-// Which nibble the caret boxes: -1 for the whole pair (a read-only view has no
-// nibble entry), 0 for the high nibble, 1 for the low. Editing narrows it to the
-// digit the next keypress lands in, as GHex and friends do.
+// Caret box: -1 whole pair (read-only), 0 high nibble, 1 low. Like GHex.
 int hex_caret_nib(ref const(HexView) v)
 {
     if (hex_editable(v) == false)
@@ -2158,15 +1952,14 @@ int hex_caret_nib(ref const(HexView) v)
     return v.editLow ? 1 : 0;
 }
 
-// Fill the row's washed cells, banded: neighbouring bytes of one colour merge into
-// a single rect, the gaps between the hex pairs included, so a marked run reads as
-// one block rather than as cells with seams between them.
+// Fill washed cells, merging same-colour neighbours (gaps included) into one
+// rect.
 void hex_wash_fill(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     HexBackFn backFn, int originX, int y, size_t rowStart, int count, int charW,
     int rowH)
 {
     int runStart;
-    mu_Color runColor; // .init is transparent, so the first washed cell flushes it
+    mu_Color runColor; // .init is transparent
     for (int i; i <= count; ++i)
     {
         mu_Color c;
@@ -2181,16 +1974,11 @@ void hex_wash_fill(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) l
     }
 }
 
-// Outline the row's washed cells in a lifted version of each cell's own wash. This
-// is what survives the selection being drawn over the fill; see the rendering
-// priority in hex_draw_row.
-//
-// Per cell rather than per run, an edge being dropped wherever the neighbour
-// across it carries the same wash, so a run comes out as one outlined region even
-// when it wraps over several rows. The neighbours above and below are asked of
-// backSpanFn, which answers by offset alone: hex_byte cannot be trusted past the
-// window the panel read, which is what a row off screen is. Without a backSpanFn
-// there is no way to ask, so there is no outline either.
+// Outline washed cells with a lifted wash colour; survives the selection fill
+// (see hex_draw_row). Edges are dropped between same-wash neighbours, so runs
+// outline as one region across rows. Rows above and below are queried via
+// backSpanFn (offset-only; hex_byte is invalid off-window). No backSpanFn, no
+// outline.
 void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     HexBackFn backFn, int originX, int y, size_t rowStart, int count, int cols,
     int charW, int rowH)
@@ -2199,13 +1987,12 @@ void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
         return;
 
     void* user = cast(void*) v.backUser;
-    mu_Color left;  // the cell before this one, carried along rather than re-asked
+    mu_Color left;  // carried, not re-queried
     mu_Color here = backFn(rowStart, hex_byte(v, rowStart), user);
 
     for (int i; i < count; ++i)
     {
-        // Transparent at the row's end, so a run that wraps is closed off here
-        // and opened again at column 0 of the next row, which is where it is.
+        // Transparent at row end: wrapped runs close here and reopen next row.
         mu_Color right;
         if (i + 1 < count)
             right = backFn(rowStart + i + 1, hex_byte(v, rowStart + i + 1), user);
@@ -2223,15 +2010,14 @@ void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
             bool onL    = hex_coleq(here, left) == false;
             mu_Color edge = hex_wash_lift(here);
 
-            // The hex lane's cell runs to where the next one starts when the two
-            // are joined, so the outline covers the gap the fill covered.
+            // Joined hex cells extend over the gap, matching the fill.
             int hx0 = originX + hex_col_for(lay, i) * charW;
             int hx1 = originX + charW *
                 (joinR ? hex_col_for(lay, i + 1) : hex_col_for(lay, i) + 2);
             hex_draw_edges(ctx, hx0, hx1, y, rowH, top, bottom, onL, joinR == false,
                 1, 0, 0, edge);
 
-            // The ASCII lane has no gaps, so its cells are one character wide.
+            // Text lane: no gaps, one glyph wide.
             int ax0 = originX + (lay.asciiStart + i) * charW;
             hex_draw_edges(ctx, ax0, ax0 + charW, y, rowH, top, bottom, onL,
                 joinR == false, 1, 0, 0, edge);
@@ -2242,17 +2028,11 @@ void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
     }
 }
 
-// Outline the structure spans crossing this row at nesting level `up`, `weight` pixels
-// thick, in each span's own edge colour.
-//
-// Built the same way as hex_wash_outline - edges dropped wherever the neighbour across
-// them is in the same thing, so a span wrapping over several rows comes out as one
-// region - but joining on where a span starts rather than on what colour it is. See
-// HexSpanFn for why the difference matters.
-//
-// One hook call per cell per side. That is a few thousand a frame at a screenful of
-// bytes, each a lookup rather than a read; if it ever shows up, one row's answers are
-// the next row's neighbours above and could be carried instead of asked twice.
+// Outline structure spans on this row at level `up`, `weight` px thick, in
+// each span's edge colour. Like hex_wash_outline but joined by span start, not
+// colour (see HexSpanFn).
+// NOTE: One hook call per cell per side; if it gets slow, carry each row's
+// answers to the next as its top neighbours.
 void hex_span_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     int originX, int y, size_t rowStart, int count, int cols, int charW, int rowH,
     int level)
@@ -2270,8 +2050,7 @@ void hex_span_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
 
     for (int i; i < count; ++i)
     {
-        // Nothing past the row's last cell, so a span carrying on is closed off here
-        // and opened again at column 0 of the next row, which is where it is.
+        // Closed at row end, reopened next row.
         HexSpan right;
         bool hasRight;
         if (i + 1 < count)
@@ -2290,8 +2069,7 @@ void hex_span_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
             bool bottom = hex_span_joins(has, here, hasBelow, below) == false;
             bool onL    = hex_span_joins(has, here, hasLeft, left) == false;
 
-            // The hex lane's cell runs to where the next one starts when the two are
-            // joined, so the border covers the gap between the pairs.
+            // Joined hex cells extend over the gap.
             int hx0 = originX + hex_col_for(lay, i) * charW;
             int hx1 = originX + charW *
                 (joinR ? hex_col_for(lay, i + 1) : hex_col_for(lay, i) + 2);
@@ -2310,8 +2088,7 @@ void hex_span_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
     }
 }
 
-// Whether two cells belong to one span, and so have no border drawn between them.
-// Where a span begins, not what it looks like: see HexSpanFn.
+// Whether two cells are in the same span (same start; see HexSpanFn).
 bool hex_span_joins(bool hasA, ref const(HexSpan) a, bool hasB, ref const(HexSpan) b)
 {
     return hasA && hasB && a.start == b.start;
@@ -2325,18 +2102,16 @@ unittest
 
     assert(hex_span_joins(true, a, true, b));
 
-    // Two fields of one shape back to back stay two fields, which colour alone would
-    // have merged.
+    // Adjacent same-shaped fields stay separate.
     assert(hex_span_joins(true, a, true, c) == false);
 
-    // A cell no span covers ends whatever the cell beside it was in.
+    // Uncovered cells never join.
     assert(hex_span_joins(true, a, false, b) == false);
     assert(hex_span_joins(false, a, true, b) == false);
 }
 
-// The same colour carried brighter, for a wash's outline. Scaled rather than
-// blended towards white, so the edge keeps the wash's hue and reads as its own
-// rather than as a highlight of its own.
+// Brighter version of a wash, for its outline. Scaled, not blended to white,
+// to keep the hue.
 mu_Color hex_wash_lift(mu_Color c)
 {
     return mu_Color(hex_lift(c.r), hex_lift(c.g), hex_lift(c.b), 255);
@@ -2350,19 +2125,14 @@ ubyte hex_lift(ubyte v)
 
 unittest
 {
-    // A channel already high clamps rather than wrapping around.
+    // Clamps instead of wrapping.
     assert(hex_coleq(hex_wash_lift(mu_Color(125, 85, 22, 255)), mu_Color(250, 170, 44, 255)));
     assert(hex_coleq(hex_wash_lift(mu_Color(200, 0, 0, 128)), mu_Color(255, 0, 0, 255)));
 }
 
-// Draw the edges of one cell that its neighbours do not span, `weight` pixels each,
-// held `padX` / `padY` pixels off the cell's bounds. A negative pad pushes that side
-// outwards instead, for a lane whose glyphs leave no room inside.
-//
-// The padding is only taken off the sides actually drawn, so a run stays one unbroken
-// box: an edge dropped for a neighbour is an edge the box does not turn at, and pulling
-// the span in there would leave a notch mid-run. A cell too small to pad draws flush
-// rather than inside out.
+// Draw the cell edges not shared with neighbours, `weight` px, inset by
+// `padX`/`padY` (negative pushes outward). Padding only applies to drawn
+// sides so runs don't notch. Cells too small to pad draw flush.
 void hex_draw_edges(mu_Context* ctx, int x0, int x1, int y, int rowH,
     bool top, bool bottom, bool left, bool right, int weight, int padX, int padY,
     mu_Color color)
@@ -2389,9 +2159,7 @@ void hex_draw_edges(mu_Context* ctx, int x0, int x1, int y, int rowH,
     if (right)  mu_draw_rect(ctx, mu_Rect(ix1 - weight, iy, weight, ih), color);
 }
 
-// Fill grid columns `lo` through `hi` of the row at `y`, in both lanes, since a
-// span means the same bytes in each. The hex band runs over the gaps between the
-// pairs rather than leaving them unpainted, so it reads as one block.
+// Fill columns `lo` to `hi` in both lanes; the hex band covers the gaps.
 void hex_draw_band(mu_Context* ctx, ref const(HexLayout) lay, int originX, int y,
     int lo, int hi, int charW, int rowH, mu_Color color)
 {
@@ -2404,13 +2172,12 @@ void hex_draw_band(mu_Context* ctx, ref const(HexLayout) lay, int originX, int y
     mu_draw_rect(ctx, mu_Rect(ax, y, aw, rowH), color);
 }
 
-// Draw the caret outline in both lanes around grid column `col` of the row at `y`.
-// `nib` picks the hex-lane box: -1 spans the whole pair, 0 the high digit, 1 the
-// low. The ASCII lane is always one glyph, a character having no sub-position.
+// Caret outline in both lanes at column `col`. `nib`: -1 whole pair, 0 high,
+// 1 low. The text lane is one glyph.
 void hex_draw_caret(mu_Context* ctx, ref const(HexLayout) lay, int originX, int y,
     int col, int charW, int rowH, int nib)
 {
-    mu_Color curColor = mu_Color(120, 170, 235, 255); // caret outline
+    mu_Color curColor = mu_Color(120, 170, 235, 255);
     int hx = originX + hex_col_for(lay, col) * charW;
     if (nib < 0)
         mu_draw_box(ctx, mu_Rect(hx - 1, y, 2 * charW + 2, rowH), curColor);
@@ -2420,7 +2187,7 @@ void hex_draw_caret(mu_Context* ctx, ref const(HexLayout) lay, int originX, int 
     mu_draw_box(ctx, mu_Rect(ax - 1, y, charW + 2, rowH), curColor);
 }
 
-// Local strlen so the module needs no C import for one call.
+// Avoids a C import for one call.
 size_t hex_strlen(const(char)* s)
 {
     size_t n;

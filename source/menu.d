@@ -1,16 +1,12 @@
-/// Prototype menubar widgets built on ddui's popup primitives.
-///
-/// Kept local to vddhx for now; candidates for promotion into ddui itself (as
-/// mu_begin_menu / mu_menu_item / mu_end_menu).
+/// Prototype menubar widgets on ddui's popup primitives.
+/// TODO: Move into ddui (mu_begin_menu / mu_menu_item / mu_end_menu).
 /// Authors: dd86k <dd@dax.moe>
 module menu;
 
 import core.stdc.string : strlen;
 import ddui;
 
-// Only one menu is open at a time, so all of them share one popup container
-// ("!menu") repositioned under the active trigger, whose id this holds (0 when
-// the bar is closed).
+// One shared popup ("!menu"), moved under the active trigger. 0 when closed.
 private __gshared mu_Id openMenu;
 
 /// Begin a top-level menu in a menubar row.
@@ -27,8 +23,7 @@ int menu_begin(mu_Context* ctx, const(char)* label)
     mu_draw_control_frame(ctx, id, r, MU_COLOR_BUTTON, 0);
     mu_draw_control_text(ctx, label, r, MU_COLOR_TEXT, 0);
 
-    // Clicking a different trigger closes the current menu through the popup's own
-    // outside-click handling, so switching menus needs no extra bookkeeping.
+    // Clicking another trigger closes this menu via the popup's outside-click.
     if (ctx.mouse_pressed == MU_MOUSE_LEFT && ctx.focus == id)
     {
         openMenu = id;

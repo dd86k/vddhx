@@ -1,12 +1,9 @@
-/// The About dialog's easter egg: an Elite (1984) title screen, tumbling
-/// wireframe ship and all.
+/// About dialog easter egg: Elite (1984) title screen with a tumbling wireframe.
 ///
-/// Drawn with real SDL line calls: ddui's only shape is a filled rectangle, so a
-/// wireframe through it would cost a command per pixel run out of the 4096 a
-/// frame gets (MU_COMMANDLIST_SIZE). Instead the window reserves a rectangle and
-/// pushes a draw command of our own type, which render.d recognises and hands
-/// back here at the right point in the z-order. ddui reserves no user range for
-/// that, but the type field is a plain int and our replay loop is its only reader.
+/// Drawn with SDL line calls, since ddui only has filled rects and a wireframe
+/// would blow the 4096-command budget (MU_COMMANDLIST_SIZE). We push a custom
+/// command type that render.d dispatches back here in z-order. ddui reserves no
+/// user range, but the type is a plain int and only our replay loop reads it.
 /// Authors: dd86k <dd@dax.moe>
 module elite;
 
@@ -15,34 +12,32 @@ import std.math : sin, cos;
 import bindbc.sdl;
 import ddui;
 
-/// ddui draw command carrying the ship's panel, one past ddui's own types.
-/// Pushed by elite_frame, dispatched by render_commands, drawn by elite_draw.
+/// Custom ddui command for the ship panel. Pushed by elite_frame, dispatched by
+/// render_commands, drawn by elite_draw.
 enum int MU_COMMAND_SHIP = MU_COMMAND_MAX;
 
-/// Window title, and the key ddui pools the container under.
+/// Window title, also the container key.
 private immutable string TITLE = "--- E L I T E ---";
 
 /// The prompt the 1984 title screen asks under the ship.
 private immutable string PROMPT = "Load New Commander (Y/N)?";
 
-// Window size in pixels, and the height reserved for the ship inside it.
+// Window size; PANEL is the ship's height.
 private enum int WIDTH  = 420;
 private enum int HEIGHT = 360;
 private enum int PANEL  = 300;
 
-// Tumble in radians per second. Deliberately unequal, so the ship never returns
-// to the same attitude twice in a sitting.
+// rad/s. Unequal so the attitude never repeats.
 private enum float YAW_RATE   = 0.7f;
 private enum float PITCH_RATE = 0.23f;
 
-// Camera sits this far up +Z from the model's origin, looking back down it. The
-// model's own radius is about 1.4, so nothing ever crosses the eye.
+// Camera on +Z looking at the origin. Model radius is ~1.4.
 private enum float CAMERA = 3.6f;
 
 private enum SDL_Color SHIP_COLOR  = SDL_Color(210, 225, 255, 255);
 private enum mu_Color  PANEL_COLOR = mu_Color(0, 0, 0, 255);
 
-/// A point in model space: x right, y up, z out through the nose.
+/// Model space: x right, y up, z forward.
 private struct Vec3
 {
     float x;
@@ -50,11 +45,8 @@ private struct Vec3
     float z;
 }
 
-// The Cobra Mk III in the units the 1984 game holds it in: the hull 256 across,
-// running from the tail at z = -40 to the laser mount at z = 90. Transcribed from
-// the blueprint at
-// https://elite.bbcelite.com/cassette/main/variable/ship_cobra_mk_3.html; the
-// numbers are the shape and nothing else, the projection below being ours.
+// Cobra Mk III in original game units (hull 256 wide, z from -40 to 90), from
+// https://elite.bbcelite.com/cassette/main/variable/ship_cobra_mk_3.html
 private immutable Vec3[28] modelVerts = [
     Vec3(  32,   0,  76), // 0  nose, right
     Vec3( -32,   0,  76), // 1  nose, left
@@ -86,7 +78,7 @@ private immutable Vec3[28] modelVerts = [
     Vec3(  80,  -6, -40), // 27 |
 ];
 
-// Vertex pairs, one line each.
+// Vertex pairs, one line each for the ship.
 private immutable ubyte[2][38] modelEdges = [
     [ 0,  1], [ 0,  4], [ 1,  3], [ 3,  8], [ 4,  7], // nose and wings
     [ 6,  7], [ 6,  9], [ 5,  9], [ 5,  8],           // upper rear
@@ -101,25 +93,22 @@ private immutable ubyte[2][38] modelEdges = [
     [25, 26], [26, 27], [25, 27],                     // right exhaust
 ];
 
-// Model units per unit of the table above, and the shift that puts the middle of
-// the hull on the origin: the published table measures from a point two thirds
-// of the way to the nose, which would tumble the ship about its tail.
+// Scale, and z offset to center the hull (the original origin is 2/3 toward
+// the nose, which would tumble about the tail).
 private enum float MODEL_SCALE = 1.0f / 128;
 private enum float MODEL_ZOFF  = 25.0f;
 
-// Deferred to the next frame, the way about.d defers: placing the window needs
-// the current window size, which only the frame call knows.
+// Deferred to the next frame (like about.d): placement needs the window size.
 private __gshared bool wantOpen;
 
 private __gshared bool showing;
 
-// Attitude, advanced off the wall clock so the tumble runs at the same rate
-// whatever the frame rate is.
+// Advanced by wall clock so the rate is frame-rate independent.
 private __gshared float yaw;
 private __gshared float pitch;
 private __gshared MonoTime lastTick;
 
-/// Request the title screen. Safe to call from anywhere in a frame.
+/// Request the title screen. Safe anywhere in a frame.
 void elite_open()
 {
     wantOpen = true;
@@ -128,16 +117,14 @@ void elite_open()
     lastTick = MonoTime.init;
 }
 
-/// True while the ship is on screen and the main loop owes it frames. Everything
-/// else in vddhx is event-driven, so this is the only thing that keeps the loop
-/// off SDL_WaitEvent, and only for as long as the window is open.
+/// True while open. Keeps the main loop off SDL_WaitEvent.
 bool elite_animating()
 {
     return showing;
 }
 
-/// Draw the window if it is open. Call once per frame, after the main window is
-/// ended, so it lands as its own root container on top.
+/// Draw the window if open. Call once per frame after the main window ends, so
+/// it's a root container on top.
 void elite_frame(mu_Context* ctx, int width, int height)
 {
     if (wantOpen)
@@ -159,14 +146,12 @@ void elite_frame(mu_Context* ctx, int width, int height)
 
     version (Screenshots)
     {
-        // Shots get diffed against a previous run, so a fixed slice is what poses
-        // the ship the same way every time.
+        // Fixed step so screenshots are reproducible.
         enum float dt = 1.0f / 60;
     }
     else
     {
-        // A stall (dragging the window, a modal file dialog) would otherwise
-        // arrive as one enormous step, so cap the slice.
+        // Cap the step so stalls (window drag, modal dialog) don't jump.
         MonoTime now = MonoTime.currTime;
         float dt = 0;
         if (lastTick != MonoTime.init)
@@ -180,37 +165,33 @@ void elite_frame(mu_Context* ctx, int width, int height)
     yaw   += dt * YAW_RATE;
     pitch += dt * PITCH_RATE;
 
-    // The rectangle has to come out of the layout before the command goes in, so
-    // the two agree on where it landed.
+    // Take the rect from the layout before pushing the command.
     static immutable int[1] full = [ -1 ];
     mu_layout_row(ctx, 1, full.ptr, PANEL);
     mu_Rect r = mu_layout_next(ctx);
     mu_draw_rect(ctx, r, PANEL_COLOR);
     mu_Command* cmd = mu_push_command(ctx, MU_COMMAND_SHIP);
     cmd.rect.rect = r;
-    // ddui hashes only its own commands, and the ship moves every frame.
+    // ddui only hashes its own commands; force a redraw.
     mu_invalidate(ctx);
 
-    // ddui has no centred mu_label, so draw into the cell with the alignment bit.
+    // No centred mu_label; draw with the alignment flag.
     mu_layout_row(ctx, 1, full.ptr, 0);
     mu_draw_control_text(ctx, PROMPT, mu_layout_next(ctx), MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
 
     mu_end_window(ctx);
 }
 
-/// Draw the ship into the rectangle its command reserved. Called from
-/// render_commands, in z-order, with the frame's clip state already applied.
+/// Draw the ship in its reserved rect. Called from render_commands with clip
+/// already applied.
 void elite_draw(SDL_Renderer* renderer, mu_Rect panel)
 {
-    // Yaw about Y first, pitch about X after, which is what makes the tumble read
-    // as a ship rolling rather than a spinning plate.
+    // Yaw about Y, then pitch about X.
     const float cy = cos(yaw),   sy = sin(yaw);
     const float cp = cos(pitch), sp = sin(pitch);
 
-    // Perspective scale, off the panel's short side so the window can be any
-    // shape. The wingtips reach 1.03 model units and come no nearer the eye than
-    // CAMERA - 1.03, so the ship projects at most 0.4 focal lengths either side of
-    // centre - which at this factor stays inside the panel at every attitude.
+    // Focal length from the panel's short side. Wingtips reach 1.03 units, so the
+    // projection stays within 0.4 focal lengths of center: inside the panel.
     const float focal = (panel.w < panel.h ? panel.w : panel.h) * 1.5f;
     const float ox = panel.x + panel.w / 2.0f;
     const float oy = panel.y + panel.h / 2.0f;
@@ -227,18 +208,16 @@ void elite_draw(SDL_Renderer* renderer, mu_Rect panel)
         float y = my * cp - z * sp;
         z = z * cp + my * sp;
 
-        // Clamped rather than near-plane clipped: the model never reaches the
-        // camera, so this only guards against a future one.
+        // Clamp instead of near-plane clipping; the model never reaches the camera.
         float d = CAMERA - z;
         if (d < 0.1f)
             d = 0.1f;
 
-        // Screen y grows downward, model y grows up.
+        // Screen y is down.
         pts[i] = SDL_FPoint(ox + focal * x / d, oy - focal * y / d);
     }
 
-    // Hand the renderer back the clip it had: render_commands drives its own from
-    // ddui's clip commands and does not expect anyone to move it.
+    // Restore the clip after; render_commands manages it from ddui commands.
     SDL_Rect saved = void;
     const bool wasClipped = SDL_RenderClipEnabled(renderer);
     if (wasClipped)

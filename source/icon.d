@@ -1,11 +1,8 @@
-/// Window icon: an installed icon if there is one, else the copy shipped beside
-/// the executable.
+/// Window icon: installed icon if present, else the one shipped beside the
+/// executable.
 ///
-/// BMP rather than PNG because SDL3 core decodes BMP and nothing else, and a
-/// window icon is not worth a decoder or an SDL_image dependency. The icon theme
-/// spec wants PNG, so the hicolor files installed for the desktop are a separate
-/// thing from these; what a launcher shows comes off the .desktop entry, not off
-/// SDL_SetWindowIcon.
+/// BMP because SDL3 core only decodes BMP. The hicolor PNGs are for the
+/// .desktop entry, which is what launchers show; not used here.
 /// Authors: dd86k <dd@dax.moe>
 module icon;
 
@@ -18,19 +15,11 @@ import std.string : fromStringz, toStringz;
 import bindbc.sdl;
 import ddlogger;
 
-/// The one size handed over. SDL takes alternate images too, but only Wayland
-/// reads them. X11, Windows and Cocoa each publish a single surface, so the
-/// desktop is doing the scaling either way. Handing it the largest gives it the
-/// most to scale down from.
-///
-/// The smaller sizes mkicon.d draws are for the desktop's own icon lookup and
-/// the Windows .ico, neither of which comes through here.
+/// Only Wayland reads alternate sizes; others take one surface and scale it,
+/// so pass the largest. Smaller sizes from mkicon.d are for the theme and .ico.
 private enum int ICON_SIZE = 256;
 
-/// Find the icon and hand it to the window.
-///
-/// Finding none is not fatal: the window keeps whatever the desktop gives an
-/// application with no icon of its own.
+/// Find the icon and set it on the window. Not fatal if none is found.
 void icon_apply(SDL_Window* window)
 {
     SDL_Surface* icon = load();
@@ -43,8 +32,7 @@ void icon_apply(SDL_Window* window)
     if (SDL_SetWindowIcon(window, icon) == false)
         logWarn("SDL_SetWindowIcon: %s", SDL_GetError().fromStringz);
 
-    // SDL copies the pixels into the backend's own storage (an X11 property, a
-    // Wayland buffer), so the surface has done its job by here.
+    // SDL copies the pixels into the backend.
     SDL_DestroySurface(icon);
 }
 
@@ -71,8 +59,8 @@ SDL_Surface* load()
     return null;
 }
 
-/// Where a `size`-pixel icon may live, installed locations before the build
-/// tree, so a stale copy in the source directory cannot shadow an installed one.
+/// Candidate paths for a `size`-pixel icon. Installed locations first so a
+/// stale copy in the source tree can't shadow them.
 string[] candidates(int size)
 {
     string[] paths;
@@ -80,9 +68,7 @@ string[] candidates(int size)
 
     version (Posix)
     {
-        // Application data per the base directory spec: XDG_DATA_HOME, then
-        // XDG_DATA_DIRS, each with the documented default when unset. Not the
-        // hicolor theme, which is PNG only.
+        // XDG base dir spec: XDG_DATA_HOME, then XDG_DATA_DIRS, with defaults.
         string home = environment.get("XDG_DATA_HOME");
         if (home.length)
         {
@@ -106,7 +92,7 @@ string[] candidates(int size)
     return paths;
 }
 
-/// Directory holding the executable, where assets/ ships; "." if it cannot be told.
+/// Executable's directory (where assets/ ships); "." if unknown.
 public string exeDir()
 {
     try return thisExePath().dirName;

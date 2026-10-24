@@ -1,7 +1,4 @@
-/// SDL3 shared library loading.
-///
-/// Only the default "application" configuration needs this: the "static" one
-/// links the archives in and bindbc emits plain externs, folding it all away.
+/// SDL3 shared library loading. No-op in the "static" configuration.
 /// Authors: dd86k <dd@dax.moe>
 module loader;
 
@@ -10,9 +7,8 @@ import ddlogger;
 
 static if (staticBinding)
 {
-    /// Open the SDL3 libraries, before the first SDL_* or TTF_* call.
-    /// Returns: false if a library is missing or unusable, the reason logged and
-    /// put up in a message box.
+    /// Open the SDL3 libraries, before any SDL_*/TTF_* call.
+    /// Returns: false if a library is missing or unusable (logged, message box).
     bool loader_init() { return true; }
 
     /// Close the SDL3 libraries.
@@ -26,9 +22,8 @@ else
     import bindbc.sdl : loadSDL, unloadSDL, loadSDLTTF, unloadSDLTTF,
         SDL_ShowSimpleMessageBox, SDL_MESSAGEBOX_ERROR;
 
-    // bindbc only probes the unversioned SONAME (libSDL3.so), which distributions
-    // ship in their -dev package; try the runtime package's ABI-versioned names
-    // before giving up. Windows has no such split.
+    // bindbc only tries the unversioned SONAME (libSDL3.so, from -dev packages);
+    // also try the ABI-versioned names from runtime packages.
     version (Posix)
     {
         private immutable string[] sdlNames = [ "libSDL3.so.0" ];
@@ -40,8 +35,7 @@ else
         private immutable string[] ttfNames = [];
     }
 
-    // Set the moment SDL3 itself is in, which is what makes SDL_* callable:
-    // until then every binding is a null pointer, SDL's message box included.
+    // SDL_* bindings are null until set, SDL's message box included.
     private __gshared bool sdlLoaded;
 
     /// Ditto
@@ -60,18 +54,17 @@ else
         unloadSDL();
     }
 
-    // `load` is loadSDL or loadSDLTTF: the no-argument overload walks the names
-    // bindbc knows, then the fallbacks go through the one taking a library name.
+    // `load`: loadSDL or loadSDLTTF. Default names first, then fallbacks by name.
     private bool open(alias load)(string what, immutable string[] fallbacks)
     {
-        resetErrors(); // keep a failure from reporting an earlier library's misses
+        resetErrors(); // clear earlier libraries' errors
 
         LoadMsg msg = load();
         foreach (string name; fallbacks)
         {
             if (msg != LoadMsg.noLibrary)
                 break;
-            msg = load(name.ptr); // string literals are NUL-terminated
+            msg = load(name.ptr); // literals are NUL-terminated
         }
 
         final switch (msg)
@@ -86,7 +79,7 @@ else
             fail(what ~ hint);
             return false;
         case LoadMsg.badLibrary:
-            // Missing symbols don't mean much to people, at least logs will have them
+            // Missing symbols mean little to users, but log them.
             foreach (ref const(ErrorInfo) err; errors)
                 logCritical("%s: %s: %s", what, err.error.fromStringz, err.message.fromStringz);
             fail(format("%s is missing symbols, it is likely too old (SDL 3.2.0 or later is needed).", what));
@@ -94,11 +87,10 @@ else
         }
     }
 
-    // core.sys.windows.winuser has its own pragma(lib, "user32"), but that only
-    // reaches the linker when winuser.obj is itself pulled out of druntime.lib.
+    // winuser's pragma(lib) only applies if winuser.obj gets linked from druntime.
     version (Windows) pragma(lib, "user32");
 
-    // Called by open() and invokes SDL_ShowSimpleMessageBox or Win32 MsgBox if able.
+    // SDL message box if loaded, else Win32 MessageBox.
     private void fail(string message)
     {
         logCritical("%s", message);

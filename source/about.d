@@ -1,4 +1,4 @@
-/// Help > About dialog: who wrote this, where it lives, and what built it.
+/// Help > About dialog.
 /// Authors: dd86k <dd@dax.moe>
 module about;
 
@@ -13,31 +13,26 @@ import elite : elite_open;
 import logging : logging_folder;
 import hexview : hex_classify;
 
-/// Application version. Single source of truth: dub.sdl carries no version
-/// field, since dub derives package versions from git tags.
+/// Application version. Lives here only; dub.sdl has none (dub uses git tags).
 enum VERSION = "0.1.1";
 
-enum AUTHOR = "dd <dd@dax.moe>";                    /// Matching dub.sdl's authors/copyright fields.
-enum HOMEPAGE = "https://github.com/dd86k/vddhx";   /// Opened from the dialog.
-enum LICENSE = "MIT";                               /// Matching dub.sdl and the LICENSE file.
+enum AUTHOR = "dd <dd@dax.moe>";                    // @suppress(dscanner.style.undocumented_declaration)
+enum HOMEPAGE = "https://github.com/dd86k/vddhx";   // @suppress(dscanner.style.undocumented_declaration)
+enum LICENSE = "MIT";                               // @suppress(dscanner.style.undocumented_declaration)
 
 /// Compiler that built this binary, e.g. "LDC (frontend 2.111)".
-///
-/// Neither __VENDOR__ nor __VERSION__ reports the compiler's own patch level, nor
-/// LDC's 1.x versioning, so the frontend number is what we can honestly show.
+/// NOTE: __VENDOR__/__VERSION__ don't give the compiler's own version (e.g.
+/// LDC 1.x), only the frontend.
 enum COMPILER = __VENDOR__ ~ " (frontend " ~ frontendVersion(__VERSION__) ~ ")";
 
-/// Render __VERSION__'s packed major*1000 + minor form as a dotted version.
+/// Render __VERSION__ (major*1000 + minor) as a string: "2.111".
 private string frontendVersion(uint v)
 {
     return format("%u.%03u", v / 1000, v % 1000);
 }
 
-/// The SDL actually in use, e.g. "3.4.12".
-///
-/// Runtime rather than bindbc-sdl's compile-time version: the default build opens
-/// whichever SDL3 the system has and the bindings sit at their 3.2.0 baseline, so
-/// the two rarely agree. Only valid once SDL is loaded.
+/// Runtime SDL version, e.g. "3.4.12". Not bindbc's (baseline 3.2.0). Only
+/// valid after SDL is loaded.
 private string sdlVersion()
 {
     static string cached;
@@ -50,8 +45,7 @@ private string sdlVersion()
     return cached;
 }
 
-/// The log folder as the dialog shows it, home shortened to ~ on Posix so it
-/// fits the value column.
+/// Log folder for display; home shortened to ~ on Posix.
 private string logsShown()
 {
     static string cached;
@@ -70,8 +64,7 @@ private string logsShown()
     return cached;
 }
 
-/// `path` as a file:// URL for SDL_OpenURL, which hands it to the platform's
-/// opener; a folder opens in the file manager.
+/// `path` as a file:// URL for SDL_OpenURL.
 private string fileUrl(string path)
 {
     import std.algorithm.searching : canFind;
@@ -92,47 +85,41 @@ private string fileUrl(string path)
         if (isAlphaNum(c) || "-._~/:".canFind(c))
             url.put(c);
         else
-            url.put(format("%%%02X", c)); // byte-wise, so UTF-8 encodes as it should
+            url.put(format("%%%02X", c)); // byte-wise, so UTF-8 encodes correctly
     }
     return url.data;
 }
 
-/// Window title, and the key ddui pools the dialog's container under.
+/// Window title, also the container key.
 private enum TITLE = "About vddhx";
 
 private enum int WIDTH  = 460;
 private enum int HEIGHT = 270;
 
-/// Side of the icon beside the heading.
+/// Icon size beside the heading.
 private enum int MARK = 48;
 
 private enum mu_Color LINK_COLOR = mu_Color(110, 170, 255, 255);
 private enum mu_Color LINK_HOVER = mu_Color(160, 205, 255, 255);
 
-// Deferred to the next about_frame, since opening the dialog means placing its
-// container against the current window size, which only the frame call knows.
+// Deferred to the next about_frame: placement needs the window size.
 private __gshared bool wantOpen;
 
-/// Request the dialog. Safe to call from anywhere in a frame (the menu handler).
+/// Request the dialog. Safe anywhere in a frame.
 void about_open()
 {
     wantOpen = true;
 }
 
-/// Draw the dialog if it is open. Call once per frame from ui_frame, after the
-/// main window is ended, so it lands as its own root container on top.
-/// Params:
-///     ctx = ddui context.
-///     width = Current window width in pixels.
-///     height = Current window height in pixels.
+/// Draw the dialog if open. Call once per frame from ui_frame, after the main
+/// window ends, so it's a root container on top.
 void about_frame(mu_Context* ctx, int width, int height)
 {
     if (wantOpen)
     {
         wantOpen = false;
-        // mu_get_container creates the container (open) on first use; the window
-        // below asks with MU_OPT_CLOSED, which returns null until that happens,
-        // so the dialog stays hidden until this point.
+        // mu_get_container creates it open; until then the MU_OPT_CLOSED window below
+        // gets null and stays hidden.
         mu_Container* cnt = mu_get_container(ctx, TITLE);
         cnt.rect = mu_Rect((width - WIDTH) / 2, (height - HEIGHT) / 2, WIDTH, HEIGHT);
         cnt.open = 1;
@@ -153,9 +140,8 @@ void about_frame(mu_Context* ctx, int width, int height)
     if (about_secret(ctx, "vddhx " ~ VERSION))
     {
         elite_open();
-        // Stand aside: mu_end promotes whichever root container the mouse was
-        // pressed on, so a dialog left open here would sit on top of what it
-        // just launched.
+        // Close: mu_end raises the clicked root container, so the dialog would cover
+        // what it just opened.
         mu_get_current_container(ctx).open = 0;
     }
     mu_label(ctx, "A graphical port of the ddhx hex editor.");
@@ -195,7 +181,7 @@ void about_frame(mu_Context* ctx, int width, int height)
     else
         mu_label(ctx, "not logging to a file");
 
-    // First cell eats all the width but the button's, pushing it flush right.
+    // Right-align the button.
     static immutable int[2] closerow = [ -90, -1 ];
     mu_layout_row(ctx, 2, closerow.ptr, 0);
     mu_label(ctx, "");
@@ -205,17 +191,15 @@ void about_frame(mu_Context* ctx, int width, int height)
     mu_end_window(ctx);
 }
 
-// The application icon's palette. The eight byte-class cells come from
-// hex_classify itself, so the mark cannot drift from what the hex panel draws.
+// Icon palette. Byte-class colours come from hex_classify so they can't drift.
 private enum mu_Color NUL    = hex_classify(0, 0x00, null);
 private enum mu_Color PRINT  = hex_classify(0, 'A',  null);
 private enum mu_Color WS     = hex_classify(0, '\n', null);
 private enum mu_Color CTRL   = hex_classify(0, 0x01, null);
 private enum mu_Color HIGH   = hex_classify(0, 0x80, null);
-/// Not a byte class: the bookmark wash is a background tint, too dark to carry a
-/// whole cell on its own.
+/// Not a byte class: the bookmark tint is too dark for a whole cell.
 private enum mu_Color ACCENT = mu_Color(230, 170, 60, 255);
-/// ui.d's CANVAS is pure black, which would vanish into a dark dialog.
+/// ui.d's CANVAS (black) would vanish in a dark dialog.
 private enum mu_Color PLATE  = mu_Color(18, 18, 22, 255);
 
 private immutable mu_Color[3][3] MARK_CELLS = [
@@ -224,17 +208,13 @@ private immutable mu_Color[3][3] MARK_CELLS = [
     [NUL,   NUL,    HIGH],
 ];
 
-/// Draw the application icon into `box`.
-///
-/// Redrawn from tools/mkicon.d's geometry rather than loaded from assets/icon,
-/// so the dialog looks right whether or not the icon files were ever installed.
-/// Rasterising the real thing was measured at 28ms for a 256 - fine to spend
-/// once in a build script, not on every launch - and at this size the difference
-/// is the antialiasing alone.
+/// Draw the application icon into `box`, from tools/mkicon.d's geometry.
+/// Rasterising the real one costs ~28ms at 256px, too slow for startup; the
+/// only difference at this size is antialiasing.
 private void about_mark(mu_Context* ctx, mu_Rect box)
 {
-    // mkicon.d's design space: plate inset 2 of 64, side 60, radius 13; cells 12
-    // wide and 3 apart from 11, corners at 2.5.
+    // mkicon.d units: plate inset 2 of 64, side 60, radius 13; cells 12 wide,
+    // 3 apart from 11, radius 2.5.
     const int n = box.w < box.h ? box.w : box.h;
     const float u = n / 64.0f;
     const int ox = box.x + (box.w - n) / 2;
@@ -253,12 +233,8 @@ private void about_mark(mu_Context* ctx, mu_Rect box)
         }
 }
 
-/// Fill a rounded rectangle out of ddui's only shape.
-///
-/// One scanline at a time, except that consecutive rows sharing an inset collapse
-/// into a single rect: a radius of r contributes at most r distinct insets per
-/// corner, so the whole mark costs about sixty rects rather than one per row.
-/// Unantialiased, which at a 2px cell radius is a single-pixel jag.
+/// Fill a rounded rect with ddui rects. Rows with the same inset are merged,
+/// so it costs ~r rects per corner. Not antialiased.
 private void round_rect(mu_Context* ctx, mu_Rect r, float rad, mu_Color color)
 {
     int runY, runInset = row_inset(0, r.h, rad);
@@ -274,7 +250,7 @@ private void round_rect(mu_Context* ctx, mu_Rect r, float rad, mu_Color color)
     mu_draw_rect(ctx, mu_Rect(r.x + runInset, r.y + runY, r.w - 2 * runInset, r.h - runY), color);
 }
 
-/// Horizontal inset of one scanline, 0 between the corner arcs.
+/// Scanline inset; 0 between the corner arcs.
 private int row_inset(int y, int h, float rad)
 {
     const float mid = y + 0.5f;
@@ -288,8 +264,7 @@ private int row_inset(int y, int h, float rad)
     return cast(int)(rad - sqrt(rad * rad - d * d) + 0.5f);
 }
 
-/// A label that quietly answers to a click. Drawn exactly as mu_label draws it,
-/// with no colour, underline or tab stop: whoever finds it went looking.
+/// Hidden clickable label, drawn exactly like mu_label (no hint, no tab stop).
 /// Returns: true on the frame it is left-clicked.
 private bool about_secret(mu_Context* ctx, string text)
 {
@@ -300,8 +275,8 @@ private bool about_secret(mu_Context* ctx, string text)
     return ctx.mouse_pressed == MU_MOUSE_LEFT && ctx.focus == id;
 }
 
-/// A clickable URL: link-coloured text, underlined while hovered or focused.
-/// Returns: true when activated by a left click or the return key.
+/// URL link: coloured, underlined on hover/focus.
+/// Returns: true on left click or Return.
 private bool about_link(mu_Context* ctx, string url)
 {
     mu_Id id = mu_get_id(ctx, url.ptr, url.length);
@@ -314,7 +289,7 @@ private bool about_link(mu_Context* ctx, string url)
     bool lit = ctx.hover == id || ctx.focus == id;
     mu_Color color = lit ? LINK_HOVER : LINK_COLOR;
 
-    // Left-aligned and vertically centred in the cell, matching mu_label.
+    // Left-aligned, vertically centred, like mu_label.
     mu_Font font = ctx.style.font;
     int th = ctx.text_height(font);
     mu_Vec2 pos = mu_Vec2(r.x + ctx.style.padding, r.y + (r.h - th) / 2);

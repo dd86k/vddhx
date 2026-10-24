@@ -1,8 +1,7 @@
-/// The settings tab's page: categories down the left, saved on every change.
+/// Settings tab: categories on the left, saved on every change.
 ///
-/// Only what is saved lives here. How the focused view is set up (columns,
-/// character set, byte order) belongs to the View menu, which previews it on the
-/// grid it changes; a tab could only ever show those for a view hidden behind it.
+/// Saved settings only. Per-view setup (columns, charset, byte order) lives in
+/// the View menu, where it previews on the grid.
 /// Authors: dd86k <dd@dax.moe>
 module settings;
 
@@ -26,8 +25,7 @@ void settings_page(mu_Context* ctx)
     static immutable int[2] split = [ CATEGORY_W, -1 ];
     mu_layout_row(ctx, 2, split.ptr, -1);
 
-    // ui_frame packs its rows edge to edge for the grid; a form wants air. Only
-    // inside the panels: the row they sit in is still laid out by the window.
+    // ui_frame packs rows tight for the grid; add spacing inside the panels only.
     int spacing = ctx.style.spacing;
 
     mu_begin_panel(ctx, "!categories");
@@ -53,13 +51,12 @@ void settings_page(mu_Context* ctx)
 
 private:
 
-// A button that stays lit while its page is up.
 bool settings_category(mu_Context* ctx, string name, bool selected)
 {
     mu_Id id = mu_get_id(ctx, name.ptr, name.length);
     mu_Rect r = mu_layout_next(ctx);
     mu_update_control(ctx, id, r, 0);
-    // Flat unless lit or hovered, so the page in front is the one that stands out.
+    // Flat unless selected or hovered.
     if (selected)
         mu_draw_rect(ctx, r, ctx.style.colors[MU_COLOR_BUTTONFOCUS]);
     else if (ctx.hover == id)
@@ -85,9 +82,8 @@ void settings_label(mu_Context* ctx, string label)
     mu_label(ctx, label);
 }
 
-// The field keeps showing the value in force until it is typed into, and what was
-// typed is only taken on Enter or leaving the box, so "24" is not saved as "2" on
-// the way.
+// Shows the current value until edited; input is committed on Enter or blur,
+// so typing "24" doesn't save "2" first.
 struct ColumnsBox
 {
     char[16] buf;
@@ -117,7 +113,7 @@ bool settings_columns(mu_Context* ctx, ref ColumnsBox box, string key, int curre
     import core.stdc.string : strlen;
     Prefs parsed;
     if (prefs_set(parsed, "columns", cast(string) box.buf[0 .. strlen(box.buf.ptr)]) == false)
-        return false; // the next frame puts the value in force back
+        return false; // next frame restores the current value
     cols = parsed.columns;
     return true;
 }
@@ -148,7 +144,7 @@ bool settings_endian(mu_Context* ctx, ref int index, Endian current)
 
 void settings_defaults(mu_Context* ctx)
 {
-    // Distinct addresses: a dropdown is told apart by its index's.
+    // Separate statics: dropdowns are identified by their index's address.
     __gshared ColumnsBox columns;
     __gshared int charset, endian, insert;
 
@@ -214,8 +210,7 @@ void settings_appearance(mu_Context* ctx)
     settings_saved(ctx, changed);
 }
 
-// Saves on the frame a value changed, then says where it went: the one place the
-// file's location is ever shown.
+// Saves on change, then shows the file path (only place it's shown).
 void settings_saved(mu_Context* ctx, bool changed)
 {
     __gshared bool failed;

@@ -1,10 +1,5 @@
-/// PNG as a structure: the eight-byte signature, then the chunk loop.
-///
-/// The first real format over the structure interface, and picked for it: chunks are
-/// length-prefixed and follow one another, so the whole file parses front to back one
-/// record at a time, which is what the incremental cache is built around. Only IHDR
-/// is broken into fields; every other chunk's payload is left as one span, there being
-/// nothing to say about it that the bytes do not.
+/// PNG structure: signature, then chunks. Only IHDR is split into fields;
+/// other payloads are one span.
 /// Authors: dd86k <dd@dax.moe>
 module structures.png;
 
@@ -12,16 +7,14 @@ import std.system : Endian;
 
 import structure;
 
-/// The signature every PNG opens with.
 immutable ubyte[8] PNG_SIGNATURE = [ 0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a ];
 
-/// Whether the bytes a document starts with are a PNG's.
+/// Whether `head` starts with the PNG signature.
 bool png_detect(const(ubyte)[] head)
 {
     return head.length >= PNG_SIGNATURE.length && head[0 .. PNG_SIGNATURE.length] == PNG_SIGNATURE;
 }
 
-/// PNG structure over a document.
 final class PngStructure : IStructure
 {
     string name()
@@ -47,27 +40,23 @@ final class PngStructure : IStructure
 
     void forget()
     {
-        ended = false; // the interned tags are worth keeping, this is not
+        ended = false; // keep interned tags
     }
 
     private:
 
     bool ended;
 
-    // Chunk types are four bytes read out of the file rather than literals, so naming
-    // a span after one means a string per chunk. Keyed by the four bytes, a file of a
-    // hundred thousand IDATs allocates once. Per structure instance rather than global:
-    // the table belongs to the document being parsed, and nothing here is threaded.
+    // Interned chunk type names keyed by the 4 bytes, so many IDATs allocate once.
     string[uint] tags;
 
-    // One chunk: a length, a type, that many bytes of payload, and a CRC over the two
-    // middle parts. Registered under the declared length even when the file is too
-    // short for it, so a truncated last chunk shows as the short one it is.
-    // Returns: false at the end of the chunks, whether that is IEND or a cut file.
+    // Length, type, payload, CRC. Registered at the declared length even if the
+    // file is truncated, so a short last chunk shows as such.
+    // Returns: false at IEND or end of file.
     bool chunk(ref StructureBuilder b)
     {
         long head = b.at;
-        if (head + 8 > b.size) // no room for even a length and a type
+        if (head + 8 > b.size) // no room for length and type
             return false;
 
         ulong declared = b.peek(4, Endian.bigEndian);
@@ -101,8 +90,7 @@ final class PngStructure : IStructure
         return true;
     }
 
-    // IHDR's thirteen bytes, the one payload worth naming: everything downstream of a
-    // PNG is read in terms of these.
+    // IHDR's 13 bytes, the only payload split into fields.
     void ihdr(ref StructureBuilder b)
     {
         b.field(StructureRole.scalar, "width", 4);
@@ -114,9 +102,7 @@ final class PngStructure : IStructure
         b.field(StructureRole.flags, "interlace", 1);
     }
 
-    // A chunk type as a name, interned. Bytes outside printable ASCII become dots
-    // rather than going into a name as they are: a corrupt type is worth seeing, and
-    // worth seeing as four characters wide.
+    // Interned chunk type name. Non-printable bytes become dots, keeping it 4 wide.
     string tagName(ref const(ubyte[4]) raw)
     {
         uint key = (raw[0] << 24) | (raw[1] << 16) | (raw[2] << 8) | raw[3];
@@ -145,11 +131,11 @@ version (unittest)
         ];
         out_ ~= cast(const(ubyte)[]) type;
         out_ ~= data;
-        out_ ~= [ 0, 0, 0, 0 ]; // CRC, which nothing here checks
+        out_ ~= [ 0, 0, 0, 0 ]; // CRC, unchecked
         return out_;
     }
 
-    // Signature, IHDR, one IDAT, IEND. Offsets the tests below name by hand:
+    // Signature, IHDR, one IDAT, IEND. Offsets used by the tests:
     //   0  signature (8)
     //   8  IHDR chunk (25): 8 length, 12 type, 16 width, 20 height, 24 depth,
     //      25 colour, 26 compression, 27 filter, 28 interlace, 29 crc
@@ -201,9 +187,9 @@ unittest
     StructureSpan s;
     assert(structure_at(c, 0, s));
     assert(s.role == StructureRole.magic && s.name == "signature" && s.length == 8);
-    assert(structure_ancestor(c, 0, 1, s) == false); // the signature is not in a chunk
+    assert(structure_ancestor(c, 0, 1, s) == false); // signature isn't in a chunk
 
-    // IHDR, broken out into its fields, each inside the chunk that holds them.
+    // IHDR fields, nested in the chunk.
     assert(structure_at(c, 8, s) && s.role == StructureRole.length && s.name == "length");
     assert(structure_at(c, 12, s) && s.role == StructureRole.magic && s.name == "type");
     assert(structure_at(c, 16, s) && s.name == "width" && s.length == 4);
@@ -215,25 +201,24 @@ unittest
     assert(structure_ancestor(c, 16, 1, s));
     assert(s.name == "IHDR" && s.at == 8 && s.length == 25 && s.role == StructureRole.none);
 
-    // An unnamed payload stays one span.
+    // Other payloads: one span.
     assert(structure_at(c, 41, s));
     assert(s.role == StructureRole.data && s.name == "data" && s.at == 41 && s.length == 4);
     assert(structure_ancestor(c, 41, 1, s));
     assert(s.name == "IDAT" && s.at == 33 && s.length == 16);
 
-    // IEND carries no payload, so its CRC follows its type.
+    // IEND: no payload, CRC follows type.
     assert(structure_at(c, 57, s) && s.role == StructureRole.checksum);
     assert(structure_ancestor(c, 57, 1, s) && s.name == "IEND" && s.length == 12);
 
-    // Nothing past the end of the file.
     assert(structure_at(c, 61, s) == false);
 
-    // Every byte of the file is covered, the chunks tiling it end to end.
+    // Chunks tile the whole file.
     foreach (long at; 0 .. cast(long) doc.length)
         assert(structure_at(c, at, s), "uncovered byte");
 }
 
-/// Only the chunks up to the offset asked about are walked.
+/// Parsing stops at the requested offset.
 unittest
 {
     ubyte[] doc = pngFile();
@@ -243,15 +228,14 @@ unittest
     StructureSpan s;
     assert(structure_at(c, 16, s) && s.name == "width");
 
-    // IHDR was reached, so IDAT and IEND were not: asking for one of their offsets
-    // would have had to parse them.
+    // Only up to IHDR was parsed.
     assert(structure_ancestor(c, 41, 1, s) && s.name == "IDAT");
 }
 
-/// A file cut short mid-chunk shows the short chunk rather than nothing.
+/// Truncated file: the short chunk is still shown.
 unittest
 {
-    ubyte[] doc = pngFile()[0 .. 45]; // inside IDAT, its CRC lost
+    ubyte[] doc = pngFile()[0 .. 45]; // inside IDAT, CRC lost
 
     StructureCache c = structure_bind(new PngStructure(), readerFor(doc), doc.length);
 
@@ -260,14 +244,14 @@ unittest
     assert(s.name == "IDAT" && s.at == 33 && s.length == 12); // 16 declared, 12 left
     assert(structure_at(c, 41, s) && s.role == StructureRole.data && s.length == 4);
 
-    // And one cut inside a chunk header registers nothing of it at all.
+    // Cut inside a chunk header: nothing registered for it.
     doc = pngFile()[0 .. 12];
     c = structure_bind(new PngStructure(), readerFor(doc), doc.length);
     assert(structure_at(c, 0, s) && s.name == "signature");
     assert(structure_at(c, 8, s) == false);
 }
 
-/// A corrupt chunk type is still a four-character name.
+/// Corrupt chunk type still gives a 4-character name.
 unittest
 {
     ubyte[] doc = PNG_SIGNATURE.dup;
@@ -280,7 +264,7 @@ unittest
     assert(s.name == ".A.B" && s.length == 14);
 }
 
-/// An edit drops the chunk it lands in and no more, and the same spans come back.
+/// An edit only drops the chunk it lands in; reparse gives the same spans.
 unittest
 {
     ubyte[] doc = pngFile();
@@ -288,9 +272,9 @@ unittest
     StructureCache c = structure_bind(new PngStructure(), readerFor(doc), doc.length);
 
     StructureSpan s;
-    assert(structure_at(c, 57, s)); // parse it all
+    assert(structure_at(c, 57, s)); // parse all
 
-    structure_invalidate(c, 41); // inside IDAT's payload
+    structure_invalidate(c, 41); // IDAT payload
     assert(structure_at(c, 16, s) && s.name == "width"); // IHDR survived
     assert(structure_ancestor(c, 41, 1, s) && s.name == "IDAT" && s.at == 33);
     assert(structure_ancestor(c, 57, 1, s) && s.name == "IEND");

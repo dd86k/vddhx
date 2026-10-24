@@ -1,4 +1,4 @@
-/// UI layout for vddhx.
+/// Main UI: documents, views, pane grid, menus, and commands.
 module ui;
 
 import core.atomic : atomicLoad, atomicStore;
@@ -39,179 +39,125 @@ import std.array : Appender, appender;
 import std.format : format, sformat, formattedWrite;
 import std.path : baseName;
 
-// NOTE: ref local once DMD 2.111 is the minimum compiler version
-//       Otherwise, keep using local pointers
+// NOTE: Use ref locals once DMD 2.111 is the minimum; until then, pointers.
 
 private:
 
-/// One open document: the ddhx editor that owns the bytes, and where they live on
-/// disk. Nothing here says how they are being looked at - that is a View's
-/// business - so one document can be open in several panels at once.
+/// An open document: the editor and the file path. Viewing state lives in
+/// View, so a document can be open in several panes.
+///
+/// Per-document state (marks, structure, endian, charset) belongs to the bytes,
+/// so it's shared by every view of the file.
 struct Document
 {
-    /// Owns the bytes and all the piece-table/undo machinery; a panel only ever
-    /// reads through it.
+    /// Owns the bytes and undo history; panels only read through it.
     IDocumentEditor editor;
 
-    /// Bumped on every change to the bytes, for the views caching them. See
-    /// HexView.revision.
+    /// Bumped on every byte change, for view caches. See HexView.revision.
     uint revision;
 
-    /// Disk path, empty for an in-memory scratch buffer. Set on Open and on a
-    /// first Save As, it is the target an in-place Save writes to.
+    /// Empty for a scratch buffer. Set on Open and first Save As; Save writes here.
     string path;
 
-    /// What the tab shows: the file's base name, or "untitled" for a scratch.
+    /// Tab text: base name, or "untitled".
     string title;
 
-    /// Refuses edits until ui_toggle_readonly lifts it. Disks and devices open this
-    /// way: a stray keystroke there lands on bytes no temp file stands between.
+    /// Refuse edits until ui_toggle_readonly. Disks and devices open this way
+    /// since writes go straight to the device.
     bool restricted;
 
-    /// Bookmarked runs of bytes, sorted. Per document rather than per view, since
-    /// an offset only means something against the bytes it points into.
-    ///
-    /// Edits made through a panel carry them along (see bookmark_shift), but undo
-    /// and redo do not: the editor reports only where a change landed, not how far
-    /// it moved, so a mark can end up a few bytes off after a rolled-back insert.
+    /// Bookmarks, sorted. Shifted by panel edits (bookmark_shift).
+    /// NOTE: Undo/redo doesn't shift them (the editor reports no move distance),
+    /// so marks can drift after undoing an insert.
     Bookmark[] marks;
 
-    /// Structure over the bytes, when the file's first bytes said what it is. Per
-    /// document for the same reason the marks are: a span is an offset into these
-    /// bytes, and two views of one file are looking at one structure.
-    ///
-    /// Unbound until detectStructure finds a format it knows, and left that way when it
-    /// does not - the grid then colours bytes by class, as it always did.
+    /// Structure overlay, bound by detectStructure if the format is known;
+    /// otherwise unbound and bytes are coloured by class.
     StructureCache structure;
 
-    /// Read-ahead for the structure parser, which walks forward a few header bytes at a
-    /// time. Its length is the capacity.
+    /// Structure parser read-ahead; length is capacity.
     ubyte[] structureBuf;
-    /// Structure buffer starting position in document.
+    /// Document offset of structureBuf[0].
     long structureStart;
-    /// Structure buffer length that's valid to use, since last fill.
+    /// Valid bytes in structureBuf.
     size_t structureLen;
-    /// Structure buffer revision the buffer was filled at, taken from the document.
-    /// Used to invalidate the buffer for a fresh read.
+    /// Revision at fill; a mismatch forces a reread.
     uint structureRev;
 
-    /// Byte order multi-byte values are read and written in: the inspector's rows
-    /// and the scalars of a find pattern (`u16:`, `f32:`, `utf16:`). Per document,
-    /// because the order is a property of the format on disk - a big-endian file
-    /// stays big-endian while the little-endian one in the next tab stays little -
-    /// and views of one file are looking at one format.
-    ///
-    /// A structure names the order of its own fields and ignores this, formats being
-    /// free to mix the two internally.
+    /// Byte order for the inspector and find scalars (`u16:`, `f32:`, `utf16:`).
+    /// Structures specify their own per field.
     Endian endian = Endian.littleEndian;
 
-    /// The find or skip walking these bytes off the UI thread, null until the first.
-    /// The document takes no edits while one runs: a match found before an insert
-    /// would land on the wrong bytes.
+    /// Background find/skip; null until first used. Edits are refused while it
+    /// runs, since matches would shift.
     BackgroundWorker job;
-    /// The view the job was started from, locked until it answers.
+    /// View that started the job; locked until done.
     View* jobView;
 
-    /// Which single-byte set the text lane reads the bytes through. Per document
-    /// for the same reason the order is: a mainframe dump is EBCDIC in every pane
-    /// it is open in, and what a byte says is a property of the file rather than of
-    /// the looking.
-    ///
-    /// The lane and nothing else. A find pattern names its own encoding (`utf8:`,
-    /// `utf16:`) and goes on meaning that whatever this says, there being no such
-    /// thing as a pattern whose encoding is implied.
+    /// Text lane charset. Find patterns specify their own encoding.
     immutable(Charset)* charset = &ASCII;
 
-    /// The empty, read-only stand-in behind the settings tab, so tabs, panes and
-    /// the omnibar take that tab like any other. Commands that would edit, save
-    /// or split it check ui_on_settings and do nothing.
+    /// Read-only placeholder behind the settings tab, so it behaves like any tab.
+    /// Edit/save/split commands check ui_on_settings.
     bool settingsPage;
 }
 
-/// One way of looking at a document: which document, plus everything about the
-/// looking - caret, selection, scroll position, entry mode.
-///
-/// Split from Document so the same file can be open in two panels at different
-/// offsets, each with its own caret, the way an editor's windows sit over its
-/// buffers. Splitting a pane is what makes a second one.
+/// A view onto a document: caret, selection, scroll, entry mode. Separate from
+/// Document so one file can be open in several panes. Created by splitting.
 struct View
 {
-    /// The document this is a view of. Never null while the view is in a pane.
+    /// Never null while in a pane.
     Document* doc;
 
-    /// Persisted hex panel state. The caret is active from the outset so it sits
-    /// ready on a blank panel, letting a file be built before anything is opened.
+    /// Caret active from the start so a blank panel accepts typing.
     HexView hex = { active: true };
 
-    /// The comparison this view is one side of, null for an ordinary view. Which
-    /// side it is - and so whether it carries the colouring - is read off the Diff;
-    /// see diff_peer.
+    /// Comparison this view is in, or null. See diff_peer.
     Diff* diff;
 
-    /// The counterpart's bytes, one block at a time. The colour hook is asked about
-    /// one byte at a time but in offset order, so reading a block ahead answers a
-    /// screenful of them.
-    ///
-    /// Dropped at the top of every frame the view draws (see ui_pane) rather than
-    /// invalidated on edits: the counterpart can be typed into in its own pane,
-    /// undone, or reloaded, and none of that passes through here.
+    /// Read-ahead of the peer's bytes for the colour hook (asked in offset order).
+    /// Dropped each frame in ui_pane instead of invalidated: the peer can change
+    /// in ways that don't pass through here.
     ubyte[] peerBuf;
-    /// Ditto, the document offset `peerBuf[0]` holds.
+    /// Document offset of peerBuf[0].
     size_t peerStart;
-    /// Ditto, how much of it is valid. Zero means nothing is cached.
+    /// Valid bytes; 0 means empty.
     size_t peerLen;
 
-    /// The counterpart's size, read once a frame alongside the block above. What
-    /// separates a byte that differs from one the other document does not have.
+    /// Peer size, read once a frame; bytes past it are additions.
     long peerSize;
 
-    /// Where this view was scrolled to when it was last drawn, so the next frame
-    /// can tell whether the user moved it. Only the side that moved drives the
-    /// other; see ui_sync_diffs.
+    /// Scroll position at last draw, to detect user scrolling. Only the side that
+    /// moved drives the other; see ui_sync_diffs.
     long topSeen;
 
-    /// What the panel header's breadcrumb is composed into. Handed to the panel as a
-    /// slice, so it has to outlive the frame that wrote it.
+    /// Breadcrumb buffer, passed to the panel as a slice; must outlive the frame.
     char[128] crumbs = void;
 
-    /// Whether that position was put there by the counterpart rather than the user.
-    /// What tells a scroll the panel could not honour in full - the shorter of two
-    /// files, stopped at its last screenful - from the user scrolling this side,
-    /// which look identical from outside and would have the two panes dragging each
-    /// other back and forth.
+    /// Position was set by the peer, not the user. Distinguishes a clamped
+    /// follow (shorter file at its end) from a user scroll, else the panes fight.
     bool topForced;
 }
 
-/// Two views held against each other and compared byte for byte.
+/// Two views compared byte for byte, offset-aligned.
 ///
-/// The pairing is between views rather than documents: it is the two tabs the user
-/// put side by side, so one file can be compared against two others at once and
-/// each pairing scrolls as its own unit. A view is in at most one comparison, and
-/// both sides point at the same Diff.
+/// Pairs views, not documents, so one file can be compared against two others.
+/// A view is in at most one Diff. `base` keeps its normal colours; only
+/// `against` is tinted and reads the peer's bytes.
 ///
-/// The two sides are not alike, hence the names. The comparison is something done
-/// *to* a document the user already had open: that one goes on looking exactly as
-/// it did, and the file opened against it is the one that reports. So only
-/// `against` is tinted and only `against` reads the other's bytes at all.
-///
-/// Strictly offset-aligned - byte n against byte n - which is the honest reading
-/// for firmware images and same-size structures, and visibly wrong the moment one
-/// side has an insertion. Aligning on content instead would need rows standing for
-/// no offset at all, but a hex panel row *is* its offset (`row * columns`), so the
-/// display would part company with the offsets the caret, the bookmarks and every
-/// edit are addressed in. That is a feature of its own, not a tweak to this one.
+/// NOTE: Strictly offset-aligned (byte n vs n), wrong after an insertion.
+/// Content alignment would need rows without offsets, which conflicts with
+/// row = offset / columns everywhere else. A separate feature.
 struct Diff
 {
-    /// The view the comparison was started from: the document the user was
-    /// already working in, left in its ordinary colours.
+    /// View the diff was started from; normal colours.
     View* base;
 
-    /// The view opened against it, which carries the colouring. Never the same
-    /// view as `base`.
+    /// View opened against it; carries the colouring. Never `base`.
     View* against;
 }
 
-/// The other side of `v`'s comparison, or null when it is not in one.
+/// The other view in `v`'s diff, or null.
 View* diff_peer(View* v)
 {
     if (v is null || v.diff is null)
@@ -219,85 +165,66 @@ View* diff_peer(View* v)
     return v.diff.base is v ? v.diff.against : v.diff.base;
 }
 
-/// Whether `v` is the side that reports: the one drawn against the other, and so
-/// the only one that dims its matching bytes and colours its differing ones.
+/// Whether `v` is the coloured side.
 bool diff_reports(View* v)
 {
     return v.diff && v.diff.against is v;
 }
 
-/// One pane: a strip of tabs over a hex panel, filling its share of the window.
-/// Where it sits is the grid's business, not its own; see Column.
+/// A tab strip over a hex panel. Placement is the grid's; see Column.
 struct Pane
 {
-    /// The views this pane has tabs for, in strip order. Never empty while the
-    /// pane is in the grid: a pane that loses its last tab is closed with it.
+    /// Tabbed views, in strip order. Never empty while in the grid.
     View*[] views;
 
-    /// Index into `views` of the one on screen.
+    /// Index of the visible view.
     size_t current;
 
-    /// The strip's own scroll offset and in-progress drag.
     TabBar tabs;
 
-    /// Item slice handed to the strip, rebuilt each frame into storage that only
-    /// ever grows, so a steady tab count costs no allocation.
+    /// Strip items, rebuilt per frame; only grows.
     TabItem[] items;
 
-    /// Share of its column's height this pane takes, against the panes stacked
-    /// with it. Relative, so a window resize needs no arithmetic here: the same
-    /// weights simply divide a different number of pixels.
+    /// Relative height share within the column.
     int weight = SPLIT_WEIGHT;
 
-    /// Where this pane was last drawn, recorded by ui_panes so a hit test can be
-    /// made from outside a frame: a file dragged over the window arrives as an SDL
-    /// event carrying a window coordinate and nothing else.
+    /// Last drawn rect, for hit tests outside a frame (SDL drop events only carry
+    /// a window coordinate).
     mu_Rect rect;
 }
 
-/// One column of the grid: panes stacked top to bottom over a shared width.
+/// A grid column: panes stacked over a shared width.
 ///
-/// The grid is two levels deep and no more - a row of columns across the window, a
-/// stack of panes down each - rather than a tree. That covers the splits an editor
-/// actually offers and keeps the layout to two passes of the same flat arithmetic
-/// (see split.d), with no interior node that can be left holding one child.
+/// Two levels only (columns, then panes), no tree: covers editor-style splits
+/// with flat arithmetic (split.d) and no single-child interior nodes.
 struct Column
 {
-    /// The panes in it, top to bottom. Never empty while the column is in
-    /// `columns`: a column that loses its last pane is closed with it.
+    /// Top to bottom. Never empty while in `columns`.
     Pane*[] panes;
 
-    /// Share of the window's width this column takes, against its neighbours'.
+    /// Relative width share.
     int weight = SPLIT_WEIGHT;
 
-    /// Where the column was last drawn, the same way a pane records its own rect.
-    /// A sideways split reaches around a whole column rather than into it, so this
-    /// is the shape that has to be shown to somebody about to make one.
+    /// Last drawn rect, for previewing a sideways split.
     mu_Rect rect;
 }
 
-/// Every open document, every view onto one, and every column of panes.
+/// All documents, views and columns.
 ///
-/// All held by pointer: the panel's callbacks park a Document* and a View* for ddui
-/// to hand back on every read, colour and edit, and those have to survive a
-/// document being closed out of the middle of the array. A pane is named by its
-/// pointer everywhere below for the same reason, so that splitting or closing
-/// elsewhere cannot turn a reference to one pane into a reference to another.
-///
-/// None is ever empty: startup opens a scratch buffer, closing the last tab of the
-/// last pane leaves a fresh one behind, and a pane that empties is closed unless it
-/// is the only one.
+/// Held by pointer: panel callbacks keep Document*/View* across frames, and
+/// panes are referenced by pointer so splits and closes can't redirect them.
+/// Never empty: startup opens a scratch buffer, closing the last tab leaves a
+/// fresh one, and an emptied pane closes unless it's the only one.
 __gshared Document*[] docs;
 /// Ditto.
 __gshared Column*[] columns;
 
-/// The pane taking the keyboard. Every action below acts on its front tab. Never
-/// null once ui_init has run, and always a pane still in `columns`.
+/// Pane with keyboard focus; actions apply to its front tab. Always valid after
+/// ui_init.
 __gshared Pane* focused;
 
-/// Scratch for laying a line of panes out: the weights copied out of the grid and
-/// the pixel sizes they come to. One pair for the row of columns, one reused
-/// column by column for the panes down each. All only ever grow.
+/// Layout scratch: weights and pixel sizes for columns, and for panes (reused
+/// per column). Only grows.
 __gshared int[] colWeights;
 /// Ditto.
 __gshared int[] colSizes;
@@ -306,29 +233,24 @@ __gshared int[] paneWeights;
 /// Ditto.
 __gshared int[] paneSizes;
 
-/// Narrowest a pane may be dragged, in pixels: enough that the offset column and a
-/// few bytes stay legible.
+/// Minimum pane width when dragging: offsets and a few bytes stay legible.
 enum int PANE_MIN = 180;
 
-/// Shortest a pane may be dragged, in pixels: enough for its tab strip and a row
-/// or two of bytes, so it stays recognisably a pane rather than a stray strip.
+/// Minimum pane height when dragging: tab strip and a row or two.
 enum int PANE_MIN_H = 120;
 
-/// Scratch buffers are numbered in creation order: "untitled", "untitled 2"...
+/// Scratch buffer counter: "untitled", "untitled 2"...
 __gshared uint untitled;
 
-/// Omnibar state, and the candidate rows handed to it. Like the tab strip's, the
-/// row storage is rebuilt each frame into an array that only ever grows.
+/// Omnibar state and rows (rebuilt per frame, only grows).
 __gshared Omnibar omni;
 /// Ditto.
 __gshared OmniItem[] omniItems;
 
-/// Whether the box was up at the end of the last frame, so ui_frame can spot the
-/// frame it goes up on and take the menubar's dropdown down with it.
+/// Omnibar was open last frame, to close the menu on the frame it opens.
 __gshared bool omniWasShown;
 
-/// The pane and tab each switcher row stands for, parallel to `omniItems` while
-/// the switcher is the mode showing. A row's id indexes this.
+/// Pane and tab per switcher row, parallel to `omniItems`. Indexed by row id.
 struct OmniTab
 {
     Pane* pane;
@@ -337,15 +259,10 @@ struct OmniTab
 /// Ditto.
 __gshared OmniTab[] omniTabs;
 
-/// The hover behind the tab tooltip: which tab the pointer is resting on, where it
-/// sits, and since when.
+/// Tab tooltip state: hovered tab, rect, and since when. Tabs show base names;
+/// the tip shows the full path.
 ///
-/// A tab shows a base name, which is what a tab has room for and what tells one
-/// file from another most of the time; the path is what tells two files of the same
-/// name apart, and it goes here rather than on the tab.
-///
-/// Reported by ui_pane as each strip draws and settled by ui_panes once they all
-/// have: only one pane can hold the pointer, and no strip can know it is the one.
+/// Reported by ui_pane per strip, settled by ui_panes after all draw.
 struct TabTip
 {
     Pane* pane;
@@ -357,19 +274,12 @@ struct TabTip
 /// Ditto.
 __gshared TabTip tip;
 
-/// How long the pointer rests on a tab before its path comes up. Long enough that
-/// crossing the strip on the way somewhere else puts nothing on screen.
+/// Hover delay before the path tooltip; long enough to cross the strip.
 enum Duration TIP_DELAY = msecs(500);
 
-/// The hover behind the field tooltip: which view the pointer is in and the byte it is
-/// resting on.
-///
-/// No rect, unlike TabTip: a tab is a target with edges to hang a tip off, a byte is
-/// wherever the pointer happens to be, so the tip follows the pointer instead.
-///
-/// Found rather than reported. Each panel records the byte under the pointer as it
-/// draws (see HexView.hoverByte) and only one of them can hold it, so ui_panes asks
-/// the views afterwards rather than every pane racing to say so.
+/// Field tooltip state: hovered view and byte. Follows the pointer (no rect).
+/// Found after drawing via HexView.hoverByte, since only one panel can hold
+/// the pointer.
 struct SpanTip
 {
     View* view;
@@ -379,15 +289,13 @@ struct SpanTip
 /// Ditto.
 __gshared SpanTip spanTip;
 
-/// The window's size this frame, for the few things placed against its edges from
-/// outside ddui's layout. See ui_tip.
+/// Window size this frame, for things placed outside ddui's layout. See ui_tip.
 __gshared int winW;
 /// Ditto.
 __gshared int winH;
 
-/// The bookmark the naming prompt is about: the document it belongs to, and the
-/// offset it starts at rather than its place in the list, since an edit made while
-/// the box is up renumbers the list but leaves a mark on its own bytes.
+/// Bookmark being named: its document and start offset (not index, since edits
+/// while the box is open renumber the list).
 struct MarkPrompt
 {
     Document* doc;
@@ -396,9 +304,7 @@ struct MarkPrompt
 /// Ditto.
 __gshared MarkPrompt markPrompt;
 
-/// Which question the box is holding an answer to. OmniMode.prompt is one mode for
-/// all of them - the box knows it was asked something, not what - so this is what
-/// the rows, the preview and the answer are dispatched on.
+/// Which question the prompt is answering; OmniMode.prompt doesn't say.
 enum PromptKind
 {
     markName,
@@ -406,12 +312,10 @@ enum PromptKind
     charset,
     openDevice,
 }
-/// Ditto. Read only while the box is up on OmniMode.prompt.
+/// Ditto. Only valid while the box is in OmniMode.prompt.
 __gshared PromptKind promptKind;
 
-/// The pane taking the keyboard, the view it has in front, and the document that
-/// view is showing: `focusedPane` for the tabs, `focusedView` for the caret and what
-/// is on screen, `focusedDoc` for the bytes themselves.
+/// Focused pane, its front view, and that view's document.
 ref Pane focusedPane()
 {
     return *focused;
@@ -427,11 +331,8 @@ ref Document focusedDoc()
     return *focusedView().doc;
 }
 
-/// Find `p` in the grid: which column it is in, and how far down that column.
-///
-/// The one place the grid is searched by pointer, so nothing else has to carry
-/// indices about.
-/// Returns: True when the pane is in the grid, with `ci` and `pi` filled in.
+/// Find `p` in the grid.
+/// Returns: True if found, with `ci` (column) and `pi` (pane) set.
 bool ui_locate(const(Pane)* p, out size_t ci, out size_t pi)
 {
     foreach (size_t i, Column* c; columns)
@@ -449,7 +350,7 @@ bool ui_locate(const(Pane)* p, out size_t ci, out size_t pi)
     return false;
 }
 
-/// Panes in the whole grid, counted across every column.
+/// Total panes across all columns.
 size_t ui_pane_count()
 {
     size_t n;
@@ -458,9 +359,8 @@ size_t ui_pane_count()
     return n;
 }
 
-/// The `n`th pane in reading order - columns left to right, panes top to bottom
-/// within each - or null when there are not that many. This is the order Ctrl+1..9
-/// and the next/previous pane commands count in.
+/// `n`th pane in reading order (columns left to right, panes top to bottom),
+/// or null. Used by Ctrl+1..9 and next/previous pane.
 Pane* ui_pane_nth(size_t n)
 {
     foreach (Column* c; columns)
@@ -472,8 +372,7 @@ Pane* ui_pane_nth(size_t n)
     return null;
 }
 
-/// Ditto, the other way: where `p` falls in that order, or -1 when it is not in
-/// the grid at all.
+/// Ditto, reversed: `p`'s index, or -1.
 ptrdiff_t ui_pane_index(const(Pane)* p)
 {
     ptrdiff_t at;
@@ -489,51 +388,32 @@ ptrdiff_t ui_pane_index(const(Pane)* p)
     return -1;
 }
 
-/// The main window, for parenting the native Open dialog. main sets it up front.
+/// Main window, parent for native dialogs. Set by main.
 __gshared SDL_Window* uiWindow;
 
-/// Colour behind the hex grid. Dark on purpose: the byte colours - the dimmed
-/// padding zeros above all - are picked to read against something near black,
-/// and lose most of their contrast on a mid grey.
+/// Grid background. Near black: byte colours (dim zeros especially) are tuned
+/// for it.
 enum mu_Color CANVAS = mu_Color(0, 0, 0, 255);
 
-/// Wash behind a bookmarked byte in the grid. Amber, nothing hex_classify hands
-/// out being near it, so a mark reads as a mark rather than as one more class of
-/// byte, and a wash rather than a foreground so a marked run comes out as a band
-/// the eye catches.
-///
-/// Kept this dark for BOOKMARK_TEXT's sake: the obvious bright amber leaves white
-/// sitting on it at under 2:1, where at this depth white lands around 6.6:1.
-///
-/// This is the one bookmark colour the panel is told; where the amber has to come
-/// back at full strength - a run's outline, a minimap cell - the panel lifts it
-/// there itself. See hex_wash_lift.
+/// Bookmark wash. Amber, which no byte class uses. Dark so white text stays
+/// readable (~6.6:1 vs <2:1 for bright amber). The panel brightens it for
+/// outlines and the minimap (hex_wash_lift).
 enum mu_Color BOOKMARK_WASH = mu_Color(125, 85, 22, 255);
 
-/// Colour a bookmarked byte's glyphs are drawn in, over BOOKMARK_WASH: the one
-/// place a mark overrules hex_classify. Inside a run the user marked by hand,
-/// standing out is worth more than what class the byte falls in.
+/// Bookmarked glyph colour; overrides hex_classify inside marks.
 enum mu_Color BOOKMARK_TEXT = mu_Color(255, 255, 255, 255);
 
-/// A byte that differs from the one at the same offset in the document it is
-/// being compared against.
+/// Byte differs from the peer.
 enum mu_Color DIFF_CHANGED = mu_Color(255, 95, 95, 255);
 
-/// A byte past the end of that document: here, but with nothing to compare it
-/// against. Green, so a file that is simply longer than the other reads as a tail
-/// of additions rather than as a wall of changes.
+/// Byte past the peer's end. Green so a longer file reads as additions.
 enum mu_Color DIFF_ADDED = mu_Color(120, 230, 140, 255);
 
-/// How much of its brightness a matching byte keeps while a comparison is up, in
-/// percent.
-///
-/// Dimming rather than flattening the matches to one grey, the way a diff over
-/// *text* does: hex_classify's colouring is how the structure of a binary is read
-/// at all, and dropping it would leave the untouched 99% of a patched file
-/// unreadable.
+/// Brightness kept by matching bytes in a diff, percent. Dimmed, not greyed,
+/// so the class colours stay readable.
 enum int DIFF_MATCH_KEEP = 42;
 
-/// Ditto: `c` at DIFF_MATCH_KEEP percent, alpha untouched.
+/// Ditto: `c` dimmed, alpha kept.
 mu_Color diff_dim(mu_Color c)
 {
     return mu_Color(
@@ -543,35 +423,25 @@ mu_Color diff_dim(mu_Color c)
         c.a);
 }
 
-/// Apply the application's own style over ddui's defaults. Call once after
-/// mu_init, before the first frame.
-///
-/// ddui leaves MU_COLOR_PANELBG fully transparent, so the hex panel would take the
-/// window's grey; now that the renderer honours alpha, the canvas has to be asked
-/// for outright.
+/// Apply app style over ddui defaults. Call once after mu_init.
+/// ddui's MU_COLOR_PANELBG is transparent, so set the canvas explicitly.
 public void ui_style(mu_Context* ctx)
 {
     ctx.style.colors[MU_COLOR_PANELBG] = CANVAS;
 }
 
-/// Last thing the application had to say, taking the whole status bar until the
-/// next keystroke: a find that came up empty, a bookmark set, a copied inspector
-/// reading - keystrokes whose result would otherwise be invisible.
-///
-/// It covers the readout rather than sharing the row with it. The window is often
-/// narrow, and the moment a message fires is the moment the offset and the entry
-/// mode matter least: the user just acted and wants the answer, and the readout is
-/// one keystroke away from being back.
+/// Status message, replacing the readout until the next key or click (empty
+/// find, bookmark set, copied value). Covers the readout instead of sharing
+/// the row, since windows are often narrow.
 __gshared char[96] statusText;
 /// Ditto.
 __gshared size_t statusLen;
 
-/// Ditto. Formatted into a fixed buffer, so keep the message short; whatever
-/// runs past the end is cut.
+/// Ditto. Fixed buffer; long messages are truncated.
 void ui_status(Args...)(string fmt, Args args)
 {
-    // NOTE: sformat throws if the message doesn't fit
-    //       "comparing %s with %s" was enough to make it trip.
+    // NOTE: sformat throws if the message doesn't fit ("comparing %s with %s"
+    //       tripped it).
     static struct Sink
     {
         void put(scope const(char)[] s)
@@ -590,46 +460,35 @@ void ui_status(Args...)(string fmt, Args args)
         statusLen = 0;
 }
 
-/// Put the message away. The event loop calls this on every key and button press,
-/// so a message answers the keystroke that raised it and lives until the next one:
-/// pressing anything is the acknowledgement, which leaves no timer to guess how
-/// long a reading takes. Called before the press is dispatched, so a key that
-/// raises a message of its own still leaves it up.
+/// Clear the message. Called by the event loop on every key/button press,
+/// before dispatch, so a key can still post its own message.
 public void ui_status_dismiss()
 {
     statusLen = 0;
 }
 
-/// Path the async Open dialog picked, waiting for the next frame to consume it.
-/// Written by the dialog callback (possibly off-thread), read on the main thread,
-/// so the ready flag is atomic and orders the buffer write against the read.
+/// Path from the async Open dialog, consumed next frame. The callback may run
+/// off-thread; the atomic flag orders the buffer write.
 __gshared char[4096] pendingPath;
 shared bool pendingReady;
 
-/// Whether that path was asked for by "Compare With..." rather than by Open, and
-/// the view it is to be compared against.
-///
-/// Only the main thread touches these, the dialog callback knowing nothing about
-/// what raised it. The view is checked against the grid before use: the dialog is
-/// not modal, so its tab can be closed while it is up.
+/// Pending path is for "Compare With...", against this view. Main thread only.
+/// Validate the view before use: the dialog isn't modal.
 __gshared bool pendingCompare;
 /// Ditto.
 __gshared View* compareFrom;
 
-/// Ditto, for the async Save As dialog. The callback does no GC work, so the
-/// chosen path is stashed here and the actual write happens on the main thread.
+/// Ditto for Save As. The callback does no GC work; the write happens on the
+/// main thread.
 __gshared char[4096] pendingSavePath;
 shared bool pendingSaveReady;
 
-/// The editor the open Save As dialog was raised for. Tabs can be switched while a
-/// non-modal dialog is up, so the destination is matched back to the document that
-/// asked rather than to whatever is in front when it returns - saving one file's
-/// bytes under another's name would lose both.
+/// Editor the Save As was raised for. Tabs may switch while the dialog is
+/// open, so save to this, not the front document.
 __gshared IDocumentEditor pendingSaveTarget;
 
-/// Hand the UI the window handle before the first frame. Also opens the first
-/// tab, an empty editable scratch buffer, so a file can be built from scratch
-/// before anything is ever opened.
+/// Set the window before the first frame. Also opens the first tab, an empty
+/// editable scratch buffer.
 public void ui_init(SDL_Window* window)
 {
     uiWindow = window;
@@ -637,22 +496,19 @@ public void ui_init(SDL_Window* window)
     ui_new_tab();
 }
 
-/// Open a fresh scratch document in a new tab and bring it to the front: a
-/// zero-length in-memory buffer, editable from the outset, which gets a name the
-/// first time it is saved.
+/// Open a new scratch document (empty, in-memory, editable) in a new tab.
 public void ui_new_tab()
 {
     ++untitled;
 
     Document* d = newDocument();
-    d.editor = new PieceV4DocumentEditor(true); // no document: a zero-length, in-memory buffer
+    d.editor = new PieceV4DocumentEditor(true); // in-memory, empty
     d.title  = untitled == 1 ? "untitled" : format("untitled %u", untitled);
 
     View* v = newView(d);
     wireView(v);
 
-    // The very first tab has no pane to go in yet, ui_init opening it before
-    // anything has laid the window out.
+    // First tab: no pane exists yet.
     if (columns.length == 0)
     {
         Column* c = new Column;
@@ -662,12 +518,12 @@ public void ui_new_tab()
     }
 
     Pane* p = focused;
-    p.views ~= v; // .length updated
+    p.views ~= v;
     p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
-    v.hex.takeFocus = true; // ready to take bytes without a click first
+    v.hex.takeFocus = true; // take typing without a click
 }
 
-/// A document set up the way the saved defaults say, already in `docs`.
+/// New document from the saved defaults, added to `docs`.
 Document* newDocument()
 {
     Document* d = new Document;
@@ -677,7 +533,7 @@ Document* newDocument()
     return d;
 }
 
-/// Ditto, a view of `d`. A split copies its source instead, see ui_split_view.
+/// New view of `d`. Splits copy instead; see ui_split_view.
 View* newView(Document* d)
 {
     View* v = new View;
@@ -689,38 +545,34 @@ View* newView(Document* d)
     return v;
 }
 
-/// A fresh pane with no tabs in it. Callers fill in `views` before the next frame.
+/// Empty pane; fill `views` before the next frame.
 Pane* newPane()
 {
     Pane* p = new Pane;
 
-    // The strip caps this pane's own canvas, so the active tab takes the grid's
-    // colour rather than the window's. ui_style cannot do it: panes come and go
-    // long after it has run.
+    // Active tab blends into the grid canvas. Per pane since ui_style runs once.
     p.tabs.content = CANVAS;
     return p;
 }
 
-/// Bring the tab at `index` to the front of the focused pane. Out-of-range
-/// indices are ignored, so a stale index from a strip built before a close
-/// cannot strand the panel.
+/// Bring tab `index` of the focused pane to front. Out of range is ignored
+/// (stale index after a close).
 public void ui_select_tab(size_t index)
 {
     ui_select_tab_in(focused, index);
 }
 
-/// Ditto, in a given pane - which also becomes the focused one, since bringing a
-/// tab forward is asking to work in it.
+/// Ditto in `p`, which also gets focus.
 void ui_select_tab_in(Pane* p, size_t index)
 {
     if (p is null || index >= p.views.length)
         return;
     focused = p;
     p.current = index;
-    p.views[index].hex.takeFocus = true; // typing follows the tab that came forward
+    p.views[index].hex.takeFocus = true; // typing follows the tab
 }
 
-/// Step `delta` tabs along from the current one, wrapping at either end.
+/// Step `delta` tabs, wrapping.
 public void ui_cycle_tab(int delta)
 {
     Pane* p = focused;
@@ -734,20 +586,14 @@ public void ui_cycle_tab(int delta)
     ui_select_tab(cast(size_t) at);
 }
 
-/// Close the tab at `index`, resolving unsaved edits first (the document is
-/// brought to the front for the prompt, and a cancel leaves it open).
-///
-/// It is the view that closes. The document behind it only goes when nothing else
-/// is looking at it, so closing one half of a split leaves the file open in the
-/// other half - and has nothing to prompt about.
+/// Close tab `index`, prompting for unsaved edits first (cancel keeps it).
+/// Closes the view; the document closes only with its last view.
 public void ui_close_tab(size_t index)
 {
     ui_close_tab_in(focused, index);
 }
 
-/// Ditto, in a given pane, held by pointer: the prompt below can bring another
-/// pane forward and a Save As raised from it can run a frame's worth of work, so
-/// this has to stay the pane that was asked about.
+/// Ditto in `p`. By pointer: the prompt or Save As may change focus.
 void ui_close_tab_in(Pane* p, size_t index)
 {
     if (p is null || index >= p.views.length)
@@ -758,45 +604,40 @@ void ui_close_tab_in(Pane* p, size_t index)
     if (last && ui_confirm_discard(d, "Close document") != Confirm.proceed)
         return;
 
-    // Any comparison the tab was one side of is over. After the prompt, which can
-    // still be cancelled and leave everything as it was.
+    // End any diff. After the prompt, which may cancel.
     diff_unlink(p.views[index]);
 
-    // Nobody left to land a walk on. The document may live on in another view.
+    // No view left for the job. The document may live on elsewhere.
     if (d.jobView is p.views[index])
     {
         d.job.abandon();
         d.jobView = null;
     }
 
-    // The view is not wanted back: this is the one route where a tab leaves a pane
-    // for nowhere rather than for another pane.
+    // The only route where a view leaves to nowhere.
     cast(void) ui_take_view(p, index);
     if (last)
         ui_drop_document(d);
 
     if (p.views.length == 0)
     {
-        // An empty pane goes and the grid closes over it - unless it is the last
-        // one, in which case the window itself is what is being shut.
+        // Close the emptied pane, unless it's the last.
         if (ui_pane_count() > 1)
         {
             ui_drop_pane(p);
             return;
         }
 
-        // Out of tabs in the last pane: a fresh scratch buffer takes its place.
-        // Closing a tab is not asking to quit - that is the window close button
-        // and File > Quit, both of which go through ui_may_quit.
+        // Last pane emptied: open a scratch buffer. Closing a tab isn't quitting
+        // (that's ui_may_quit).
         ui_new_tab();
         return;
     }
 
-    p.views[p.current].hex.takeFocus = true; // ready to type in
+    p.views[p.current].hex.takeFocus = true;
 }
 
-/// How many views, in any pane, are currently showing `d`. Closing the last of
-/// them is what closes the document itself.
+/// Views of `d` across all panes.
 size_t ui_view_count(const(Document)* d)
 {
     size_t n;
@@ -808,12 +649,11 @@ size_t ui_view_count(const(Document)* d)
     return n;
 }
 
-/// Close `d`'s editor and drop it from `docs`. Only for a document no view is
-/// left showing: every View.doc still held by a pane has to stay valid.
+/// Close `d`'s editor and remove it. Only when no view shows it.
 void ui_drop_document(Document* d)
 {
     if (d.job)
-        d.job.abandon(); // before the editor it reads through goes
+        d.job.abandon(); // before the editor goes
     if (d.editor)
     {
         IDocument[] held = (cast(PieceV4DocumentEditor) d.editor).documents();
@@ -831,8 +671,7 @@ void ui_drop_document(Document* d)
     }
 }
 
-/// Bring a view of `d` to the front, so a prompt about it is a prompt about what
-/// is on screen. Does nothing when no view is showing it.
+/// Bring a view of `d` to front, so a prompt matches the screen. No-op if none.
 void ui_focus_document(const(Document)* d)
 {
     foreach (Column* c; columns)
@@ -851,14 +690,11 @@ void ui_focus_document(const(Document)* d)
     }
 }
 
-/// Drop `p` from the grid, handing its share of the space to a neighbour so the
-/// panes still fill the window between them. Its views go with it, so the caller
-/// closes those first (ui_close_tab_in does).
+/// Remove `p` from the grid, giving its space to a neighbour. Close its views
+/// first (ui_close_tab_in does).
 ///
-/// The neighbour is the one before it in the same column, or the one after when the
-/// pane closing is at the top, so the column's total weight is unchanged and
-/// nothing outside it moves. A pane on its own takes the column with it, and the
-/// same rule then applies one level up.
+/// The neighbour is the one above, or below if at the top, so the column total
+/// is unchanged. A lone pane removes its column, same rule one level up.
 void ui_drop_pane(Pane* p)
 {
     size_t ci, pi;
@@ -870,8 +706,7 @@ void ui_drop_pane(Pane* p)
 
     if (c.panes.length > 1)
     {
-        // Read the neighbour out before the removal shifts the indices under it:
-        // it is the pane itself that has to be remembered, not where it sat.
+        // Take the neighbour pointer before removal shifts indices.
         heir = c.panes[pi > 0 ? pi - 1 : pi + 1];
         heir.weight += p.weight;
         c.panes = c.panes[0 .. pi] ~ c.panes[pi + 1 .. $];
@@ -884,8 +719,7 @@ void ui_drop_pane(Pane* p)
         heir = into.panes[0];
     }
 
-    // Only the pane that just went can have been the one taking keys, and the
-    // neighbour that took its space is the natural place for them to land.
+    // Focus moves to the neighbour that took the space.
     if (focused is p)
     {
         focused = heir;
@@ -893,32 +727,23 @@ void ui_drop_pane(Pane* p)
     }
 }
 
-/// A second view of whatever the focused pane has in front: the same document at
-/// the same offset, ready to go in a pane of its own.
-///
-/// The same document rather than a copy - one editor, one undo history, one set of
-/// bookmarks - so an edit made in either pane shows up in both. What they do not
-/// share is the looking: the new view carries the old one's caret and scroll
-/// position as a starting point and then moves on its own.
+/// New view of the focused document at the same position, for a split. Same
+/// editor, undo and bookmarks; caret and scroll diverge after.
 View* ui_split_view()
 {
     View* src = focusedPane.views[focusedPane.current];
 
     View* v = new View;
     v.doc = src.doc;
-    v.hex = hex_split(src.hex); // its own scratch buffers, the same place in the file
-    wireView(v);                // and its own hooks, pointing at itself
+    v.hex = hex_split(src.hex); // own scratch, same position
+    wireView(v); // own hooks
     v.hex.takeFocus = true;
     return v;
 }
 
-/// Pair `base` and `against` up as the two sides of a comparison: `base` is the
-/// document already open, `against` the one opened to compare with it and the
-/// only one of the two that shows it (see Diff).
-///
-/// Either view already comparing something is taken out of that pairing first: a
-/// view has one counterpart, because it has one set of colours to say so with.
-/// Comparing a view with itself is not a comparison and is refused.
+/// Pair views in a diff: `base` already open, `against` opened to compare and
+/// the coloured side (see Diff). Existing pairings are dropped first (one peer
+/// per view). Self-comparison is refused.
 void diff_link(View* a, View* b)
 {
     if (a is null || b is null || a is b)
@@ -933,21 +758,15 @@ void diff_link(View* a, View* b)
     a.diff = d;
     b.diff = d;
 
-    // The next frame each draws fills in the cached block and the peer size; the
-    // scroll comes across now so the pairing opens lined up rather than a frame
-    // later.
+    // Sync scroll now so they open aligned; caches fill on next draw.
     hex_set_top_offset(b.hex, hex_top_offset(a.hex));
     a.topSeen  = hex_top_offset(a.hex);
     b.topSeen  = a.topSeen;
-    b.topForced = true; // and if b is the shorter, its clamp is not a lead
+    b.topForced = true; // if b is shorter, its clamp isn't a user scroll
 }
 
-/// Take `v` out of whatever comparison it is in, and the other side with it: a
-/// comparison with one side left is not one. Safe on a view that is not in one.
-///
-/// Called wherever a view stops being what it was - closed, or handed a different
-/// document - since the colours would otherwise go on claiming a counterpart that
-/// is gone or no longer the one being compared.
+/// End `v`'s diff, for both sides. Safe if not in one. Call when a view closes
+/// or changes document.
 void diff_unlink(View* v)
 {
     if (v is null || v.diff is null)
@@ -959,12 +778,11 @@ void diff_unlink(View* v)
         if (side is null)
             continue;
         side.diff    = null;
-        side.peerLen = 0; // nothing to compare against; drop the stale block
+        side.peerLen = 0; // drop the stale block
     }
 }
 
-/// Split the focused pane in two side by side: a second pane opens to the right
-/// of its column, in a new column of its own, and takes the keyboard.
+/// Split the focused pane: a new column to its right, focused.
 public void ui_split()
 {
     if (ui_on_settings())
@@ -972,8 +790,8 @@ public void ui_split()
     ui_split_pane(ui_split_view());
 }
 
-/// Ditto, with the view the new pane opens on given: a second look at the same
-/// document for a plain split, the file being compared against for a comparison.
+/// Ditto, opening on `v` (same document for a split, the other file for a
+/// diff).
 void ui_split_pane(View* v)
 {
     size_t ci, pi;
@@ -983,10 +801,8 @@ void ui_split_pane(View* v)
     Pane* p = newPane();
     p.views ~= v;
 
-    // A column of one, taking half the width of the column it came out of, so the
-    // rest of the window is left as it was. Splitting a column with panes stacked
-    // in it puts the new column alongside the whole stack rather than reaching into
-    // it, which is what keeps the grid two deep.
+    // New single-pane column taking half the source column's width. Splits beside
+    // the whole stack, keeping the grid two levels.
     Column* c = new Column;
     c.panes ~= p;
     c.weight = columns[ci].weight / 2;
@@ -996,11 +812,8 @@ void ui_split_pane(View* v)
     focused = p;
 }
 
-/// Split the focused pane in two, one above the other: a second pane opens
-/// directly below it in the same column, and takes the keyboard.
-///
-/// The column keeps its width, so the split is felt only within it and the panes
-/// either side stay where they are.
+/// Split the focused pane vertically: a new pane below in the same column,
+/// focused. Column width is unchanged.
 public void ui_split_down()
 {
     if (ui_on_settings())
@@ -1020,9 +833,8 @@ public void ui_split_down()
     focused = p;
 }
 
-/// Close the focused pane, tab by tab, so each document still gets its say about
-/// unsaved changes. A cancelled prompt stops the whole thing where it stands.
-/// The last pane cannot be closed: there would be nothing left to draw.
+/// Close the focused pane tab by tab, with unsaved prompts; a cancel stops.
+/// The last pane can't be closed.
 public void ui_close_pane()
 {
     if (ui_pane_count() <= 1)
@@ -1034,21 +846,19 @@ public void ui_close_pane()
     Pane* p = focused;
     for (;;)
     {
-        // Looked up again each round: the last tab closing takes this pane out of
-        // the grid altogether, which is the loop's way out.
+        // Re-locate each round: closing the last tab removes the pane.
         size_t ci, pi;
         if (ui_locate(p, ci, pi) == false)
-            return; // gone, which is what was asked for
+            return; // gone, done
 
         size_t before = p.views.length;
         ui_close_tab_in(p, p.current);
-        if (p.views.length == before) // a prompt was cancelled: leave it open
+        if (p.views.length == before) // cancelled
             return;
     }
 }
 
-/// Move the keyboard to the pane at `index`, counted in the order ui_pane_nth lays
-/// out. Out of range does nothing, so Ctrl+9 on a two-pane window is ignored.
+/// Focus pane `index` (ui_pane_nth order). Out of range is ignored.
 public void ui_focus_pane(size_t index)
 {
     Pane* p = ui_pane_nth(index);
@@ -1058,7 +868,7 @@ public void ui_focus_pane(size_t index)
     p.views[p.current].hex.takeFocus = true;
 }
 
-/// Step `delta` panes along from the focused one, wrapping at either end.
+/// Step `delta` panes, wrapping.
 public void ui_cycle_pane(int delta)
 {
     long count = cast(long) ui_pane_count();
@@ -1071,21 +881,18 @@ public void ui_cycle_pane(int delta)
     ui_focus_pane(cast(size_t) at);
 }
 
-/// Close the tab on screen. The Ctrl+W and File > Close Tab route.
+/// Close the visible tab (Ctrl+W, File > Close Tab).
 public void ui_close_current_tab()
 {
     ui_close_tab(focusedPane.current);
 }
 
-/// The title text last handed to SDL, NUL-terminated, and its length. Kept so
-/// the per-frame refresh can tell when nothing has changed and skip the call.
+/// Last title sent to SDL, to skip unchanged updates.
 __gshared char[512] titleShown;
 __gshared size_t titleShownLen;
 
-/// Keep the window title naming the document in front, with a marker while it has
-/// unsaved edits. Called every frame, so the text is composed into a stack buffer
-/// and compared: a steady document costs a memcmp rather than a round trip to the
-/// window manager.
+/// Update the window title (document name, unsaved marker). Called per frame;
+/// composed on the stack and compared, so unchanged titles skip SDL.
 void ui_window_title()
 {
     if (uiWindow is null)
@@ -1098,21 +905,19 @@ void ui_window_title()
         return;
 
     titleShown[0 .. text.length] = text;
-    titleShown[text.length] = 0; // SDL takes a C string
+    titleShown[text.length] = 0; // C string
     titleShownLen = text.length;
     SDL_SetWindowTitle(uiWindow, titleShown.ptr);
 }
 
-/// `s` cut back to at most `max` bytes, on a UTF-8 boundary so it never ends in
-/// half a character (which the renderer draws as a replacement glyph, or refuses
-/// outright). Bytes rather than characters, since what runs out is a fixed buffer.
+/// `s` truncated to `max` bytes on a UTF-8 boundary.
 string ui_clip(string s, size_t max)
 {
     if (s.length <= max)
         return s;
 
     size_t cut = max;
-    while (cut > 0 && (s[cut] & 0xc0) == 0x80) // the cut landed mid-character
+    while (cut > 0 && (s[cut] & 0xc0) == 0x80) // mid-character
         --cut;
     return s[0 .. cut];
 }
@@ -1123,16 +928,14 @@ unittest
     assert(ui_clip("exactly8", 8) == "exactly8");
     assert(ui_clip("truncate me", 8) == "truncate");
 
-    // A cut landing inside the two-byte "é" takes the whole character out.
+    // Cut inside "é" drops it.
     assert(ui_clip("abécd", 3) == "ab");
     assert(ui_clip("abécd", 4) == "abé");
     assert(ui_clip("é", 1) == "");
 }
 
-/// `n` written out, for the small counts the chrome numbers things with. A table
-/// rather than a format call: every pane asks for its own every frame, and nothing
-/// drawn per frame is allowed to allocate. Past the table it is a dash, a window
-/// with that many panes in it having no room to read them anyway.
+/// Small numbers as strings, from a table (called per frame, no allocation).
+/// "-" past the table.
 string ui_ordinal(ptrdiff_t n)
 {
     static immutable string[64] NUMBERS = ()
@@ -1155,8 +958,7 @@ unittest
     assert(ui_ordinal(-1) == "-");
 }
 
-/// Compose "name * - vddhx" into `buf`, which must have room for the fixed parts,
-/// and return the slice written. A name too long for it is cut back.
+/// "name * - vddhx" into `buf` (must fit the fixed parts); long names are cut.
 char[] ui_title_text(char[] buf, string name, bool dirty)
 {
     enum string DIRTY  = " *";
@@ -1183,26 +985,24 @@ unittest
     assert(ui_title_text(buf, "mid.bin", true)  == "mid.bin * - vddhx");
     assert(ui_title_text(buf, "", false)        == " - vddhx");
 
-    // 32 bytes of buffer, 10 of them spoken for by the fixed parts, so a name is
-    // cut back to 22 bytes.
+    // 32-byte buffer, 10 fixed: names cut to 22.
     assert(ui_title_text(buf, "123456789012345678901234", false) ==
         "1234567890123456789012 - vddhx");
-    // 22 bytes exactly, the last two being "é": nothing to cut.
+    // Exactly 22 with "é" last: no cut.
     assert(ui_title_text(buf, "12345678901234567890é", false) ==
         "12345678901234567890é - vddhx");
-    // One byte over, with the cut falling inside that "é": it goes whole.
+    // One over, cut inside "é": dropped.
     assert(ui_title_text(buf, "123456789012345678901é", false) ==
         "123456789012345678901 - vddhx");
 }
 
-/// SDL Open-dialog callback. May fire on another thread, so it does no GC work:
-/// it just copies the first chosen path out and flags it for ui_frame to open.
-/// `fileList` is null on error and an empty (null-terminated) list on cancel.
+/// SDL Open dialog callback, possibly off-thread: no GC. Copies the path and
+/// flags it for ui_frame. `fileList`: null on error, empty on cancel.
 extern (C) void ui_on_file_picked(void* user, const(char*)* fileList, int filter) nothrow
 {
     if (fileList is null || *fileList is null)
         return;
-    const(char)* path = *fileList; // first selection; the dialog is single-select
+    const(char)* path = *fileList; // single-select
     size_t n;
     while (path[n] && n + 1 < pendingPath.length)
     {
@@ -1214,10 +1014,8 @@ extern (C) void ui_on_file_picked(void* user, const(char*)* fileList, int filter
     ui_wakeup();
 }
 
-/// Nudge the event loop into drawing a frame. It sleeps between events, so a change
-/// made from anywhere but an event - the dialog callbacks, which SDL answers on its
-/// own thread - would sit unseen until the next keystroke. Pushing to SDL's queue
-/// is safe from any thread, and the loop ignores the event itself.
+/// Wake the event loop for a frame. For changes made outside events (dialog
+/// callbacks on SDL's thread). Thread-safe.
 void ui_wakeup() nothrow
 {
     SDL_Event wake; // .init zeroes the union
@@ -1225,28 +1023,19 @@ void ui_wakeup() nothrow
     SDL_PushEvent(&wake);
 }
 
-/// ddui-side byte source: hand the panel's window request straight to the editor,
-/// which fills only those bytes. `user` is the editor stashed in hex.readUser.
-///
-/// The editor rather than the view, because this doubles as the byte source the
-/// search module walks a document with (see ui_find_step), where there is no
-/// panel involved at all.
+/// Panel byte source: reads via the editor in hex.readUser. Takes the editor,
+/// not the view, since search uses it too (ui_find_step).
 ubyte[] hexRead(long pos, ubyte[] buf, void* user)
 {
     IDocumentEditor ed = cast(IDocumentEditor) user;
     return ed.view(pos, buf);
 }
 
-/// ddui-side colour scheme: every byte classified the way the panel would have
-/// anyway, dimmed or called out where a comparison is up. `user` is the View in
-/// hex.colorUser, the comparison belonging to the bytes being drawn rather than to
-/// whichever document happens to be in front.
+/// Panel colour hook: class colour, dimmed or highlighted in a diff. `user` is
+/// the View (hex.colorUser): the diff belongs to the drawn view.
 ///
-/// A mark takes the byte white, outranking the comparison: a marked run is the one
-/// thing on screen the user put there by hand. Nothing is lost either way, a
-/// differing byte inside a run keeping the wash hexBack puts behind it.
-///
-/// Only the reporting side of a comparison is coloured by it; see Diff.
+/// Marks override the diff colour (white text); the diff still shows via the
+/// wash. Only the reporting side is diff-coloured; see Diff.
 mu_Color hexColor(size_t offset, ubyte value, void* user)
 {
     View* v = cast(View*) user;
@@ -1261,8 +1050,7 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
         if (cast(long) offset >= v.peerSize)
             return DIFF_ADDED;
 
-        // A byte the counterpart cannot produce - a read come up short on a file
-        // being written from under us - is not a difference anyone can act on.
+        // Short peer read (file changing underneath): not a difference.
         ubyte other;
         if (diff_peer_byte(v, offset, other) && other != value)
             return DIFF_CHANGED;
@@ -1272,40 +1060,31 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
     return byteColor(v, offset, value);
 }
 
-/// What a byte *is*: the role the document's structure gives it, or its class when no
-/// structure covers it. The two are one channel - both answer the same question - so a
-/// field's role replaces the classifier's rather than competing with it.
-///
-/// One answer behind both the colour the grid draws and the name the breadcrumb says,
-/// so the strip cannot call a byte something the colours disagree with.
-/// `shade` comes back set on the odd fields of a run of touching same-role fields, for
-/// the theme to draw a step off; a byte left to the classifier is never shaded.
+/// Byte role: structure field role, else the classifier's. Shared by grid
+/// colours and breadcrumbs so they agree. `shade` is set on alternating
+/// same-role fields; classifier bytes are never shaded.
 StructureRole byteRole(View* v, size_t offset, ubyte value, out bool shade)
 {
-    // A container claims the byte but colours nothing, so `none` falls through to the
-    // classifier the same as no span at all.
+    // Containers (`none`) fall through to the classifier.
     StructureSpan span;
     if (structure_at(v.doc.structure, cast(long) offset, span) && span.role != StructureRole.none)
     {
         shade = span.shade;
         return span.role;
     }
-    // The document's set, so the colour agrees with the glyph the text lane drew.
+    // Document charset, matching the text lane.
     return structure_classify(value, v.doc.charset);
 }
 
-/// Ditto, as the grid wants it.
+/// Ditto, as a colour.
 mu_Color byteColor(View* v, size_t offset, ubyte value)
 {
     bool shade;
     return theme_role(byteRole(v, offset, value, shade), shade);
 }
 
-/// Structure hook for the grid: the span `level` levels in from the outermost one over
-/// `pos`, for the border the panel draws round it. `user` is the View in hex.spanUser.
-///
-/// The structure hangs off the document, so two views of one file outline the same
-/// fields and the parse behind them is done once.
+/// Panel structure hook: span `level` levels in from the outermost at `pos`,
+/// for borders. `user` is the View. The structure is per document, parsed once.
 bool hexSpan(long pos, int level, ref HexSpan span, void* user)
 {
     View* v = cast(View*) user;
@@ -1322,12 +1101,9 @@ bool hexSpan(long pos, int level, ref HexSpan span, void* user)
     return true;
 }
 
-/// Name the structure gives the byte at `at`, outermost first: "IDAT / length". Written
-/// into `buf` rather than built, this being asked once a frame.
-///
-/// Read the way the grid is: the record, then what in it. Containers carry no name of
-/// their own to skip, so a format that boxes without naming leaves only the field.
-/// Returns: The used slice of `buf`, empty when no structure covers the offset.
+/// Structure trail at `at`, outermost first ("IDAT / length"), into `buf` (per
+/// frame). Unnamed containers are skipped.
+/// Returns: Slice of `buf`, empty if uncovered.
 const(char)[] structureLabel(Document* doc, long at, char[] buf)
 {
     StructureSpan inner;
@@ -1356,21 +1132,16 @@ const(char)[] structureLabel(Document* doc, long at, char[] buf)
     return buf[0 .. n];
 }
 
-/// What sits between a record and the field inside it.
 immutable string SEP = " / ";
 
-/// How many of the structure's fields the '#' list holds. A flat list of a whole
-/// document is the one thing that asks a structure to be walked eagerly, so it is asked
-/// for a listful and no more: a container format big enough to matter would otherwise
-/// be parsed end to end to fill a box showing ten rows.
+/// Max '#' list rows. Listing forces an eager parse, so cap it rather than
+/// parse a large container end to end.
 enum size_t STRUCT_ROWS = 2048;
 
-/// Name of `spans[i]` with the records holding it in front - "IDAT / length". What
-/// structureLabel says about the caret, said about a span already in hand: the parent
-/// links are right there, so nothing has to be looked up by offset.
+/// Trail for `spans[i]` ("IDAT / length") via parent links.
 const(char)[] spanLabel(const(StructureSpan)[] spans, size_t i, char[] buf)
 {
-    ptrdiff_t[16] chain = void; // deeper than a structure nests; see STRUCTURE_MAX_DEPTH
+    ptrdiff_t[16] chain = void; // deeper than STRUCTURE_MAX_DEPTH
     size_t depth;
     for (ptrdiff_t at = i; at >= 0 && depth < chain.length; at = spans[at].parent)
         chain[depth++] = at;
@@ -1397,15 +1168,10 @@ const(char)[] spanLabel(const(StructureSpan)[] spans, size_t i, char[] buf)
     return buf[0 .. n];
 }
 
-/// The trail the breadcrumb strip shows: the format, then what in it the caret is in
-/// - "PNG / IDAT / length".
-///
-/// Where no span covers the caret the last component is the byte's class instead -
-/// "PNG / control", or "control" alone on a document no structure was bound to -
-/// which is the same role the grid coloured it by. The format stays at the root
-/// wherever one is bound: dropping it between two chunks would read as the
-/// structure having been lost, and the strip is the one place saying a document
-/// was parsed at all.
+/// Breadcrumb trail: format, then the caret's span path ("PNG / IDAT /
+/// length"). Uncovered bytes end with their class ("PNG / control", or
+/// "control" without a structure). The format stays at the root so the strip
+/// always shows the document was parsed.
 const(char)[] viewCrumbs(View* v)
 {
     char[64] pathbuf = void;
@@ -1419,16 +1185,13 @@ const(char)[] viewCrumbs(View* v)
     if (format.length == 0)
         return path.length ? sformat(v.crumbs, "%s", path) : null;
     return path.length ?
-        // With structure loaded
         sformat(v.crumbs, "%s%s%s", format, SEP, path) :
-        // Without structure loaded
         sformat(v.crumbs, "%s", format);
 }
 
-/// The byte at `at`, for a caller with one offset to ask about rather than a row.
-/// A failed read is swallowed as a miss: this runs inside a frame, where an exception
-/// would take the window down with it.
-/// Returns: false past the end of the document, and on an empty one.
+/// Byte at `at`. Read failures are a miss: exceptions in a frame would crash
+/// the window.
+/// Returns: false past the end or on an empty document.
 bool viewByte(View* v, size_t at, out ubyte value)
 {
     if (v.doc.editor is null || cast(long) at >= v.doc.editor.size())
@@ -1452,8 +1215,8 @@ bool viewByte(View* v, size_t at, out ubyte value)
     return true;
 }
 
-/// Byte source a structure parses `d` through, swallowing a failed read as a short one:
-/// this runs inside a frame, where an exception would take the window down with it.
+/// Structure byte source for `d`; read failures become short reads (runs in a
+/// frame).
 StructureReadFn documentReader(Document* d)
 {
     return delegate(long at, ubyte[] buf)
@@ -1468,12 +1231,12 @@ StructureReadFn documentReader(Document* d)
     };
 }
 
-/// How much the structure buffer reads ahead at a time.
+/// Structure read-ahead size.
 enum size_t STRUCTURE_BLOCK = 64 * 1024;
 
-/// Serve `buf` from `doc`'s structure buffer, refilling it from `at` on a miss. A
-/// request larger than the buffer goes straight to the editor.
-/// Throws: Whatever the editor does.
+/// Read `buf` from `doc`'s structure buffer, refilling from `at` on a miss.
+/// Larger requests go to the editor directly.
+/// Throws: Editor read errors.
 ubyte[] structureBuffered(Document* doc, long at, ubyte[] buf)
 {
     if (buf.length > STRUCTURE_BLOCK)
@@ -1481,8 +1244,7 @@ ubyte[] structureBuffered(Document* doc, long at, ubyte[] buf)
 
     bool fresh = doc.structureRev == doc.revision && doc.structureLen > 0 &&
         at >= doc.structureStart && at - doc.structureStart < doc.structureLen;
-    // A request straddling the end of a full buffer has more document after it, so
-    // it refills; one past the end of a short buffer is at EOF, so it is served short.
+    // Past the end of a full buffer: refill. Past a short buffer: EOF, serve short.
     if (fresh && at + buf.length > doc.structureStart + doc.structureLen &&
         doc.structureLen == STRUCTURE_BLOCK)
         fresh = false;
@@ -1491,7 +1253,7 @@ ubyte[] structureBuffered(Document* doc, long at, ubyte[] buf)
     {
         if (doc.structureBuf.length < STRUCTURE_BLOCK)
             doc.structureBuf.length = STRUCTURE_BLOCK;
-        doc.structureLen = 0; // a throwing read leaves nothing claimed
+        doc.structureLen = 0; // nothing valid after a throw
         ubyte[] got = doc.editor.view(at, doc.structureBuf);
         doc.structureStart = at;
         doc.structureLen   = got.length;
@@ -1505,9 +1267,7 @@ ubyte[] structureBuffered(Document* doc, long at, ubyte[] buf)
     return buf[0 .. n] = doc.structureBuf[from .. from + n];
 }
 
-/// Give `d` a structure when its opening bytes say what it is, and nothing when they do
-/// not. Called once, on open: what a file *is* does not change under editing, even
-/// when the bytes saying so do.
+/// Bind a structure if the header matches a known format. Once, on open.
 void detectStructure(Document* d)
 {
     if (d.editor is null)
@@ -1516,11 +1276,11 @@ void detectStructure(Document* d)
     ubyte[64] head = void;
     ubyte[] got;
     try
-        got = structureBuffered(d, 0, head); // warms the buffer the parse starts in
+        got = structureBuffered(d, 0, head); // warms the buffer for the parse
     catch (Exception e)
         return;
 
-    // NOTE: Eventually will probably be a loop with a table of functions
+    // TODO: Table of detectors.
     if (png_detect(got))
     {
         d.structure = structure_bind(new PngStructure(), documentReader(d), d.editor.size());
@@ -1528,9 +1288,8 @@ void detectStructure(Document* d)
     }
 }
 
-/// Drop the spans an edit at `pos` invalidated and tell the structure the new size.
-/// Cheap enough to call on every keystroke: the cache truncates rather than reparses,
-/// and the parse that follows is driven by what the next frame actually draws.
+/// Invalidate spans after an edit at `pos` and update the size. Cheap per
+/// keystroke: truncates, reparse happens lazily on draw.
 void structureEdited(Document* doc, long pos)
 {
     if (pos < 0)
@@ -1539,10 +1298,8 @@ void structureEdited(Document* doc, long pos)
     structure_invalidate(doc.structure, pos);
 }
 
-/// Background hook for the grid: a wash behind the bookmarked bytes, nothing behind
-/// the rest. `user` is the View in hex.backUser, for the same reason hexColor takes
-/// one. The panel puts the selection over whatever comes back, so a mark under it
-/// is hidden until the caret moves off - the selection being where the user is now.
+/// Panel background hook: bookmark wash. `user` is the View. The selection
+/// draws over it.
 mu_Color hexBack(size_t offset, ubyte value, void* user)
 {
     View* v = cast(View*) user;
@@ -1552,14 +1309,9 @@ mu_Color hexBack(size_t offset, ubyte value, void* user)
     return bookmark_has(v.doc.marks, cast(long) offset) ? BOOKMARK_WASH : mu_Color(0, 0, 0, 0);
 }
 
-/// Ditto asked of a whole segment at a time: whether any byte in it is marked.
-/// bookmark_hits answers off the run list, so a mark of a few bytes shows on the
-/// ribbon of a document far too large to have been sampled closely enough to find
-/// it.
-///
-/// Answers in the same colour hexBack does, deliberately: the panel probes this one
-/// byte at a time as well, to place a run's outline, and two bytes of one mark have
-/// to come back matching or every cell is drawn boxed in on its own.
+/// Ditto for a span: whether any byte is marked (bookmark_hits, so tiny marks
+/// show on huge files). Same colour as hexBack: the panel also probes it
+/// per byte for outlines, which must match to join.
 mu_Color hexBackSpan(long at, long length, void* user)
 {
     View* v = cast(View*) user;
@@ -1570,10 +1322,8 @@ mu_Color hexBackSpan(long at, long length, void* user)
         ? BOOKMARK_WASH : mu_Color(0, 0, 0, 0);
 }
 
-/// The counterpart's byte at `offset`, through the view's one-block cache, so
-/// walking a screenful in order costs a read or two of the other document rather
-/// than one per byte. See View.peerBuf for why it is dropped every frame.
-/// Returns: False when the counterpart has no byte there to compare against.
+/// Peer byte at `offset`, through the view's block cache (see View.peerBuf).
+/// Returns: False if the peer has no byte there.
 bool diff_peer_byte(View* v, size_t offset, out ubyte value)
 {
     if (v.peerLen == 0 || offset < v.peerStart || offset - v.peerStart >= v.peerLen)
@@ -1585,8 +1335,7 @@ bool diff_peer_byte(View* v, size_t offset, out ubyte value)
         if (v.peerBuf.length < DIFF_BLOCK)
             v.peerBuf.length = DIFF_BLOCK;
 
-        // Aligned down, so a screen crossing a boundary settles into the next block
-        // rather than re-reading from wherever the last byte landed.
+        // Align down so screens crossing a boundary don't reread.
         size_t start = offset - (offset % DIFF_BLOCK);
         ubyte[] got = ed.view(cast(long) start, v.peerBuf);
         v.peerStart = start;
@@ -1600,18 +1349,12 @@ bool diff_peer_byte(View* v, size_t offset, out ubyte value)
     return true;
 }
 
-/// How much of the counterpart is pulled in at a time. A screenful of bytes is a
-/// couple of thousand at most, so one block covers a frame with room to spare.
+/// Peer read block; a screen is a few thousand bytes at most.
 enum size_t DIFF_BLOCK = 8 * 1024;
 
-/// ddui-side write hooks: forward the panel's single-byte edits to the editor,
-/// which holds them in its piece table, so these work even on a file opened
-/// read-only. A rejected edit throws; swallow it with a log rather than unwinding
-/// the frame.
-///
-/// `user` is the View that owns the panel, from hex.writeUser, which is what says
-/// whose bytes are being edited - not necessarily the document in front, once
-/// panels can sit side by side.
+/// Panel write hooks: forward edits to the editor's piece table (works on
+/// read-only files too). Rejected edits are logged, not thrown. `user` is the
+/// panel's View, not necessarily the front document.
 void hexReplace(long pos, ubyte value, void* user)
 {
     View* v = cast(View*) user;
@@ -1632,7 +1375,7 @@ void hexInsert(long pos, ubyte value, void* user)
     {
         v.doc.editor.insert(pos, &value, 1);
         ++v.doc.revision;
-        bookmark_shift(v.doc.marks, pos, 1); // the bytes past it all moved up one
+        bookmark_shift(v.doc.marks, pos, 1); // bytes after moved up
         structureEdited(v.doc, pos);
     }
     catch (Exception e)
@@ -1653,11 +1396,8 @@ void hexRemove(long pos, long len, void* user)
         logError("remove failed: %s", e.msg);
 }
 
-/// ddui-side history hooks: step the editor's undo/redo and hand back where the
-/// change landed so the panel can chase it with the caret. The editor's size can
-/// jump either way, so the panel's copy is refreshed before returning - the copy
-/// belonging to the view that took the keystroke, which `user` names. Any other
-/// view of the document picks the new size up from ui_frame next frame.
+/// Panel history hooks: undo/redo and return the change position for the
+/// caret. Updates `user`'s view size; other views update in ui_frame.
 long hexUndo(void* user)
 {
     View* v = cast(View*) user;
@@ -1686,12 +1426,8 @@ long hexRedo(void* user)
     return at;
 }
 
-/// Point a view's panel at its document: read, colour, write and history hooks,
-/// plus the size the panel starts from. Called on every new view and whenever one
-/// is pointed at a different document.
-///
-/// By pointer, because that pointer is what the hooks above are handed back on
-/// every call, long after this returns.
+/// Connect a view's panel to its document: hooks and initial size. Call for
+/// new views and on document change. Hooks get `v` back, so it must stay valid.
 void wireView(View* v)
 {
     IDocumentEditor ed = v.doc.editor;
@@ -1705,8 +1441,7 @@ void wireView(View* v)
     v.hex.redoFn    = &hexRedo;
     v.hex.writeUser = cast(void*) v;
     v.hex.colorFn   = &hexColor;
-    v.hex.colorUser = cast(void*) v; // the view, not the document: it holds the
-                                     // comparison as well as the way to the marks
+    v.hex.colorUser = cast(void*) v; // the view: holds the diff and marks
     v.hex.backFn     = &hexBack;
     v.hex.backSpanFn = &hexBackSpan;
     v.hex.backUser   = cast(void*) v;
@@ -1716,41 +1451,34 @@ void wireView(View* v)
     v.hex.dataSize  = ed ? ed.size() : 0;
 }
 
-/// The pane a file is currently being dragged over, or null for none. Only ever
-/// set while a drag is in flight over the window; see ui_drop_hover.
+/// Pane under an in-flight file drag, or null. See ui_drop_hover.
 __gshared Pane* dropPane;
 
-/// Colour a pane is picked out in while a file is held over it.
-/// The focused pane's outline, in the accent the tab strip and the omnibar use for
-/// the same thing. Faint on purpose: it says where keys land, which the user only
-/// looks for when they have lost track, and a full-strength frame around a quarter
-/// of the window would compete with the bytes for the whole time they have not.
+/// Focused pane outline, same accent as tabs and omnibar. Faint so it doesn't
+/// compete with the bytes.
 enum mu_Color FOCUS_EDGE = mu_Color(110, 170, 255, 130);
-/// Ditto, thickness in pixels.
+/// Ditto, width.
 enum int FOCUS_EDGE_W = 2;
 
-/// The tab tooltip: a panel a shade lighter than the strip it drops out of, so it
-/// reads as sitting over the window rather than cut into it.
+/// Tooltip background, lighter than the strip so it reads as floating.
 enum mu_Color TIP_BACK = mu_Color(48, 48, 58, 255);
-/// Ditto.
 enum mu_Color TIP_EDGE = mu_Color(80, 80, 95, 255);
-/// Ditto.
 enum mu_Color TIP_TEXT = mu_Color(215, 215, 225, 255);
-/// Ditto, the inset around its text.
+/// Text inset.
 enum int TIP_PAD = 5;
-/// Ditto, the gap between it and the tab it belongs to.
+/// Gap below the tab.
 enum int TIP_DROP = 2;
-/// Ditto, how close to the window's edges it may come.
+/// Window edge margin.
 enum int TIP_MARGIN = 4;
 
+/// Edge of the pane a file or tab is dragged over.
 enum mu_Color DROP_EDGE = mu_Color(110, 170, 255, 255);
-/// Ditto, the wash over the pane itself, translucent so the bytes read through.
+/// Ditto, translucent pane wash.
 enum mu_Color DROP_WASH = mu_Color(110, 170, 255, 40);
-/// Thickness of the edge, in pixels.
+/// Ditto, edge width.
 enum int DROP_EDGE_W = 2;
 
-/// The pane at a window coordinate, or null when the point is not in one (the
-/// menubar, the status bar, a splitter between two panes).
+/// Pane at a window coordinate, or null (menubar, status bar, splitter).
 Pane* ui_pane_at(int x, int y)
 {
     foreach (Column* c; columns)
@@ -1765,9 +1493,8 @@ Pane* ui_pane_at(int x, int y)
     return null;
 }
 
-/// The pane a tab being dragged is over and what letting go there would do: join
-/// that pane, or split it on one of its four sides. Null when the pointer is over
-/// no pane at all, which is a drop that does nothing.
+/// Pane under a dragged tab and the drop zone (join or split side). Null if
+/// none.
 Pane* ui_drop_target(mu_Context* ctx, out SplitZone zone)
 {
     Pane* onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
@@ -1776,10 +1503,8 @@ Pane* ui_drop_target(mu_Context* ctx, out SplitZone zone)
     return onto;
 }
 
-/// The shape a drop on `p` would fill, for showing where it lands before the user
-/// commits: the pane itself for a drop that joins it, half of it for one that
-/// splits it, and half the column when a sideways split reaches around a whole
-/// stack - which is what ui_split_into does with it.
+/// Preview rect for a drop: the pane (join), half of it (split), or half the
+/// column for a sideways split (see ui_split_into).
 mu_Rect ui_drop_rect(Pane* p, SplitZone zone)
 {
     mu_Rect r = p.rect;
@@ -1792,26 +1517,22 @@ mu_Rect ui_drop_rect(Pane* p, SplitZone zone)
     return split_zone_rect(r, zone);
 }
 
-/// A file is being dragged over the window: mark the pane under the pointer so
-/// the user can see where it would land before letting go. Called for every
-/// position report SDL sends while the drag is in flight.
+/// File drag over the window: highlight the pane under the pointer. Called per
+/// SDL position update.
 public void ui_drop_hover(int x, int y)
 {
     dropPane = ui_pane_at(x, y);
 }
 
-/// The drag is over, dropped or not: stop marking anything.
+/// Drag ended: clear the highlight.
 public void ui_drop_clear()
 {
     dropPane = null;
 }
 
-/// Open a dropped file in the pane it was dropped on rather than the one with the
-/// keyboard, dropping being a pointing gesture; that pane takes the focus with the
-/// file. A drop that misses every pane falls back to the focused one.
-///
-/// The gesture names a pane, so a file already open elsewhere gets a second view
-/// here rather than the window jumping away to where it already was.
+/// Open a dropped file in the pane it was dropped on (which takes focus), or
+/// the focused pane if none. Opens a new view even if the file is open
+/// elsewhere.
 public void ui_drop_file(string path, int x, int y)
 {
     Pane* at = ui_pane_at(x, y);
@@ -1821,7 +1542,7 @@ public void ui_drop_file(string path, int x, int y)
     cast(void)ui_open(path, true);
 }
 
-// Every native file dialog goes up through here, so a scripted run can answer it.
+// All native file dialogs go through here so scripted runs can answer them.
 void ui_file_dialog(SDL_DialogFileCallback picked, bool save)
 {
     version (Screenshots)
@@ -1839,17 +1560,14 @@ void ui_file_dialog(SDL_DialogFileCallback picked, bool save)
         SDL_ShowOpenFileDialog(picked, null, uiWindow, null, 0, null, false);
 }
 
-/// Put up the native Open dialog. It runs async: ui_on_file_picked stashes the
-/// chosen path and the next frame opens it. Null filters means "all files", and
-/// the trailing false keeps it single-select.
+/// Native Open dialog, async: ui_on_file_picked stores the path, the next frame
+/// opens it.
 public void ui_open_dialog()
 {
     ui_file_dialog(&ui_on_file_picked, false);
 }
 
-/// Put up the Open dialog to pick a file to compare the front tab against. The
-/// path comes back the same way an Open's does; pendingCompare is what tells the
-/// two apart when it lands.
+/// Open dialog for "Compare With..."; pendingCompare marks the result.
 public void ui_compare_dialog()
 {
     if (ui_on_settings())
@@ -1859,21 +1577,12 @@ public void ui_compare_dialog()
     ui_file_dialog(&ui_on_file_picked, false);
 }
 
-/// Open `path` beside the tab the comparison was started from and pair the two
-/// up, byte for byte.
-///
-/// The file gets a pane of its own to the right rather than a tab in the pane it is
-/// being compared with, the whole point being to see both at once. The pane is only
-/// made once the bytes are known to be there.
-///
-/// Public because it is the whole action with the dialog taken off the front: what
-/// the scripted driver calls, and what a command line naming two files would reach
-/// for.
+/// Open `path` in a new pane right of the starting tab and diff the two. The
+/// pane is created only after the file opens. Public for the scripted driver
+/// and a future two-file command line.
 public void ui_compare_with(string path)
 {
-    // The dialog is not modal, so the tab this was started from may have been
-    // closed or dragged elsewhere meanwhile; the front tab of the focused pane is
-    // the honest fallback.
+    // The source tab may be gone (non-modal dialog); fall back to the front tab.
     View* left = compareFrom;
     compareFrom = null;
     if (left is null || ui_view_pane(left) is null)
@@ -1887,8 +1596,7 @@ public void ui_compare_with(string path)
     wireView(right);
     right.hex.active = true;
 
-    // Beside the pane holding the left side, which is not necessarily the focused
-    // one once the dialog has been up and the user has clicked elsewhere.
+    // Beside the source's pane, which may not be focused anymore.
     focused = ui_view_pane(left);
     ui_split_pane(right);
     diff_link(left, right);
@@ -1897,8 +1605,7 @@ public void ui_compare_with(string path)
     logInfo("comparing %s with %s", left.doc.title, path);
 }
 
-/// End the comparison the front tab is part of, on both sides. Does nothing when
-/// it is not in one.
+/// End the front tab's diff, if any.
 public void ui_compare_stop()
 {
     View* v = focusedPane.views[focusedPane.current];
@@ -1912,9 +1619,8 @@ public void ui_compare_stop()
     diff_unlink(v);
 }
 
-/// The pane `v` is a tab of, or null when it is not in the grid at all (a view
-/// closed while a dialog was up). The check that a View* held across frames is
-/// still a view of something.
+/// Pane holding `v`, or null (closed while a dialog was open). Validates a
+/// View* kept across frames.
 Pane* ui_view_pane(const(View)* v)
 {
     foreach (Column* c; columns)
@@ -1925,17 +1631,11 @@ Pane* ui_view_pane(const(View)* v)
     return null;
 }
 
-/// Open `path` and give it a tab in the focused pane.
+/// Open `path` in a tab of the focused pane. Replaces an untouched scratch tab;
+/// on failure nothing changes (logged).
 ///
-/// The file lands in a new tab, unless the one in front is an untouched scratch
-/// buffer - the state the app starts in - which it takes over instead. On failure
-/// nothing changes and the error is logged.
-///
-/// A file already open is revealed rather than opened again: the window goes to the
-/// tab that has it. `here` asks for it in the focused pane instead, for the routes
-/// that are a gesture at a particular pane rather than a request for the file - a
-/// drop lands where it was let go, even when the same document is already up
-/// elsewhere. Either way it is one document with two views, never two documents.
+/// Already-open files are shown, not reopened. `here` forces a view in the
+/// focused pane (drops). Always one document, possibly several views.
 public bool ui_open(string path, bool here = false)
 {
     Document* d = ui_load(path, true);
@@ -1944,23 +1644,22 @@ public bool ui_open(string path, bool here = false)
     return ui_show(d, here);
 }
 
-/// Ditto, for a document already loaded.
+/// Ditto, for a loaded document.
 bool ui_show(Document* doc, bool here)
 {
-    // One settings tab, wherever it is: bringing it here would make a second.
+    // Only one settings tab.
     if (doc.settingsPage)
     {
         ui_focus_document(doc);
         return true;
     }
 
-    // The focused pane is where the user was working - or, on a drop, the pane the
-    // file was let go over.
+    // Focused pane, or the drop target.
     Pane* p = focused;
 
     if (ui_view_count(doc) > 0)
     {
-        // Already up in this very pane: nothing to open either way, just come to it.
+        // Already in this pane: switch to it.
         foreach (size_t i, View* q; p.views)
         {
             if (q.doc is doc)
@@ -1986,12 +1685,8 @@ bool ui_show(Document* doc, bool here)
 
     if (scratchEmpty(*scratch))
     {
-        // It is the *view* that is reused: the scratch document only goes if this
-        // was the last view of it, another pane showing the same one (the state a
-        // fresh split leaves) still having bytes to draw.
-        //
-        // A different file in the same view, so any comparison it was part of was
-        // about the bytes that just left.
+        // Reuse the view; the scratch document goes only if this was its last view.
+        // New document, so any diff is over.
         diff_unlink(v);
         v.doc = doc;
         if (ui_view_count(scratch) == 0)
@@ -2000,24 +1695,23 @@ bool ui_show(Document* doc, bool here)
     else
     {
         v = newView(doc);
-        p.views ~= v; // .length updated
+        p.views ~= v;
         p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     }
 
-    wireView(v); // picks the new editor up, on a fresh view and a reused one alike
+    wireView(v); // new editor
     v.hex.baseAddress = 0;
-    v.hex.active = true;    // show the caret right away on the first byte
-    v.hex.takeFocus = true; // and let it take keys without a click first
+    v.hex.active = true;    // caret on the first byte
+    v.hex.takeFocus = true; // take keys without a click
     v.hex.cursor = 0;
     v.hex.anchor = 0;
-    hex_reset_scroll(v.hex); // and scroll to the top so that first byte is visible
+    hex_reset_scroll(v.hex); // first byte visible
     logInfo("opened %s (%s bytes)", doc.path, v.hex.dataSize);
     return true;
 }
 
-/// The open document for `path`, or null when that file is not open. Paths are
-/// compared after normalising, so the same file reached two ways - a relative path
-/// on the command line, an absolute one from the Open dialog - is one document.
+/// Open document for `path`, or null. Paths are normalised, so relative and
+/// absolute forms match.
 Document* ui_find_document(string path)
 {
     string want = ui_path_key(path);
@@ -2029,10 +1723,8 @@ Document* ui_find_document(string path)
     return null;
 }
 
-/// What two paths are compared as. Absolute and normalised, which settles `./x`
-/// against `x` and `a/../b` against `b`. Not symlinks or case: resolving those
-/// means asking the filesystem, and a path that cannot be resolved (a file deleted
-/// under us) would then answer differently from one that can.
+/// Path comparison key: absolute and normalised. Symlinks and case aren't
+/// resolved, since that needs the filesystem and deleted files would differ.
 string ui_path_key(string path)
 {
     import std.path : absolutePath, buildNormalizedPath;
@@ -2042,22 +1734,14 @@ string ui_path_key(string path)
         return path;
 }
 
-/// Build a document around `path`, or null when it cannot be opened (the error is
-/// logged and put in the status bar, and nothing already open is disturbed).
+/// Load `path` as a document, or null on failure (logged, status bar; nothing
+/// else changes). Already-open files return the existing document: two
+/// documents on one file would have separate editors, undo and bookmarks, and
+/// the last save would win.
 ///
-/// A file already open comes back as the document it already is, rather than as a
-/// second one over the same bytes. Two documents on one file would each have their
-/// own editor, undo history and bookmarks, so an edit in one tab would be invisible
-/// in the other and the last save would quietly win - while two *views* of one
-/// document, which is what a split makes, share all of it. Those two states look
-/// identical on screen, so only one of them is allowed to exist.
-///
-/// Split out of ui_open because a comparison needs the file loaded without a tab
-/// being found for it: the second document goes in a pane of its own rather than
-/// wherever an Open would have landed. See ui_compare_with.
-///
-/// `elevate` lets a refusal on permissions ask for an elevated open instead, which
-/// lands later through ui_elevated; null comes back meanwhile.
+/// Separate from ui_open since a diff loads without picking a tab (see
+/// ui_compare_with). `elevate`: on a permission error, request an elevated open
+/// (delivered later via ui_elevated) and return null.
 Document* ui_load(string path, bool elevate = false)
 {
     if (Document* open = ui_find_document(path))
@@ -2065,8 +1749,7 @@ Document* ui_load(string path, bool elevate = false)
 
     try
     {
-        // Shared, as ddhx opens it: Windows refuses a device the system already
-        // holds to an exclusive open.
+        // Shared, like ddhx: Windows refuses exclusive opens of held devices.
         return ui_adopt(path, new FileDocument(path, OFlags.read | OFlags.exists | OFlags.share));
     }
     catch (Exception e)
@@ -2077,15 +1760,14 @@ Document* ui_load(string path, bool elevate = false)
             return null;
         }
         logError("open failed: %s", e.msg);
-        // Both callers leave the window as it was, so a file picked from the Open
-        // dialog that cannot be read would otherwise look like nothing happened.
-        // Clipped because ui_status drops a message that overflows.
+        // Report it, else a failed open looks like nothing happened. Clipped to fit
+        // ui_status.
         ui_status("cannot open %s: %s", ui_clip(baseName(path), 32), ui_clip(e.msg, 44));
         return null;
     }
 }
 
-/// A new document over `src`, opened at `path` by whichever process could.
+/// New document over `src`, opened at `path`.
 Document* ui_adopt(string path, IDocument src)
 {
     IDocumentEditor ed = new PieceV4DocumentEditor(true);
@@ -2093,39 +1775,34 @@ Document* ui_adopt(string path, IDocument src)
 
     Document* d = newDocument();
     d.editor = ed;
-    d.path   = path; // in-place Save now has a target
+    d.path   = path; // Save target
     d.title  = baseName(path);
     d.restricted = ui_fixed(d);
     detectStructure(d);
     return d;
 }
 
-/// Whether `d` sits on a medium a save writes into rather than replaces: a disk or
-/// device, where renaming a temp file over the path would destroy the node.
+/// Whether `d` is a disk or device, saved in place (renaming over it would
+/// replace the node).
 bool ui_fixed(Document* d)
 {
     IDocument src = d.editor ? d.editor.document() : null;
     return src && (src.caps() & DocCaps.replace) == 0;
 }
 
-/// Whether `d` is a scratch buffer nothing has been done to: no path, no edits
-/// and no bytes. That is what a fresh tab (and the app itself) starts as, and
-/// what an Open takes over instead of stacking a tab on top of it.
+/// Untouched scratch buffer (no path, edits or bytes); Open replaces it.
 bool scratchEmpty(ref Document d)
 {
     return d.settingsPage == false && d.path.length == 0 && d.editor &&
         d.editor.edited() == false && d.editor.size() == 0;
 }
 
-/// Write the open document's current contents to `path` and mark it saved.
+/// Save to `path` and mark saved. Writes a temp file beside it, then renames
+/// atomically; the source handle keeps the old inode, so the editor and undo
+/// survive. Returns false (file untouched) on failure.
 ///
-/// Streams the edited view into a temp file alongside the target, then renames it
-/// over atomically. The read-only source handle keeps referencing the original
-/// inode across that, so the editor and its undo history survive without a reopen.
-/// Returns false, and leaves the file untouched, if the write fails.
-///
-/// A disk or device is the exception: its own path is written in place, and any
-/// other is a copy taken of it, leaving its edits pending against the medium.
+/// Disks and devices write in place to their own path; another path gets a
+/// copy, leaving the edits pending.
 bool saveTo(ref Document d, string path)
 {
     import std.stdio : File;
@@ -2138,7 +1815,7 @@ bool saveTo(ref Document d, string path)
     if (fixed && path == d.path)
         return saveInPlace(d);
 
-    // Renaming over a device node replaces the node rather than writing the device.
+    // Renaming over a device node replaces the node.
     try
     {
         if (exists(path) && isFile(path) == false)
@@ -2147,11 +1824,11 @@ bool saveTo(ref Document d, string path)
             return false;
         }
     }
-    catch (Exception) {} // unreadable metadata: let the write report it
+    catch (Exception) {} // let the write report it
 
     IDocumentEditor editor = d.editor;
     long docsize = editor.size();
-    string tmp = path ~ ".vddhx-tmp"; // same directory, so rename is atomic
+    string tmp = path ~ ".vddhx-tmp"; // same directory: atomic rename
     try
     {
         {
@@ -2162,7 +1839,7 @@ bool saveTo(ref Document d, string path)
             while (pos < docsize)
             {
                 ubyte[] chunk = editor.view(pos, buffer);
-                if (chunk.length == 0) // nothing more readable; avoid spinning
+                if (chunk.length == 0) // avoid spinning
                     break;
                 fout.rawWrite(chunk);
                 pos += chunk.length;
@@ -2174,7 +1851,7 @@ bool saveTo(ref Document d, string path)
     catch (Exception e)
     {
         try { if (exists(tmp)) remove(tmp); }
-        catch (Exception) {} // best-effort cleanup; report the original cause
+        catch (Exception) {} // best effort; report the original error
         logError("save failed: %s", e.msg);
         return false;
     }
@@ -2185,8 +1862,8 @@ bool saveTo(ref Document d, string path)
     return true;
 }
 
-/// Write `d`'s edits into its medium through the document's own handle, which
-/// after an elevated reopen is the only one holding write access.
+/// Write `d`'s edits in place through its own handle (the only one with write
+/// access after an elevated reopen).
 bool saveInPlace(ref Document d)
 {
     import ddhx.editor.base : PieceInfo;
@@ -2202,8 +1879,8 @@ bool saveInPlace(ref Document d)
     IDocumentEditor editor = d.editor;
     try
     {
-        // Read before preserving, which turns displaced pieces into buffered ones
-        // but leaves where they land alone.
+        // Read before preserving: preserving buffers displaced pieces but keeps their
+        // positions.
         PieceInfo[] pieces = editor.dirtyPieceInfos(true);
         bool preserved = editor.prepareInplaceSave();
         ubyte[] buf = new ubyte[64 * 1024];
@@ -2220,7 +1897,7 @@ bool saveInPlace(ref Document d)
         if (preserved)
             editor.markSaved();
         else
-            editor.open(src); // history pointed into what was just overwritten
+            editor.open(src); // history referenced overwritten data
     }
     catch (Exception e)
     {
@@ -2232,8 +1909,7 @@ bool saveInPlace(ref Document d)
     return true;
 }
 
-/// Save As dialog callback. Like ui_on_file_picked it may run off-thread, so it
-/// only copies the chosen path out and flags it for the next frame to write.
+/// Save As callback, possibly off-thread: copies the path for the next frame.
 extern (C) void ui_on_save_picked(void* user, const(char*)* fileList, int filter) nothrow
 {
     if (fileList is null || *fileList is null)
@@ -2250,10 +1926,8 @@ extern (C) void ui_on_save_picked(void* user, const(char*)* fileList, int filter
     ui_wakeup();
 }
 
-/// Flip the focused document's read-only state. Turning it on only stops edits;
-/// turning it off on a disk opened without write access reopens it with that
-/// access first, the editor starting over on the new handle - which loses nothing,
-/// a handle without write access never having let an edit through.
+/// Toggle read-only. Enabling just blocks edits; disabling on a disk without
+/// write access reopens it writable first (nothing lost: no edits got through).
 public void ui_toggle_readonly()
 {
     if (ui_on_settings())
@@ -2268,7 +1942,7 @@ public void ui_toggle_readonly()
     if (ui_refuse_busy(doc))
         return;
 
-    // A file saves by replacing it, so its own handle never needs write access.
+    // Files save by replacing, so they never need a writable handle.
     FileDocument src = cast(FileDocument) doc.editor.document();
     if (ui_fixed(doc) && src && src.writable() == false)
     {
@@ -2294,8 +1968,7 @@ public void ui_toggle_readonly()
         ui_clip(doc.title, 40));
 }
 
-/// Put up the system's prompt for opening `path` with the rights this process
-/// lacks; ui_elevated takes the handle once it is answered.
+/// Request an elevated open of `path`; handled in ui_elevated.
 void ui_elevate(string path, bool write)
 {
     if (elevate_request(path, write, &ui_wakeup) == false)
@@ -2307,8 +1980,8 @@ void ui_elevate(string path, bool write)
         ui_clip(baseName(path), 40));
 }
 
-/// Land an elevated open: a tab for a plain one, write access for the document
-/// that asked for it. A handle nothing wants any more is closed.
+/// Handle an elevated open: a new tab, or write access for the requesting
+/// document. Unwanted handles are closed.
 void ui_elevated(ref Elevated answer)
 {
     if (answer.error.length)
@@ -2332,7 +2005,7 @@ void ui_elevated(ref Elevated answer)
     Document* d = ui_find_document(answer.path);
     if (answer.write)
     {
-        // The tab could have closed, or taken edits, while the prompt was up.
+        // The tab may have closed or been edited during the prompt.
         if (d is null || d.restricted == false || ui_busy(d))
         {
             src.close();
@@ -2361,7 +2034,7 @@ void ui_elevated(ref Elevated answer)
     cast(void) ui_show(d, false);
 }
 
-/// Put `d`'s editor on `src`, the same bytes through another handle.
+/// Point `d`'s editor at `src`, a new handle to the same bytes.
 void ui_swap_source(Document* doc, IDocument src)
 {
     IDocument old = doc.editor.document();
@@ -2370,9 +2043,8 @@ void ui_swap_source(Document* doc, IDocument src)
         old.close();
 }
 
-/// Save the open document. With a known path it writes in place and reports whether
-/// that succeeded; with none it opens a native Save As dialog and returns false,
-/// the write landing later on the main thread once a path is chosen.
+/// Save the focused document. With a path: write, return success. Without:
+/// open Save As and return false (written later).
 public bool ui_save()
 {
     if (ui_on_settings())
@@ -2385,10 +2057,8 @@ public bool ui_save()
     return false;
 }
 
-/// Put up the native Save As dialog, whatever path the document already has.
-/// Async like the Open dialog: ui_on_save_picked stashes the destination and the
-/// next frame writes there, then adopts it as the document's home so a later
-/// in-place Save follows it.
+/// Save As dialog, async: ui_on_save_picked stores the path, the next frame
+/// writes and adopts it.
 public void ui_save_as()
 {
     if (ui_on_settings())
@@ -2397,10 +2067,8 @@ public void ui_save_as()
     ui_file_dialog(&ui_on_save_picked, true);
 }
 
-/// Write the document the Save As dialog was raised for to `dest` and adopt it
-/// as that document's home, so a later in-place Save follows it. The document is
-/// found again by the editor the dialog was opened for, not by tab index: both
-/// can have moved while the dialog was up. A closed one drops the write.
+/// Write the Save As target document to `dest` and adopt the path. Found by
+/// editor, not tab index, since tabs may move. Dropped if it was closed.
 void ui_save_pending(string dest)
 {
     foreach (Document* d; docs)
@@ -2408,11 +2076,8 @@ void ui_save_pending(string dest)
         if (d.editor !is pendingSaveTarget)
             continue;
 
-        // Saving onto a file another tab is holding would leave two documents on one
-        // path: two editors, two undo histories and two sets of bookmarks over the
-        // same bytes, which is the state one-document-per-file exists to rule out -
-        // and the other tab's unsaved edits would be next to write over this. Refused
-        // rather than merged, closing the other tab being the user's call to make.
+        // Refuse saving onto a file open in another tab: two documents on one path
+        // (separate undo, bookmarks) and its unsaved edits would conflict.
         Document* held = ui_find_document(dest);
         if (held && held !is d)
         {
@@ -2422,7 +2087,7 @@ void ui_save_pending(string dest)
             return;
         }
 
-        // A disk's copy is a snapshot: the tab stays on the disk.
+        // Disk copies are snapshots; the tab stays on the disk.
         if (saveTo(*d, dest) && ui_fixed(d) == false)
         {
             d.path  = dest;
@@ -2433,19 +2098,12 @@ void ui_save_pending(string dest)
     logWarn("save as: the document was closed before a destination was chosen");
 }
 
-/// Bytes one Copy will format. The text runs three characters per byte, so this
-/// caps the clipboard string near 48 MB; a larger selection is refused outright
-/// rather than quietly spending the memory (and the time) on it.
+/// Copy size limit; hex text is 3 chars per byte (~48 MB). Larger is refused.
 enum COPY_MAX = 16 * 1024 * 1024;
 
-/// Resolve the byte range Copy and Cut act on in `v`, clamped to its document. A
-/// bare caret gives a single byte, matching what the status bar reports and what
-/// Delete removes.
-///
-/// The view is a parameter because a selection is a property of a panel: with
-/// several panes on screen, the one being copied out of is whichever has focus.
-/// Returns: False when there is nothing to act on - no document, no caret placed
-///          yet, or the caret parked past the last byte.
+/// Copy/Cut range in `v`, clamped. A bare caret is one byte (like Delete).
+/// Returns: False if nothing to act on (no document, no caret, caret past the
+///          end).
 bool ui_selection(ref View v, out size_t low, out size_t high)
 {
     if (v.doc.editor is null || v.hex.active == false)
@@ -2461,15 +2119,12 @@ bool ui_selection(ref View v, out size_t low, out size_t high)
     return true;
 }
 
-/// Copy the selected bytes to the clipboard as hex text, lower case and wrapped
-/// at the panel's column count:
+/// Copy the selection as lowercase hex text, wrapped at the column count:
 /// ---
 /// de ad be ef ...
 /// ---
-/// Text, so it drops into any editor or chat window as a readable dump, and
-/// ui_paste reads the same shape back in.
-/// Returns: Whether the bytes reached the clipboard, so ui_cut only removes what
-///          it managed to copy.
+/// ui_paste reads it back.
+/// Returns: Whether it reached the clipboard (ui_cut only removes on success).
 public bool ui_copy()
 {
     if (ui_on_settings())
@@ -2477,15 +2132,8 @@ public bool ui_copy()
     return copySelection(false);
 }
 
-/// Copy the selected bytes to the clipboard as the text lane renders them:
-/// printable ASCII as itself, everything else as a dot, exactly the substitution
-/// hex_draw_row makes, so what lands on the clipboard is what the panel shows.
-///
-/// Unwrapped, whatever the column count. The hex copy breaks rows because a dump
-/// is read as rows; a string that happened to straddle the grid is still one
-/// string, and a newline every sixteen characters would only have to be taken back
-/// out. Lossy by design - the dots do not carry the bytes they stand for - so this
-/// is a one-way trip and ui_paste stays on hex.
+/// Copy the selection as the text lane shows it (unmapped bytes as dots).
+/// Unwrapped. Lossy, so ui_paste only accepts hex.
 public bool ui_copy_text()
 {
     if (ui_on_settings())
@@ -2493,8 +2141,7 @@ public bool ui_copy_text()
     return copySelection(true);
 }
 
-/// Ditto. `asText` picks between the two renderings; everything else - the range,
-/// the size cap, the chunked read - is common to both.
+/// Ditto. `asText` selects the format.
 bool copySelection(bool asText)
 {
     size_t low, high;
@@ -2511,10 +2158,9 @@ bool copySelection(bool asText)
     static immutable string digits = "0123456789abcdef";
     int cols = focusedView.hex.columns > 0 ? focusedView.hex.columns : 16;
     Appender!(char[]) text = appender!(char[]);
-    text.reserve(len * 3 + 1); // plus the terminator; a character can be three too
+    text.reserve(len * 3 + 1); // terminator; glyphs can be 3 bytes
 
-    // A chunk at a time: the selection can be large, and only the bytes being
-    // formatted need holding.
+    // Chunked: selections can be large.
     ubyte[64 * 1024] buffer = void;
     size_t done;
     while (done < len)
@@ -2523,13 +2169,12 @@ bool copySelection(bool asText)
         if (want > buffer.length) want = buffer.length;
         ubyte[] chunk = focusedDoc.editor.view(cast(long)(low + done), buffer[0 .. want]);
         if (chunk.length == 0)
-            break; // nothing more readable; avoid spinning
+            break; // avoid spinning
         foreach (i, ubyte b; chunk)
         {
             if (asText)
             {
-                // The lane as it is drawn, which is the document's set: what you
-                // see is what you get, dots and all.
+                // Document charset, as drawn.
                 const(char)[] glyph = focusedDoc.charset.glyph(b);
                 if (glyph.length)
                     text.put(glyph);
@@ -2539,13 +2184,13 @@ bool copySelection(bool asText)
             }
             size_t at = done + i;
             if (at)
-                text.put(at % cols == 0 ? '\n' : ' '); // break rows like the panel does
+                text.put(at % cols == 0 ? '\n' : ' '); // rows like the panel
             text.put(digits[b >> 4]);
             text.put(digits[b & 0x0f]);
         }
         done += chunk.length;
     }
-    text.put('\0'); // SDL takes a C string
+    text.put('\0'); // C string
 
     if (SDL_SetClipboardText(text.data.ptr) == false)
     {
@@ -2553,17 +2198,14 @@ bool copySelection(bool asText)
         return false;
     }
     logDebugging("copied %s byte(s) from %#x%s", done, low, asText ? " as text" : "");
-    // Characters, not bytes: one lane character per byte is the whole promise, and
-    // the count is what says the copy took at all - the clipboard looks the same
-    // from here either way.
+    // Report characters, so the user can tell the copy happened.
     if (asText)
         ui_status("Copied %s character%s", done, done == 1 ? "" : "s");
     return true;
 }
 
-/// Copy the selected bytes, then remove them. The clipboard is written first and
-/// the removal only follows a copy that took, so a failed copy leaves the bytes
-/// where they are. A bare caret cuts the byte Delete would drop.
+/// Copy, then remove the bytes only if the copy succeeded. A bare caret cuts
+/// one byte.
 public void ui_cut()
 {
     if (ui_on_settings())
@@ -2571,10 +2213,8 @@ public void ui_cut()
     cutSelection(false);
 }
 
-/// Cut the selection, leaving the text rendering on the clipboard rather than the
-/// hex one - Ctrl+Shift+C's copy with Ctrl+X's removal. The document loses the same
-/// bytes either way; only what can be pasted back differs, and the text form cannot
-/// (see ui_copy_text).
+/// Cut, putting the text form on the clipboard (Ctrl+Shift+C plus removal).
+/// Can't be pasted back; see ui_copy_text.
 public void ui_cut_text()
 {
     if (ui_on_settings())
@@ -2607,19 +2247,17 @@ void cutSelection(bool asText)
     bookmark_shift(doc.marks, cast(long) low, -cast(long)(high - low + 1));
 
     view.hex.dataSize = doc.editor.size();
-    hex_set_caret(view.hex, low); // the caret closes onto the gap the cut left
+    hex_set_caret(view.hex, low); // caret at the gap
 }
 
-/// Paste hex text from the clipboard at the caret.
+/// Paste hex text at the caret.
 ///
-/// Reads back what ui_copy writes, plus the usual variations: whitespace, commas,
-/// semicolons and colons all separate bytes and a 0x prefix is skipped, so "de ad",
-/// "DEAD" and "0xde, 0xad" land the same two. Each token must hold whole bytes;
-/// anything else refuses the paste rather than guessing at a nibble.
+/// Accepts ui_copy's format and variants: whitespace, commas, semicolons and
+/// colons separate; 0x prefixes are skipped ("de ad", "DEAD", "0xde, 0xad").
+/// Tokens must be whole bytes, else the paste is refused.
 ///
-/// Where the bytes land follows the panel's entry mode, the way typing does:
-/// overwrite replaces at the caret (growing the document past EOF), insert splices.
-/// A selection wider than one byte is what the paste replaces, in either mode.
+/// Overwrite replaces (growing past EOF), insert splices. A multi-byte
+/// selection is replaced in either mode.
 public void ui_paste()
 {
     if (ui_on_settings())
@@ -2629,7 +2267,7 @@ public void ui_paste()
     if (doc.editor is null || ui_refuse_edit(doc))
         return;
 
-    char* clip = SDL_GetClipboardText(); // caller frees; an empty string on failure
+    char* clip = SDL_GetClipboardText(); // caller frees; empty string on failure
     if (clip is null)
     {
         logError("paste failed: %s", SDL_GetError().fromStringz);
@@ -2648,21 +2286,19 @@ public void ui_paste()
     size_t total = hex_total(view.hex);
     size_t low   = view.hex.active ? hex_sel_low(view.hex) : 0;
     size_t high  = view.hex.active ? hex_sel_high(view.hex) : 0;
-    if (low > total) low = total;   // a caret left stale by an outside change
+    if (low > total) low = total;   // stale caret after an outside change
     if (high > total) high = total;
     long pos = cast(long) low;
 
     bool ok;
     try
     {
-        // A selection is dropped first and the bytes spliced into the gap, the
-        // entry mode only deciding how a bare caret takes them. The remove and the
-        // insert are separate history entries, so undoing that takes two steps.
+        // Remove the selection, then insert. Two history entries, so two undos.
         bool replacing = high > low;
         if (replacing)
         {
             long cut = cast(long)(high - low + 1);
-            if (high >= total) cut = cast(long) total - pos; // clamp off the append slot
+            if (high >= total) cut = cast(long) total - pos; // exclude the append slot
             if (cut > 0)
             {
                 editor.remove(pos, cut);
@@ -2670,7 +2306,7 @@ public void ui_paste()
             }
             else replacing = false;
         }
-        // Past EOF there is nothing to overwrite, so append there whatever the mode.
+        // Past EOF: append regardless of mode.
         if (replacing || view.hex.insertMode || low >= total)
         {
             editor.insert(pos, bytes.ptr, bytes.length);
@@ -2683,8 +2319,7 @@ public void ui_paste()
     catch (Exception e)
         logError("paste failed: %s", e.msg);
 
-    // The document may have moved even on a failed insert-after-remove, so the
-    // panel is refreshed either way.
+    // Refresh even on failure; the remove may have happened.
     ++doc.revision;
     structureEdited(doc, pos);
     view.hex.dataSize = editor.size();
@@ -2693,9 +2328,8 @@ public void ui_paste()
         logDebugging("pasted %s byte(s) at %#x", bytes.length, low);
 }
 
-/// Parse clipboard text into the bytes it spells out. Returns null when the text
-/// holds anything but separated runs of hex digit pairs, so an unrelated paste is
-/// refused rather than half-applied. See ui_paste for the accepted shapes.
+/// Parse clipboard hex text. Null unless the whole text is separated hex pairs
+/// (no partial pastes). Formats: see ui_paste.
 ubyte[] parseHexText(const(char)* text)
 {
     static bool separator(char c)
@@ -2713,7 +2347,7 @@ ubyte[] parseHexText(const(char)* text)
             continue;
         }
 
-        // A token: an optional 0x prefix, then hex digits taken two at a time.
+        // Optional 0x, then digit pairs.
         if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X') && hex_nibble(p[2]) >= 0)
             p += 2;
 
@@ -2723,13 +2357,13 @@ ubyte[] parseHexText(const(char)* text)
             int hi = hex_nibble(*p++);
             int lo = hex_nibble(*p);
             if (lo < 0)
-                return null; // a lone digit: refuse rather than guess the other half
+                return null; // lone digit
             ++p;
             bytes.put(cast(ubyte)((hi << 4) | lo));
             ++pairs;
         }
         if (pairs == 0)
-            return null; // neither separator nor hex digit: not a hex dump
+            return null; // not a hex dump
     }
     return bytes.data;
 }
@@ -2738,24 +2372,19 @@ unittest
 {
     assert(parseHexText("de ad be ef") == [ 0xde, 0xad, 0xbe, 0xef ]);
     assert(parseHexText("DEADBEEF")    == [ 0xde, 0xad, 0xbe, 0xef ]);
-    assert(parseHexText("0xde, 0xAD")  == [ 0xde, 0xad ]); // C-ish source
+    assert(parseHexText("0xde, 0xAD")  == [ 0xde, 0xad ]); // C-style
     assert(parseHexText("de ad\nbe ef") == [ 0xde, 0xad, 0xbe, 0xef ]);
     assert(parseHexText("de:ad;be")    == [ 0xde, 0xad, 0xbe ]);
     assert(parseHexText("  ").length == 0);
     assert(parseHexText("").length == 0);
     assert(parseHexText("de a") is null);       // half a byte
-    assert(parseHexText("dead beefs") is null); // stray letter past 'f'
+    assert(parseHexText("dead beefs") is null); // past 'f'
     assert(parseHexText("hello") is null);
-    assert(parseHexText("0x") is null);       // a prefix with no digits behind it
+    assert(parseHexText("0x") is null);       // prefix only
 }
 
-/// Step the focused document's history, `redo` picking the direction, and chase
-/// the change with the caret.
-///
-/// The panel has its own Ctrl+Z and Ctrl+Y, but only while it holds the keyboard,
-/// which a menu click or an omnibar row has just taken from it; both go through
-/// the same hooks the panel calls, so history moves the one way whichever route
-/// asked.
+/// Undo or redo (`redo`) on the focused document, caret following. For menu and
+/// omnibar routes, which take focus from the panel; uses the panel's hooks.
 public void ui_undo(bool redo)
 {
     if (ui_on_settings())
@@ -2775,35 +2404,30 @@ public void ui_undo(bool redo)
     hex_set_caret(view.hex, cast(size_t) at);
 }
 
-/// Outcome of the unsaved-changes prompt.
+/// Unsaved-changes prompt result.
 enum Confirm { proceed, cancel }
 
-/// Button ids for the prompt, kept distinct from the unset -1 sentinel.
+/// Prompt button ids, distinct from the -1 sentinel.
 enum { btnSave = 1, btnDontSave = 2, btnCancel = 3 }
 
 version (Screenshots)
 {
-    /// What a scripted run wants every unsaved-changes prompt answered with.
-    /// `ask` (the .init) leaves the native box alone, so the live build under
-    /// this buildType still behaves like the real one.
+    /// Scripted answer for unsaved-changes prompts. `ask` (default) shows the
+    /// native box.
     public enum ConfirmAuto { ask, discard, keep }
 
-    /// Set by the headless driver before it starts posing scenarios.
+    /// Set by the headless driver.
     public __gshared ConfirmAuto uiConfirmAuto;
 
-    /// The path a scripted run answers every file dialog with, through the
-    /// dialog's own callback. Empty leaves the native dialog up.
+    /// Scripted answer for file dialogs, via their callbacks. Empty: native dialog.
     public __gshared string uiPickAuto;
 }
 
-/// Resolve unsaved edits in `doc` before an action that would discard them (closing
-/// the last view of it, or quitting). With no edits pending it proceeds silently;
-/// otherwise it brings a view of that document to the front - so the prompt is
-/// about what is on screen - and puts up a native Save / Don't Save / Cancel box
-/// titled `title`.
-/// Returns: Confirm.proceed when the caller may go ahead, Confirm.cancel when the
-///          user backed out, a chosen save has yet to finish, or the prompt itself
-///          failed (fail safe: never lose data on an error).
+/// Resolve unsaved edits in `doc` before discarding (last view closed, quit).
+/// No edits: proceed. Otherwise bring it to front and show Save / Don't Save /
+/// Cancel titled `title`.
+/// Returns: Confirm.proceed to continue; Confirm.cancel on cancel, pending
+///          save, or prompt failure (fail safe).
 Confirm ui_confirm_discard(Document* doc, const(char)* title)
 {
     if (doc is null)
@@ -2813,9 +2437,7 @@ Confirm ui_confirm_discard(Document* doc, const(char)* title)
 
     ui_focus_document(doc);
 
-    // The focus above still runs, so a scripted close leaves the same tab in
-    // front a real one would; only the box itself is skipped. It is a native
-    // window, and nothing in a headless run can click it.
+    // Focus still changes, matching a real run; only the native box is skipped.
     version (Screenshots)
         if (uiConfirmAuto != ConfirmAuto.ask)
             return uiConfirmAuto == ConfirmAuto.discard ? Confirm.proceed : Confirm.cancel;
@@ -2825,8 +2447,7 @@ Confirm ui_confirm_discard(Document* doc, const(char)* title)
         { cast(SDL_MessageBoxButtonFlags) 0,       btnDontSave, "Don't Save" },
         { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, btnCancel,   "Cancel" },
     ];
-    // With several tabs open, "the document" is not enough to tell the user which
-    // one they are about to lose.
+    // Name the document; there may be several tabs.
     string message = format("%s has unsaved changes.", doc.title);
     SDL_MessageBoxData data = {
         flags:      SDL_MESSAGEBOX_WARNING,
@@ -2848,14 +2469,12 @@ Confirm ui_confirm_discard(Document* doc, const(char)* title)
     {
     case btnSave:     return ui_save() ? Confirm.proceed : Confirm.cancel;
     case btnDontSave: return Confirm.proceed;
-    default:          return Confirm.cancel; // Cancel, or the window was closed
+    default:          return Confirm.cancel; // Cancel, or closed
     }
 }
 
-/// Ask the user to resolve unsaved edits before quitting. True to go ahead; main
-/// calls this on every quit route, so the window keeps running on Cancel. Every
-/// open document is asked about in turn and the first cancel stops the quit.
-/// Documents rather than tabs, so a file open in two panels is asked about once.
+/// Resolve unsaved edits before quitting; true to proceed. Called on every quit
+/// route. Asks per document (not tab); the first cancel stops.
 public bool ui_may_quit()
 {
     foreach (Document* d; docs)
@@ -2864,31 +2483,23 @@ public bool ui_may_quit()
     return true;
 }
 
-/// One row of the omnibar's command list or shortcut sheet: what it is called,
-/// the keys that reach it, and - for a command - the code ui_omni_run acts on.
+/// Omnibar command or shortcut sheet row: name, keys, and command code.
 struct Entry
 {
     string label;
     string keys;
     int id = -1;
 
-    /// Words the command answers to but is not called: what someone types when they
-    /// know what they want and not what this application named it. Never shown, so
-    /// they can be as generous as they need to be.
-    ///
-    /// Vocabulary first - "diff" finds Compare With, "vsplit" finds Split Pane
-    /// Right, whichever editor the user came from - and translation later: a
-    /// localised label would leave these English.
+    /// Hidden search terms: names from other editors ("diff", "vsplit"). Kept
+    /// English if labels get translated.
     string keywords;
 }
 
-/// The disk list only exists where disks_list knows how to read it; elsewhere the
-/// same prompt takes a typed path alone.
+/// Disk listing only where disks_list supports it; else a typed path.
 enum string OPEN_DEVICE_LABEL = DISKS_LISTED ? "Open Disk..." : "Open Path...";
 
-/// Commands the omnibar's '>' mode offers. The menus' own actions, so anything
-/// reachable by mouse is reachable by typing its name; ddhx's document-level
-/// commands (go to offset, search, ...) join this table as ddhx exposes them.
+/// Omnibar '>' commands: the menu actions. ddhx document commands join as
+/// ddhx exposes them.
 enum
 {
     CMD_NEW_TAB, CMD_OPEN, CMD_OPEN_DEVICE, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS,
@@ -2952,10 +2563,8 @@ immutable Entry[] COMMANDS = [
     Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
 ];
 
-/// The head of the '?' sheet: the omnibar's own prefixes, which are as much a
-/// shortcut as any chord and the only ones with nowhere else to be advertised. The
-/// characters come from the omnibar's own enums, so the sheet cannot drift from
-/// what the box answers to.
+/// '?' sheet head: omnibar prefixes, from the omnibar's enums so they can't
+/// drift.
 immutable Entry[] PREFIXES = [
     Entry("Omnibar: go to an open view",     "(no prefix)"),
     Entry("Omnibar: run a command",          "" ~ OMNI_COMMAND),
@@ -2968,9 +2577,7 @@ immutable Entry[] PREFIXES = [
     Entry("Omnibar: fill in the row's word", "Tab"),
 ];
 
-/// The rest of the '?' sheet: every key the application answers to, in the order
-/// they come up - the omnibar, then the window, then the caret and the bytes under
-/// it. Nothing here runs.
+/// '?' sheet: all shortcuts (omnibar, window, caret and bytes). Display only.
 immutable Entry[] SHORTCUTS = [
     Entry("Omnibar",                      "Ctrl+E"),
     Entry("Omnibar, on commands",         "Ctrl+Shift+P"),
@@ -3008,31 +2615,29 @@ immutable Entry[] SHORTCUTS = [
     Entry("Type a byte",                  "0-9 a-f"),
 ];
 
-/// Whether the omnibar has the keyboard. main asks before routing a key, since
-/// the box takes text where the panel would take hex digits and chords.
+/// Whether the omnibar has the keyboard; main checks before routing keys.
 public bool ui_omni_active()
 {
     return omni_shown(omni);
 }
 
-/// Raise the omnibar on the mode `prefix` opens, or put it away when it is
-/// already on that mode (see omni_toggle). The Ctrl+E and Ctrl+Shift+P route.
+/// Toggle the omnibar on `prefix`'s mode (see omni_toggle). Ctrl+E,
+/// Ctrl+Shift+P.
 public void ui_omni_toggle(char prefix = 0)
 {
     omni_toggle(omni, prefix);
     if (omni_shown(omni) == false)
-        focusedView.hex.takeFocus = true; // typing goes back to the bytes
+        focusedView.hex.takeFocus = true; // typing returns to the bytes
 }
 
-/// Raise the omnibar on the mode `prefix` opens, leaving it up when it is already
-/// on that one. What a menu item wants, where toggling would make the box flicker
-/// away under a second click on the item that just opened it.
+/// Open the omnibar on `prefix`'s mode without toggling. For menu items, so a
+/// second click doesn't close it.
 public void ui_omni_open(char prefix)
 {
     omni_show(omni, prefix);
 }
 
-/// Put the omnibar away, whatever it was showing. The Esc route.
+/// Close the omnibar (Esc).
 public void ui_omni_close()
 {
     if (omni_shown(omni) == false)
@@ -3041,11 +2646,10 @@ public void ui_omni_close()
     focusedView.hex.takeFocus = true;
 }
 
-/// Fill the omnibar's row list for the mode it is currently in. Rebuilt every
-/// frame: titles, dirty flags and the tab count all move under us.
+/// Omnibar rows for the current mode, rebuilt per frame.
 const(OmniItem)[] ui_omni_items()
 {
-    rowUsed = 0; // this frame's rows start over the last frame's
+    rowUsed = 0; // reuse the arena
     size_t n;
     void put(string label, string detail, int id, bool marked = false, bool pinned = false,
         string keywords = null)
@@ -3058,19 +2662,9 @@ const(OmniItem)[] ui_omni_items()
     final switch (omni_mode(omni))
     {
     case OmniMode.switcher:
-        // One row per view rather than per document: the switcher picks a place to
-        // be, and one file open in two panes is two places.
-        //
-        // The detail column says which pane, and nothing about which tab: the strip
-        // is on screen showing that already, while the pane a row belongs to is the
-        // part a name on its own cannot tell you - and the number is what Ctrl+1..9
-        // then takes. With one pane there is no such question, so the column goes
-        // back to being the path. Either way the path is matched against, so any
-        // part of it still finds the row.
-        //
-        // A row's id is its place in this list rather than a tab index, which means
-        // nothing without the pane it counts within; omniTabs carries the pair back
-        // for ui_omni_accept.
+        // One row per view (one file in two panes is two places). Detail shows the
+        // pane number (what Ctrl+1..9 takes) when split, else the path; the path is
+        // matched either way. Row ids index omniTabs (pane + tab).
         size_t at;
         bool split = ui_pane_count() > 1;
         foreach (Column* c; columns)
@@ -3090,8 +2684,7 @@ const(OmniItem)[] ui_omni_items()
                         char[32] where = void;
                         size_t used = sformat(where, "pane %s",
                             ui_ordinal(ui_pane_index(p) + 1)).length;
-                        // The row the user is already on, so Enter on it is known to
-                        // be a no-op before it is pressed.
+                        // Mark the current tab.
                         if (p is focused && ti == p.current)
                             used += sformat(where[used .. $], "  here").length;
                         detail = ui_row_text(where[0 .. used]);
@@ -3109,35 +2702,28 @@ const(OmniItem)[] ui_omni_items()
             put(e.label, e.keys, e.id, false, false, e.keywords);
         break;
     case OmniMode.address:
-        // One row, pinned: it is a readout of the offset being typed rather than
-        // something to pick out of a list, so the query must not filter it away.
+        // Pinned readout of the offset; not filtered.
         string label, detail;
         ui_goto_preview(label, detail);
         put(label, detail, 0, false, true);
         break;
     case OmniMode.find:
-        // Likewise a readout, of the bytes the pattern comes to. What it would find
-        // is deliberately not looked up: this runs every frame.
+        // Pinned readout of the pattern bytes. No search per frame.
         string flabel, fdetail;
         if (ui_find_preview(flabel, fdetail))
         {
             put(flabel, fdetail, FIND_RUN, false, true);
             break;
         }
-        // No pattern yet. Where the first token does not name one, the list turns
-        // into the vocabulary itself, narrowing as the word is typed: a graphical
-        // find box would spend a row of tick boxes saying this, and the box has no
-        // room for one. Past a prefix there is nothing left to offer, so the
-        // readout's own "not yet" row stands instead.
+        // No pattern yet: list prefixes, narrowed as typed. After a prefix, the
+        // readout's "not yet" row stands instead.
         const(char)[] word = ui_find_word();
         if (search_prefixed(word))
         {
             put(flabel, fdetail, FIND_RUN, false, true);
             break;
         }
-        // Pinned, every one of them: the matching here is by what the word opens,
-        // where the box's own would rank "f32:" under any row merely mentioning an
-        // f. Nothing is filtered twice.
+        // Pinned: matched by prefix here; the box's fuzzy ranking would misorder them.
         foreach (int i; 0 .. cast(int) SEARCH_PREFIXES.length)
             if (ui_find_offers(SEARCH_PREFIXES[i].text, word))
                 put(SEARCH_PREFIXES[i].text, SEARCH_PREFIXES[i].what, i, false, true);
@@ -3159,8 +2745,7 @@ const(OmniItem)[] ui_omni_items()
                 -1, false, true);
             break;
         }
-        // The row's id is the mark's place in the list: an offset does not fit an
-        // int on a document worth bookmarking.
+        // Row id is the list index (offsets overflow int).
         foreach (size_t i, ref Bookmark mark; focusedDoc.marks)
         {
             char[48] head = void;
@@ -3174,9 +2759,8 @@ const(OmniItem)[] ui_omni_items()
                 put(ui_row_text(head[0 .. used]), bytes, cast(int) i);
                 continue;
             }
-            // A named mark reads as its name, its address moving in beside the
-            // bytes and staying searchable: "@magic" and "@1f40" have to reach the
-            // same row.
+            // Named marks show the name, with the address in the detail; both searchable
+            // ("@magic", "@1f40").
             char[128] detail = void;
             put(mark.name,
                 ui_row_text(sformat(detail, "0x%08x  %s", mark.at, bytes)),
@@ -3193,9 +2777,8 @@ const(OmniItem)[] ui_omni_items()
                 "PNG is the only format read so far", -1, false, true);
             break;
         }
-        // The role goes in as a keyword rather than on screen: the colour under the
-        // caret already says it, and it is what lets "#checksum" find a field the
-        // format calls CRC.
+        // Role as a hidden keyword ("#checksum" finds CRC); the colour already shows
+        // it.
         foreach (size_t i, ref const(StructureSpan) s; spans)
         {
             char[128] path = void;
@@ -3205,9 +2788,7 @@ const(OmniItem)[] ui_omni_items()
                     s.length == 1 ? "" : "s")),
                 cast(int) i, false, false, structure_role_name(s.role));
         }
-        // A cut list has to say so, or a missing field reads as one the format does
-        // not have. Not pinned, so typing a query puts the notice away with the rows
-        // it was about; unfiltered it sorts last, where the list runs out.
+        // Truncated: say so. Unpinned, so it sorts last and filters out with typing.
         if (whole == false)
         {
             const(StructureSpan) last = spans[$ - 1];
@@ -3217,8 +2798,7 @@ const(OmniItem)[] ui_omni_items()
         }
         break;
     case OmniMode.prompt:
-        // One mode, three questions: the box knows it was asked something, and this
-        // is where what was asked decides the rows.
+        // Rows by prompt kind.
         final switch (promptKind)
         {
         case PromptKind.markName:
@@ -3238,8 +2818,7 @@ const(OmniItem)[] ui_omni_items()
         }
         break;
     case OmniMode.help:
-        // The prefixes first, then the chords: equal scores keep this order, so
-        // an unfiltered sheet reads as the two lists it is.
+        // Prefixes, then chords; stable sort keeps the order unfiltered.
         foreach (ref immutable Entry e; PREFIXES)
             put(e.label, e.keys, e.id);
         foreach (ref immutable Entry e; SHORTCUTS)
@@ -3249,11 +2828,8 @@ const(OmniItem)[] ui_omni_items()
     return omniItems[0 .. n];
 }
 
-/// What the caret was doing before the '#' list started moving it, so a browse that
-/// is called off leaves the document where it was found.
-///
-/// One browse at a time, so one of these: the box holds the keyboard while it is up,
-/// and anything that could close the view under this dismisses it first.
+/// Caret state before a '#' browse, restored if it's cancelled. One at a time
+/// (the box has the keyboard).
 struct Preview
 {
     View* view;
@@ -3261,9 +2837,8 @@ struct Preview
     size_t anchor;
     long topRow;
 
-    /// What the last previewed row left the caret on. A caret somewhere else by the
-    /// time the box goes is one the user put there - a click on the grid behind
-    /// dismisses the box, and that click is an instruction, not a browse to undo.
+    /// Caret as last set by the preview. If it differs when the box closes, the
+    /// user moved it (e.g. clicked the grid): keep it.
     size_t setCursor;
     size_t setAnchor;
 
@@ -3272,18 +2847,13 @@ struct Preview
 /// Ditto.
 __gshared Preview preview;
 
-/// Walk the caret along the '#' list as it is highlighted: a field's name says where
-/// it is, and only the bytes say what is in it. Enter then confirms rather than
-/// being the first thing that shows anything.
-///
-/// The row is centred under the box rather than revealed the usual way: the least
-/// scroll that brings it on screen would leave it behind the omnibar, which covers
-/// the top of the grid it is being read off.
+/// Move the caret along the '#' list as rows are highlighted; Enter confirms.
+/// Centred below the box, since a minimal reveal would land under it.
 void ui_struct_preview(OmniMode mode)
 {
     if (mode != OmniMode.structure || ui_omni_active() == false)
     {
-        ui_preview_restore(); // the box moved to another mode, or went away
+        ui_preview_restore(); // mode changed or box closed
         return;
     }
 
@@ -3307,8 +2877,8 @@ void ui_struct_preview(OmniMode mode)
     preview.setAnchor = focusedView.hex.anchor;
 }
 
-/// Put the caret back where the browse found it, unless something else has moved it
-/// since. Nothing to do when no browse is in hand.
+/// Restore the caret from before the browse, unless moved since. No-op without
+/// a browse.
 void ui_preview_restore()
 {
     if (preview.active == false)
@@ -3324,31 +2894,26 @@ void ui_preview_restore()
     preview = Preview.init;
 }
 
-/// Ditto, keeping where the browse got to: the row was taken.
+/// Ditto, keeping the browse position (row taken).
 void ui_preview_drop()
 {
     preview = Preview.init;
 }
 
-/// Where the omnibar's ':' mode is currently pointing: the offset its text spells
-/// out, resolved against the document in front. See the address module for what
-/// counts as an offset.
+/// Offset the ':' text resolves to against the focused document (see address).
 Address ui_goto_target()
 {
     return address_parse(omni_query(omni), cast(long) focusedView.hex.cursor,
         cast(long) hex_total(focusedView.hex));
 }
 
-/// Storage the omnibar's row text is composed into, and how much of it this frame
-/// has taken. Rows that are computed rather than named - an offset readout, an
-/// inspector reading - would otherwise allocate a string per row per frame, for
-/// text nothing outlives the frame. It only ever grows.
+/// Arena for computed row text (readouts, inspector values), avoiding per-row
+/// allocations each frame. Only grows.
 __gshared char[] rowArena;
 /// Ditto.
 __gshared size_t rowUsed;
 
-/// Park `text` in the arena and hand back a slice of it, good until the next
-/// frame's rows are built. Compose into a stack buffer, then park it here.
+/// Copy `text` into the arena; valid until the next frame's rows.
 string ui_row_text(const(char)[] text)
 {
     if (rowUsed + text.length > rowArena.length)
@@ -3359,8 +2924,7 @@ string ui_row_text(const(char)[] text)
     return cast(string) rowArena[at .. rowUsed];
 }
 
-/// Text for the ':' mode's one row: where the caret would land, or - while the text
-/// is not an offset yet - the syntax it is waiting for.
+/// ':' row text: target offset, or the syntax hint while invalid.
 void ui_goto_preview(out string label, out string detail)
 {
     Address a = ui_goto_target();
@@ -3375,8 +2939,7 @@ void ui_goto_preview(out string label, out string detail)
     size_t total = hex_total(focusedView.hex);
     label = ui_row_text(sformat(buf, "Go to 0x%08x", a.pos));
 
-    // The decimal count and how far in it lands, the whole point of "%50" being
-    // not knowing the number.
+    // Show the absolute offset and percentage.
     int percent = total ? cast(int)((a.pos * 100) / cast(long) total) : 0;
     if (a.clamped)
         detail = ui_row_text(sformat(buf,
@@ -3386,22 +2949,18 @@ void ui_goto_preview(out string label, out string detail)
             "%u of %u bytes, %d%%", a.pos, total, percent));
 }
 
-/// The pattern the find box is currently spelling out, read out of its text.
-///
-/// Kept from one frame to the next: the preview row is built every frame the box is
-/// up and ddhx's parser allocates, so the text only goes through it once it has
-/// actually changed.
+/// The find box's parsed pattern. Cached across frames since the parser
+/// allocates; reparsed only when the text changes.
 bool ui_find_needle(out Needle needle)
 {
     const(char)[] query = omni_query(omni);
-    if (query.length > findText.length) // too long to remember: read it every time
+    if (query.length > findText.length) // too long to cache
     {
         findTextLen = size_t.max;
         return search_parse(query, needle, focusedDoc.endian);
     }
 
-    // The byte order is part of what the text came to, so a document read the
-    // other way round - or a switch to one - re-reads it.
+    // Byte order affects the result: reparse on change.
     if (findTextLen != query.length || findEndian != focusedDoc.endian
         || findText[0 .. findTextLen] != query)
     {
@@ -3414,13 +2973,11 @@ bool ui_find_needle(out Needle needle)
     return findHave;
 }
 
-/// The id standing for "this row runs the search" - the readout, and the notices
-/// that take its place. Every other id in the '/' list is a place in
-/// SEARCH_PREFIXES, so the two must not overlap.
+/// Row id for "run the search" (readout and notices). Other '/' ids index
+/// SEARCH_PREFIXES; must not overlap.
 enum int FIND_RUN = -1;
 
-/// The word the vocabulary is offered against: the first token of the query, which
-/// is the one that has to carry a prefix.
+/// First query token, which must carry the prefix.
 const(char)[] ui_find_word()
 {
     const(char)[] query = omni_query(omni);
@@ -3430,9 +2987,8 @@ const(char)[] ui_find_word()
     return query[0 .. end];
 }
 
-/// Whether the vocabulary word `text` is one the half-typed `word` is still on the
-/// way to. Case-folded, so a prefix typed in capitals still finds its row - ddhx
-/// itself takes only the lowercase form, which is what the row then writes in.
+/// Whether prefix `text` starts with the partial `word`, case-insensitively.
+/// ddhx only accepts lowercase, which the row inserts.
 bool ui_find_offers(const(char)[] text, const(char)[] word)
 {
     if (word.length > text.length)
@@ -3443,34 +2999,28 @@ bool ui_find_offers(const(char)[] text, const(char)[] word)
     return true;
 }
 
-/// Text for the '/' mode's readout row: the bytes the pattern comes to, so what is
-/// about to be searched for is never a guess.
-/// Returns: false when there is no pattern yet, `label` and `detail` then being the
-///          notice that says so.
+/// '/' readout: the pattern's bytes.
+/// Returns: false if no pattern yet; `label`/`detail` then hold the notice.
 bool ui_find_preview(out string label, out string detail)
 {
     Needle needle;
     if (ui_find_needle(needle) == false)
     {
-        // Naming the word being typed is the whole of what can be said about a
-        // pattern that does not parse: ddhx's parser reports "no" without saying
-        // where it stopped.
+        // Name the prefix being typed; ddhx's parser doesn't say where it failed.
         immutable(SearchPrefix)* pfx = search_prefix_of(ui_find_word());
         label  = "not a pattern yet";
         detail = pfx ? pfx.what : "a pattern opens with what it is";
         return false;
     }
 
-    // The elements as bytes, with '??' for a one-byte wildcard, '**' for a run and
-    // [min..max] for a range. Long patterns are cut off here rather than in the row,
-    // which would elide the tail anyway, so the arena's slice stays short.
+    // Bytes, '??' for any byte, '**' for a run, [min..max] for ranges. Truncated
+    // here to keep the arena slice short.
     char[128] buf = void;
     size_t at;
     foreach (ushort element; needle.data[0 .. needle.length])
     {
         if (element == SEARCH_RANGE_TAIL)
             continue;
-        // Used in previews (e.g., "ff aa ?? ...")
         char[48] word = void;
         const(char)[] text;
         if (element == SEARCH_ANY)
@@ -3498,8 +3048,7 @@ bool ui_find_preview(out string label, out string detail)
         at += text.length;
     }
 
-    // A run stands for as many bytes as it takes, so the count is a floor rather
-    // than the length, and saying so beats naming a number the search will not use.
+    // With runs the count is a minimum; say so.
     size_t least = search_least(needle);
     char[64] count = void;
     label  = ui_row_text(buf[0 .. at]);
@@ -3509,7 +3058,7 @@ bool ui_find_preview(out string label, out string detail)
     return true;
 }
 
-/// One row of the '=' inspector: a type, and the byte order it is read in.
+/// '=' row: a type and its byte order.
 struct Inspect
 {
     string label;
@@ -3517,11 +3066,8 @@ struct Inspect
     Endian endian;
 }
 
-/// The readings the '=' mode offers: the single bytes, which have no byte order
-/// to argue about and so appear once, then every other type in both orders. Both
-/// stay on the list whatever the document's setting is - the reading that was not
-/// asked for is as often as not the one that turns out to make sense - and the
-/// setting only says which half comes first, `ui_inspect_row` swapping them.
+/// '=' rows: single bytes once, other types in both orders. Both orders always
+/// listed; the document setting only picks which comes first (ui_inspect_row).
 immutable Inspect[] INSPECT = [
     Inspect("u8",     InspectorType.u8,  Endian.littleEndian),
     Inspect("i8",     InspectorType.i8,  Endian.littleEndian),
@@ -3543,15 +3089,12 @@ immutable Inspect[] INSPECT = [
     Inspect("f64 BE", InspectorType.f64, Endian.bigEndian),
 ];
 
-/// Rows the byte order says nothing about, at the head of INSPECT, and the rows
-/// of one order behind them; the table is those three blocks and nothing else,
-/// which is what lets a half be brought forward by index.
+/// INSPECT layout: singles, then one block per order, so a half can be indexed.
 enum size_t INSPECT_SINGLES = 2;
 enum size_t INSPECT_ORDERED = (INSPECT.length - INSPECT_SINGLES) / 2;
 static assert(INSPECT.length == INSPECT_SINGLES + 2 * INSPECT_ORDERED);
 
-/// Turn the document over to the other byte order. No message: the status bar
-/// carries the order, so the keystroke's result is already on screen.
+/// Toggle the document's byte order. No message: the status bar shows it.
 public void ui_endian_toggle()
 {
     if (ui_on_settings())
@@ -3560,7 +3103,7 @@ public void ui_endian_toggle()
         ? Endian.bigEndian : Endian.littleEndian;
 }
 
-/// Bring the settings tab up, in the focused pane unless one is already open.
+/// Show the settings tab, in the focused pane unless already open.
 public void ui_settings_open()
 {
     foreach (Document* d; docs)
@@ -3583,14 +3126,13 @@ public void ui_settings_open()
     p.current = p.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
 }
 
-/// Whether the focused tab is the settings page rather than a document.
+/// Whether the focused tab is the settings page.
 bool ui_on_settings()
 {
     return focusedDoc.settingsPage;
 }
 
-/// Flip a window chrome toggle, saved at once like everything the settings
-/// tab changes.
+/// Toggle window chrome; saved immediately like all settings.
 public void ui_toggle_minimap()
 {
     prefs.minimap = prefs.minimap == false;
@@ -3603,28 +3145,22 @@ public void ui_toggle_crumbs()
     cast(void) prefs_save();
 }
 
-/// Set the document's character set. Per document, so both views of one file read
-/// it the same way. No message: the lane is headed with the set's name and the
-/// bytes under it have just been redrawn through it.
+/// Set the document's charset (shared by its views). No message: the lane
+/// header shows it.
 public void ui_charset_set(immutable(Charset)* set)
 {
     focusedDoc.charset = set;
 }
 
-/// What the panel reads a byte as, for its text lane. Bound per frame in ui_pane
-/// against the document, so both views of one file decode it the same way.
+/// Panel text lane hook; bound per frame in ui_pane to the document.
 const(char)[] ui_charset_text(ubyte value, void* user)
 {
     return (cast(const(Document)*) user).charset.glyph(value);
 }
 
-/// Set how many bytes the focused view puts on a row, 0 fitting them to the pane
-/// and refitting on every resize.
-///
-/// Per view rather than per document: the width is how the bytes are being looked
-/// at, not what they are, so two panes on one file are free to disagree - which is
-/// the point of splitting one. A split inherits the width it was made from.
-/// Returns: False for a count the grid cannot draw, the view left as it was.
+/// Set the focused view's bytes per row; 0 fits the pane. Per view (splits may
+/// differ); splits inherit it.
+/// Returns: False if out of range, view unchanged.
 public bool ui_columns_set(int cols)
 {
     if (cols < 0 || cols > HEX_COLUMNS_MAX)
@@ -3636,14 +3172,14 @@ public bool ui_columns_set(int cols)
     return true;
 }
 
-/// The focused view's width, 0 while it is fitting itself to the pane.
+/// Focused view's columns, 0 when auto.
 int ui_columns()
 {
     return focusedView.hex.autoColumns ? 0 : focusedView.hex.columns;
 }
 
-/// A width as the prompt's rows write it. Arena-backed, so it lives as long as the
-/// frame's rows do; see ui_columns_label for the menu's NUL-terminated copy.
+/// Width text for prompt rows. Arena-backed; see ui_columns_label for the
+/// menu's copy.
 string ui_columns_name(int cols)
 {
     if (cols == 0)
@@ -3653,9 +3189,8 @@ string ui_columns_name(int cols)
     return ui_row_text(sformat(buf, "%d", cols));
 }
 
-/// The focused view's width for the menu's right-hand column, where the on/off
-/// states go. Its own buffer rather than the row arena, which ui_omni_items clears
-/// out from under it every frame, and NUL-terminated, ddui taking C strings.
+/// Width text for the menu's shortcut column. Own buffer (the arena is reset
+/// each frame), NUL-terminated for ddui.
 const(char)* ui_columns_label()
 {
     if (focusedView.hex.autoColumns)
@@ -3667,13 +3202,9 @@ const(char)* ui_columns_label()
     return buf.ptr;
 }
 
-/// Read a width out of what was typed at the columns prompt: a plain count, or
-/// ddhx's own words for fitting it to the screen. Blank is not an answer.
-///
-/// Decimal only, as ddhx's `columns` setting is. A row length is a count of things
-/// rather than an address, so the 0x / 0b / 0o forms the goto box takes would be
-/// answering a question nobody asked.
-/// Returns: False when `typed` is not a width, `cols` untouched.
+/// Parse a columns prompt answer: a decimal count, or ddhx's auto keywords.
+/// Decimal only, like ddhx's `columns`. Blank is invalid.
+/// Returns: False if invalid, `cols` untouched.
 bool ui_columns_parse(const(char)[] typed, out int cols)
 {
     import std.conv : ConvException, to;
@@ -3682,9 +3213,9 @@ bool ui_columns_parse(const(char)[] typed, out int cols)
     if (text.length == 0)
         return false;
 
-    // ddhx takes both, and "autoresize" is what its own option is called.
+    // ddhx accepts both; "autoresize" is its option name.
     if (text == "auto" || text == "autoresize")
-        return true; // cols stays 0, which is what auto is
+        return true; // auto is 0
 
     try
         cols = to!int(text);
@@ -3701,25 +3232,25 @@ unittest
     assert(ui_columns_parse("  32  ", cols) && cols == 32);
     assert(ui_columns_parse("1", cols) && cols == 1);
 
-    // Auto is 0, by both of the names ddhx knows it under.
+    // Auto is 0, both names.
     cols = 99;
     assert(ui_columns_parse("auto", cols) && cols == 0);
     cols = 99;
     assert(ui_columns_parse("autoresize", cols) && cols == 0);
-    // As is a typed zero, ddhx's own spelling of it.
+    // Typed zero too, like ddhx.
     assert(ui_columns_parse("0", cols) && cols == 0);
 
     assert(ui_columns_parse("", cols) == false);
     assert(ui_columns_parse("   ", cols) == false);
     assert(ui_columns_parse("wide", cols) == false);
     assert(ui_columns_parse("16 bytes", cols) == false);
-    assert(ui_columns_parse("0x10", cols) == false); // a count, not an address
+    assert(ui_columns_parse("0x10", cols) == false); // decimal only
     assert(ui_columns_parse("-8", cols) == false);
-    assert(ui_columns_parse("257", cols) == false);  // past what the grid draws
-    assert(ui_columns_parse("999999999999", cols) == false); // past an int, even
+    assert(ui_columns_parse("257", cols) == false);  // over HEX_COLUMNS_MAX
+    assert(ui_columns_parse("999999999999", cols) == false); // over int
 }
 
-/// The row shown at `index`, the document's order coming first.
+/// Inspector row at `index`, the document's order first.
 ref immutable(Inspect) ui_inspect_row(int index)
 {
     size_t at = index;
@@ -3728,10 +3259,8 @@ ref immutable(Inspect) ui_inspect_row(int index)
     return INSPECT[at];
 }
 
-/// Read the bytes the inspector works from: as many as its widest type needs, from
-/// where the selection starts - the caret itself when there is no selection. A
-/// short read near EOF is fine, formatInspector saying "N/A" for what no longer
-/// fits.
+/// Bytes for the inspector (widest type), from the selection start. Short reads
+/// near EOF are fine (formatInspector shows "N/A").
 ubyte[] ui_inspect_bytes(ubyte[] buf)
 {
     if (focusedDoc.editor is null)
@@ -3740,7 +3269,7 @@ ubyte[] ui_inspect_bytes(ubyte[] buf)
     long at = cast(long) hex_sel_low(focusedView.hex);
     if (at >= total)
         return null;
-    // Only whole: a short read near EOF has to come from the editor to say so.
+    // Whole only: a short read near EOF must come from the editor.
     if (const(ubyte)[] cached = hex_cached(focusedView.hex, cast(size_t) at, buf.length))
     {
         buf[] = cached[];
@@ -3758,52 +3287,40 @@ const(char)[] ui_inspect_value(int index, ubyte[] bytes, char[] buf)
     return formatInspector(buf, row.type, bytes, row.endian);
 }
 
-/// Write the row the list is on into the box, for the modes whose rows are words of
-/// the query rather than places to go: the '/' vocabulary, and nothing else so far.
-/// The word lands over the half-typed one it was offered for, the rest of the query
-/// following it, and the box stays up with the caret behind what was written.
-///
-/// This is what Tab asks for outright. Enter comes through it too and falls past it
-/// when the row is not one to complete from, which is what keeps Enter meaning "run
-/// this" on every other row.
-/// Returns: false when there was nothing to complete.
+/// Complete the highlighted row into the query (currently only '/' prefixes):
+/// replaces the partial word, keeps the rest, box stays open. Tab always; Enter
+/// falls back to running on other rows.
+/// Returns: false if nothing to complete.
 bool ui_omni_complete(OmniMode mode, int id)
 {
     if (mode != OmniMode.find || id < 0 || id >= cast(int) SEARCH_PREFIXES.length)
         return false;
 
-    // Through a buffer of our own: the tail is a slice of the box's own text, which
-    // omni_refill is about to write over. Room for a full box and the longest word
-    // in front of it, sformat throwing rather than cutting; omni_refill is what
-    // trims the result back to what the box holds.
+    // Own buffer: the tail slices the box text omni_refill overwrites. Sized for a
+    // full box plus the longest prefix (sformat throws instead of truncating);
+    // omni_refill trims.
     char[256] line = void;
     const(char)[] rest = omni_query(omni)[ui_find_word().length .. $];
     omni_refill(omni, sformat(line, "%s%s", SEARCH_PREFIXES[id].text, rest));
     return true;
 }
 
-/// Act on the row the omnibar took, in the mode it was showing when the list was
-/// built (which is not necessarily the mode its text spells out now: a prefix
-/// typed this frame only reaches the list on the next one).
-///
-/// `transfer` is the row taken with Shift held: bring it here rather than go to it.
-/// Only the switcher has two readings of a row; every other mode does the one thing
-/// it does either way.
+/// Act on the taken row, in the mode its list was built for (a prefix typed
+/// this frame only takes effect next frame). `transfer`: Shift, "bring here";
+/// only the switcher distinguishes it.
 void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
 {
     final switch (mode)
     {
     case OmniMode.switcher:
-        // The id indexes the flat list the rows were built from, which carries the
-        // pane as well as the tab.
+        // Id indexes omniTabs (pane + tab).
         if (id < 0 || id >= omniTabs.length)
             break;
         Pane* from = omniTabs[id].pane;
         size_t tab = omniTabs[id].tab;
-        // Moving a view to the pane it is already in is the plain jump; so is
-        // moving one when there is nowhere else for it to be.
+        // Transfer into the same pane is a plain jump.
         if (transfer && from !is focused)
-            ui_move_view(from, tab, focused); // takes focus itself, as does the jump
+            ui_move_view(from, tab, focused); // takes focus, like the jump
         else
             ui_select_tab_in(from, tab);
         break;
@@ -3811,23 +3328,20 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         ui_omni_run(id);
         break;
     case OmniMode.address:
-        // Parsed again rather than carried in the row's id, which is an int where
-        // an offset is not. A half-typed offset just puts the box away.
+        // Reparse (offsets don't fit the int id). Invalid input just closes.
         Address a = ui_goto_target();
         if (a.ok)
         {
-            hex_set_caret(focusedView.hex, cast(size_t) a.pos); // scrolls it into view
+            hex_set_caret(focusedView.hex, cast(size_t) a.pos); // scrolls to it
             logDebugging("went to %#x", a.pos);
         }
         focusedView.hex.takeFocus = true;
         break;
     case OmniMode.find:
-        // A vocabulary row is a word being picked, not a pattern being run, so
-        // Enter on one fills the box in exactly as Tab does and leaves it up.
+        // Prefix rows complete, like Tab.
         if (ui_omni_complete(mode, id))
             break;
-        // Take the pattern as the one to repeat, then look for it from just past
-        // the caret, so Enter on the same pattern walks the document.
+        // Remember the pattern, search from past the caret so repeats advance.
         Needle needle;
         if (ui_find_needle(needle))
         {
@@ -3838,8 +3352,7 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         focusedView.hex.takeFocus = true;
         break;
     case OmniMode.inspect:
-        // Nothing to jump to: the reading itself is the answer, so it goes to the
-        // clipboard.
+        // No target: copy the value to the clipboard.
         ubyte[8] raw = void;
         char[64] buf = void;
         const(char)[] value = ui_inspect_value(id, ui_inspect_bytes(raw), buf);
@@ -3860,22 +3373,19 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         focusedView.hex.takeFocus = true;
         break;
     case OmniMode.structure:
-        // The id indexes the list the rows were built from, which is the cache's own
-        // array: nothing has edited the document between building it and this.
+        // Id indexes the cached spans; no edits happened since the list was built.
         bool whole;
         const(StructureSpan)[] spans = structure_spans(focusedDoc.structure, STRUCT_ROWS, whole);
         if (id >= 0 && id < spans.length && spans[id].length > 0)
         {
-            // Selected rather than jumped to: a field is a run of bytes, and the
-            // status bar then says how long it is.
+            // Select the field, so the status bar shows its length.
             ui_select_range(focusedView, cast(size_t) spans[id].at, cast(size_t) spans[id].length);
             logDebugging("went to %s at %#x", spans[id].name, spans[id].at);
         }
         focusedView.hex.takeFocus = true;
         break;
     case OmniMode.prompt:
-        // The name prompt's answer is the text; the two settings' is the row, which
-        // is already what the browse behind the box was showing.
+        // Name prompt: the text. Settings: the row (already previewed).
         final switch (promptKind)
         {
         case PromptKind.markName: ui_mark_name_commit(omni_query(omni)); break;
@@ -3886,19 +3396,18 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             break;
         case PromptKind.openDevice:
             ui_device_commit(id);
-            return; // an opened tab took the focus already
+            return; // opened tab has focus
         }
         focusedView.hex.takeFocus = true;
         break;
     case OmniMode.help:
-        focusedView.hex.takeFocus = true; // nothing to run: the sheet is there to be read
+        focusedView.hex.takeFocus = true; // read-only sheet
         break;
     }
 }
 
-/// The bytes a bookmark covers, as the detail column of its row: enough of them to
-/// recognise what was marked, with the ASCII beside it and the run's length after
-/// it when there is more than fits.
+/// Bookmark row detail: leading bytes in hex and text, plus the length if
+/// longer.
 string ui_bookmark_bytes(ref const(Bookmark) mark)
 {
     if (focusedDoc.editor is null)
@@ -3911,8 +3420,7 @@ string ui_bookmark_bytes(ref const(Bookmark) mark)
     if (bytes.length > mark.length)
         bytes = bytes[0 .. cast(size_t) mark.length];
 
-    // Eight bytes of hex, then the same eight as text - up to three bytes each
-    // once the set reaches outside ASCII - and the run's length after them.
+    // 8 bytes hex, the same as text (glyphs up to 3 bytes), then the length.
     char[96] buf = void;
     size_t n;
     foreach (ubyte b; bytes)
@@ -3930,39 +3438,37 @@ string ui_bookmark_bytes(ref const(Bookmark) mark)
     return ui_row_text(buf[0 .. n]);
 }
 
-/// The pattern the last search ran with, kept so Find Next has something to
-/// repeat once the box is gone.
+/// Last searched pattern, for Find Next after the box closes.
 __gshared Needle lastNeedle;
 /// Ditto.
 __gshared bool haveNeedle;
 
-/// The pattern the find box last had read out of it, and the text it came from, so
-/// the box's own frames do not put one query through the parser over and over. See
+/// Find box parse cache, so frames don't reparse the same query. See
 /// ui_find_needle.
 __gshared Needle findNeedle;
 /// Ditto.
 __gshared bool findHave;
-/// Ditto. size_t.max for "nothing remembered", which no query length can be.
+/// Ditto. size_t.max: nothing cached.
 __gshared size_t findTextLen = size_t.max;
-/// Ditto. As long as the omnibar's own buffer, so a query it holds fits here.
+/// Ditto. Same size as the omnibar buffer.
 __gshared char[192] findText;
-/// Ditto, the byte order it was read in.
+/// Ditto, byte order used.
 __gshared Endian findEndian;
 
-/// Whether a job is walking `d`, in which case it takes no edits.
+/// Whether a job is walking `d` (edits refused).
 bool ui_busy(const(Document)* d)
 {
     return d.job && d.job.busy;
 }
 
-/// Whether `v` is the view waiting on its document's job.
+/// Whether `v` is waiting on its document's job.
 bool ui_locked(const(View)* v)
 {
     return ui_busy(v.doc) && v.doc.jobView is v;
 }
 
-/// Turn down an edit or a second walk on a busy document, saying so rather than
-/// dropping the keystroke. Returns: true when refused.
+/// Refuse an edit or second job on a busy document, with a message.
+/// Returns: true if refused.
 bool ui_refuse_busy(const(Document)* d)
 {
     if (ui_busy(d) == false)
@@ -3971,7 +3477,7 @@ bool ui_refuse_busy(const(Document)* d)
     return true;
 }
 
-/// Ditto, for an edit, which a restricted document refuses as well.
+/// Ditto for edits, also refused on restricted documents.
 bool ui_refuse_edit(const(Document)* d)
 {
     if (ui_refuse_busy(d))
@@ -3982,7 +3488,7 @@ bool ui_refuse_edit(const(Document)* d)
     return true;
 }
 
-/// Percentage for `v`'s tab, -1 when it has none to show.
+/// Tab progress for `v`, -1 if none.
 int ui_job_progress(const(View)* v)
 {
     if (ui_locked(v) == false)
@@ -3990,9 +3496,9 @@ int ui_job_progress(const(View)* v)
     return v.doc.job.progress;
 }
 
-/// Walk `v`'s document on a worker thread, then hand `v` to `land` back on this
-/// one. `v` is locked and its document refuses edits until then; a walk that was
-/// cancelled, failed, or outlived the view's hold on the document lands nothing.
+/// Run `walk` on `v`'s document on a worker, then `land(v)` on the UI thread.
+/// `v` is locked and edits refused until then. Cancelled, failed or orphaned
+/// walks don't land.
 void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*) land)
 {
     Document* d = v.doc;
@@ -4021,7 +3527,7 @@ void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*)
     job.run();
 }
 
-/// Whether any document is being walked.
+/// Whether any job is running.
 public bool ui_jobs_busy()
 {
     foreach (const(Document)* d; docs)
@@ -4030,8 +3536,8 @@ public bool ui_jobs_busy()
     return false;
 }
 
-/// Stop the walk the focused view is waiting on. Returns: false when there is none,
-/// so the key can mean something else.
+/// Cancel the focused view's job.
+/// Returns: false if none, so the key can do something else.
 public bool ui_job_cancel()
 {
     if (ui_locked(&focusedView()) == false)
@@ -4040,10 +3546,8 @@ public bool ui_job_cancel()
     return true;
 }
 
-/// Look through `v`'s document for the last pattern from `from`, in whichever
-/// direction, and put that view's selection on what turns up. Reports through the
-/// status bar either way: a search that found nothing has to say so, or it reads
-/// as a dropped keystroke.
+/// Search `v`'s document for the last pattern from `from` and select the match.
+/// Always reports in the status bar; silence would look like a dropped key.
 void ui_find_step(ref View v, bool backward, long from)
 {
     if (haveNeedle == false)
@@ -4054,9 +3558,8 @@ void ui_find_step(ref View v, bool backward, long from)
     if (v.doc.editor is null || ui_refuse_busy(v.doc))
         return;
 
-    // Copied, since the find box can take another pattern while this one walks.
-    // The length comes back from the search rather than off the needle: a '*' runs
-    // for whatever the document held, so only the match knows how much to select.
+    // Copy: the box may change the pattern meanwhile. Match length comes from the
+    // search since '*' varies.
     Needle needle = lastNeedle;
     long size = cast(long) hex_total(v.hex);
     long at = -1;
@@ -4074,36 +3577,28 @@ void ui_find_step(ref View v, bool backward, long from)
     });
 }
 
-/// Repeat the last search from where the caret is. The step off the caret is
-/// what keeps a repeat moving instead of finding the same match again.
+/// Repeat the last search from the caret, offset so it doesn't refind the same
+/// match.
 public void ui_find_repeat(bool backward)
 {
     if (ui_on_settings())
         return;
-    // A match leaves the caret on its last byte, so stepping back from the caret
-    // would land inside the match and find it again.
+    // The caret is on the match's last byte; going back from it would refind it.
     long from = backward
         ? cast(long) hex_sel_low(focusedView.hex) - 1
         : cast(long) focusedView.hex.cursor + 1;
     ui_find_step(focusedView, backward, from);
 }
 
-/// Move past the run of identical elements at the caret, the way ddhx's skip-back
-/// and skip-forward do, landing on the first element either side that holds
-/// something else. A run reaching the end of the document goes there rather than
-/// leaving the key looking dropped.
+/// ddhx skip-back/forward: move past the run of identical elements at the
+/// caret. Goes to the document edge if nothing differs.
 ///
-/// The element is the byte under a bare caret and the whole of the selection when
-/// there is one, which is how a table of records is walked a record at a time. What
-/// is landed on stays selected so the walk can be repeated - ddhx drops the
-/// selection there, but a chord that cannot be pressed twice is half a movement.
+/// The element is the caret byte, or the selection (walks records). The landed
+/// element stays selected so it repeats (ddhx drops it).
 ///
-/// `select` (the Shift half of the chord) keeps the anchor and covers the bytes
-/// crossed rather than jumping the caret past them, so a megabyte of 0xff is one
-/// keystroke to select. It walks a byte at a time, and from the first byte the
-/// selection does not already hold: the selection is what grows here, so it
-/// cannot also be the element being compared, and starting on the byte the last
-/// press stopped on would compare that press's run against itself and stall.
+/// `select` (Shift) keeps the anchor and selects the crossed bytes. It compares
+/// byte-wise from the first unselected byte; comparing from where the last
+/// press stopped would stall on its own run.
 public void ui_skip_element(bool backward, bool select = false)
 {
     if (ui_on_settings())
@@ -4124,9 +3619,8 @@ public void ui_skip_element(bool backward, bool select = false)
     }
     else
     {
-        // Taken from the selection's low end, the way ddhx takes it, so both
-        // directions step in the same lane. A selection can outlive the bytes it
-        // covered (a delete under it), hence the clamp.
+        // From the selection's low end, like ddhx. Clamped: the selection may outlive
+        // deleted bytes.
         from = cast(long) hex_sel_low(focusedView.hex);
         long high = cast(long) hex_sel_high(focusedView.hex);
         if (high >= total)
@@ -4139,8 +3633,7 @@ public void ui_skip_element(bool backward, bool select = false)
             return;
         }
     }
-    // Nothing ahead of the append slot, so a forward skip from there has nowhere to
-    // go; backward still walks the run behind it.
+    // Nothing after the append slot; backward still works.
     if (from >= total && backward == false)
         return;
 
@@ -4159,14 +3652,12 @@ public void ui_skip_element(bool backward, bool select = false)
     });
 }
 
-/// Far end of the run a skip from `from` crossed, given the `at` it landed on:
-/// one byte short of it, since that byte is what ended the run and belongs to
-/// whatever comes next. Unless the walk ran into an edge of the document without
-/// finding anything different, where `at` is the last byte of the run itself -
-/// told apart by reading it back, which is one byte either way.
+/// Far end of the crossed run, given the landing `at`: one before it (that byte
+/// ended the run), unless the walk hit the document edge, where `at` is the
+/// run's last byte. Read back to tell which.
 long skipRunEnd(View* v, long from, long at, bool backward, long total)
 {
-    if (from >= total) // the append slot: the skip took its run from here instead
+    if (from >= total) // append slot: the run was taken from here
         from = total - 1;
 
     ubyte ended, here;
@@ -4176,12 +3667,11 @@ long skipRunEnd(View* v, long from, long at, bool backward, long total)
     return backward ? at + 1 : at - 1;
 }
 
-/// Put `v`'s selection over `len` bytes at `start` and scroll it into view. The
-/// caret lands on the run's last byte, so the panel's own reveal keeps the run
-/// on screen and Shift+arrows carry on extending from there.
+/// Select `len` bytes at `start` and scroll to it. Caret on the last byte so
+/// Shift+arrows extend from there.
 void ui_select_range(ref View v, size_t start, size_t len)
 {
-    hex_set_caret(v.hex, start); // clamps, actives, and scrolls onto it
+    hex_set_caret(v.hex, start); // clamps, activates, scrolls
     if (len > 1)
     {
         size_t total = hex_total(v.hex);
@@ -4192,9 +3682,7 @@ void ui_select_range(ref View v, size_t start, size_t len)
     }
 }
 
-/// Set or clear a bookmark over the selection, or over the byte under the caret
-/// when nothing is selected: a field or a header is worth coming back to, a lone
-/// byte of it rarely is.
+/// Toggle a bookmark over the selection, or the caret byte.
 public void ui_mark_toggle()
 {
     if (ui_on_settings())
@@ -4210,9 +3698,7 @@ public void ui_mark_toggle()
         ui_status(set ? "bookmark set at %#x" : "bookmark cleared at %#x", at);
 }
 
-/// Name the bookmark under the caret, marking the selection first when there is no
-/// bookmark there yet: naming a field is one thought, and asking for Ctrl+B before
-/// Ctrl+Shift+B would make it two.
+/// Name the bookmark at the caret, creating one over the selection if needed.
 public void ui_mark_name()
 {
     if (ui_on_settings())
@@ -4231,17 +3717,14 @@ public void ui_mark_name()
         return;
     }
 
-    // The run holding the caret can start before it; the prompt is about the whole
-    // of it, so it is that start the answer is applied to.
+    // The run may start before the caret; key on its start.
     markPrompt = MarkPrompt(&focusedDoc(), focusedDoc.marks[index].at);
     promptKind = PromptKind.markName;
     omni_prompt(omni, "name this run of bytes", focusedDoc.marks[index].name);
 }
 
-/// Ask how many bytes go on a row. A prompt rather than a menu that steps through
-/// a handful of counts: the answer is a number, and a file with 24-byte records
-/// wants that number typed, not cycled past. The common widths are still rows, so
-/// the list is the vocabulary and the box is the way past it.
+/// Prompt for columns. A prompt, not a cycle, so any count can be typed;
+/// common widths are listed.
 public void ui_columns_prompt()
 {
     if (ui_on_settings())
@@ -4253,8 +3736,7 @@ public void ui_columns_prompt()
     omni_select(omni, ui_columns_index(ui_columns()));
 }
 
-/// Ditto, for the set the text lane is read through. The four are a closed list, so
-/// the rows are the answer and typing narrows them; nothing here is free text.
+/// Prompt for the text lane charset. Closed list; typing narrows it.
 public void ui_charset_prompt()
 {
     if (ui_on_settings())
@@ -4263,12 +3745,12 @@ public void ui_charset_prompt()
         focusedView.hex.autoColumns, focusedDoc.charset, true);
     promptKind = PromptKind.charset;
     omni_prompt(omni, "ascii, cp437, ebcdic037, macroman, latin1, win1252");
-    // The rows are ddhx's list, in its order.
+    // Rows follow ddhx's list order.
     omni_select(omni, ui_charset_index(focusedDoc.charset));
 }
 
-/// Ask for a disk to open, or a path typed out: the way to a device the native
-/// dialog will not show, and the only way on a system whose disks are not listed.
+/// Prompt for a disk or a typed path; for devices the native dialog doesn't
+/// show.
 public void ui_open_device_prompt()
 {
     deviceRows = disks_list();
@@ -4284,14 +3766,12 @@ public void ui_open_device_prompt()
     omni_prompt(omni, DISKS_LISTED ? "pick a disk, or type a path" : "type a path to open");
 }
 
-/// What ui_open_device_prompt found, kept for as long as the box is up rather than
-/// asked for again every frame.
+/// Disks found by ui_open_device_prompt, kept while the box is open.
 __gshared Disk[] deviceRows;
-/// Ditto, as the rows show them.
+/// Ditto, row text.
 __gshared string[] deviceLabels, deviceDetails;
 
-/// The disks, plus the typed text as a path of its own once it looks like one: a
-/// model name typed to narrow the list is not a file to open.
+/// Disk rows, plus the typed text as a path row once it looks like one.
 void ui_device_rows(scope void delegate(string, string, int, bool, bool, string) put)
 {
     import std.string : indexOfAny;
@@ -4303,7 +3783,7 @@ void ui_device_rows(scope void delegate(string, string, int, bool, bool, string)
         put(deviceLabels[i], deviceDetails[i], cast(int) i, false, false, disk.path);
 }
 
-/// Open the disk at row `id`, or the typed path for the row past the last disk.
+/// Open disk row `id`, or the typed path for the row after the last disk.
 void ui_device_commit(int id)
 {
     if (id >= 0 && id < deviceRows.length)
@@ -4313,21 +3793,17 @@ void ui_device_commit(int id)
     focusedView.hex.takeFocus = true;
 }
 
-/// The widths the columns prompt suggests: the conventional 16, its halves and
-/// doubles, and auto. Anything else is typed.
+/// Suggested widths (0 = auto). Others are typed.
 immutable int[5] COLUMN_SUGGESTED = [ 8, 16, 24, 32, 0 ];
 
-/// Those, plus wherever the focused view is now when that is none of them, in
-/// ascending order with auto last.
-///
-/// Where the view stands always has a row of its own: the highlight opens on it
-/// (see omni_select) and walking the list is a browse that applies what it lands
-/// on, so a list without it would move the grid the moment the box came up.
-/// Returns: How much of `offered` was filled.
+/// Suggested widths plus the current one if not among them; ascending, auto
+/// last. The current width needs a row since the highlight opens on it and
+/// browsing applies rows.
+/// Returns: Entries filled in `offered`.
 size_t ui_columns_offered(int current, out int[COLUMN_SUGGESTED.length + 1] offered)
 {
     size_t n;
-    bool placed = current == 0; // auto is on the list already, and last
+    bool placed = current == 0; // auto is already listed, last
 
     foreach (int cols; COLUMN_SUGGESTED)
     {
@@ -4346,31 +3822,30 @@ unittest
 {
     int[COLUMN_SUGGESTED.length + 1] got;
 
-    // A suggested width adds nothing: the list is what it always was.
+    // Suggested width: list unchanged.
     assert(ui_columns_offered(16, got) == 5);
     assert(got[0 .. 5] == [ 8, 16, 24, 32, 0 ]);
-    assert(ui_columns_offered(0, got) == 5);   // auto, already last
+    assert(ui_columns_offered(0, got) == 5);   // auto
     assert(got[0 .. 5] == [ 8, 16, 24, 32, 0 ]);
-    assert(ui_columns_offered(8, got) == 5);   // the first of them
+    assert(ui_columns_offered(8, got) == 5);   // first
     assert(got[0 .. 5] == [ 8, 16, 24, 32, 0 ]);
 
-    // Anything else takes a row, in the place its number puts it.
+    // Others are inserted in order.
     assert(ui_columns_offered(48, got) == 6);
-    assert(got[0 .. 6] == [ 8, 16, 24, 32, 48, 0 ]); // past them all, before auto
+    assert(got[0 .. 6] == [ 8, 16, 24, 32, 48, 0 ]); // before auto
     assert(ui_columns_offered(10, got) == 6);
     assert(got[0 .. 6] == [ 8, 10, 16, 24, 32, 0 ]);
     assert(ui_columns_offered(1, got) == 6);
-    assert(got[0 .. 6] == [ 1, 8, 16, 24, 32, 0 ]); // narrower than any of them
+    assert(got[0 .. 6] == [ 1, 8, 16, 24, 32, 0 ]); // first
 
-    // And the highlight opens on it wherever it landed.
+    // Highlight index.
     assert(ui_columns_index(16) == 1);
     assert(ui_columns_index(0) == 4);
     assert(ui_columns_index(48) == 4);
     assert(ui_columns_index(10) == 1);
 }
 
-/// The width the columns prompt was raised on, which the browse may have moved the
-/// view off since. Its own width when no browse is in hand.
+/// Columns when the prompt opened (before browsing), else the current width.
 int ui_columns_baseline()
 {
     if (settingPreview.active)
@@ -4378,13 +3853,13 @@ int ui_columns_baseline()
     return ui_columns();
 }
 
-/// Ditto, the set the character prompt was raised on.
+/// Ditto for the charset prompt.
 immutable(Charset)* ui_charset_baseline()
 {
     return settingPreview.active ? settingPreview.charset : focusedDoc.charset;
 }
 
-/// Where a set sits in ddhx's list, which is the order the prompt rows follow.
+/// Index in ddhx's charset list (row order).
 int ui_charset_index(immutable(Charset)* set)
 {
     foreach (size_t i, immutable(Charset)* s; charsets)
@@ -4393,7 +3868,7 @@ int ui_charset_index(immutable(Charset)* set)
     return 0;
 }
 
-/// Where a width sits in that list, for the opening highlight.
+/// Index in the offered widths, for the initial highlight.
 int ui_columns_index(int current)
 {
     int[COLUMN_SUGGESTED.length + 1] offered = void;
@@ -4404,14 +3879,11 @@ int ui_columns_index(int current)
     return 0;
 }
 
-/// The columns prompt's rows: the widths on offer, plus - only when what was typed
-/// is none of them - a pinned readout of it, that being exactly when the list has
-/// no answer to give.
+/// Columns prompt rows: offered widths, plus a pinned readout when the typed
+/// text matches none.
 void ui_columns_rows(scope void delegate(string, string, int, bool, bool, string) put)
 {
-    // What the box was raised on, not what the browse has since applied: the rows
-    // would otherwise reshuffle under the highlight walking them, and "current"
-    // would follow it around saying nothing.
+    // Use the opening width, else rows reshuffle while browsing.
     int current = ui_columns_baseline();
     int[COLUMN_SUGGESTED.length + 1] offered = void;
     size_t n = ui_columns_offered(current, offered);
@@ -4434,8 +3906,7 @@ void ui_columns_rows(scope void delegate(string, string, int, bool, bool, string
     }
     else if (query.length)
     {
-        // Every other row has filtered out by now, and an empty list reads as the
-        // box still thinking rather than as an answer that is not coming.
+        // Everything else is filtered out; an empty list looks unresponsive.
         put("not a column count", "a number up to 256, or auto", -1, false, true, null);
     }
 
@@ -4450,8 +3921,7 @@ void ui_columns_rows(scope void delegate(string, string, int, bool, bool, string
     }
 }
 
-/// Ditto for the character set: one row per set, named as ddhx names it, with the
-/// full name in the detail column so "code page" and "roman" find one.
+/// Charset rows: ddhx names, full name as detail ("code page", "roman" match).
 void ui_charset_rows(scope void delegate(string, string, int, bool, bool, string) put)
 {
     immutable(Charset)* current = ui_charset_baseline();
@@ -4464,12 +3934,8 @@ void ui_charset_rows(scope void delegate(string, string, int, bool, bool, string
     }
 }
 
-/// What the two settings prompts were looking at before the list started walking
-/// them, so a browse called off puts back what it found.
-///
-/// The parallel of Preview, for the answers that show themselves in the grid rather
-/// than by moving the caret: walking to cp437 redraws the lane in it, which is the
-/// whole reason to offer a list rather than a cycle.
+/// Settings before browsing, restored on cancel. Like Preview, for settings
+/// that preview on the grid.
 struct SettingPreview
 {
     View* view;
@@ -4482,24 +3948,21 @@ struct SettingPreview
 /// Ditto.
 __gshared SettingPreview settingPreview;
 
-/// Apply the highlighted row as the box is walked. Nothing is committed here: what
-/// this writes is undone by ui_setting_restore unless the row is taken.
+/// Apply the highlighted row while browsing; reverted by ui_setting_restore
+/// unless taken.
 void ui_setting_preview(OmniMode mode)
 {
     if (mode != OmniMode.prompt || ui_omni_active() == false
         || promptKind == PromptKind.markName || promptKind == PromptKind.openDevice)
     {
-        ui_setting_restore(); // the box moved on, or the question was another one
+        ui_setting_restore(); // box moved on or another question
         return;
     }
     if (settingPreview.active == false)
         return;
 
-    // The browse is the arrow keys. Typing is naming a value outright, and the list
-    // it filters re-ranks under every keystroke while running a frame behind the
-    // text - so previewing whatever the highlight lands on mid-word would strobe the
-    // grid through two or three widths per keypress. It shows what it was raised on
-    // until Enter says otherwise.
+    // Preview on arrow keys only: while typing, the list re-ranks every key and
+    // lags a frame, so previews would strobe. Show the original until Enter.
     if (omni_query(omni).length)
     {
         ui_setting_rewind();
@@ -4508,7 +3971,7 @@ void ui_setting_preview(OmniMode mode)
 
     int id = omni_current(omni);
     if (id < 0)
-        return; // no row under the highlight: leave the last one showing
+        return; // no row: keep the last preview
 
     if (promptKind == PromptKind.columns)
         cast(void) ui_columns_set(id);
@@ -4516,43 +3979,41 @@ void ui_setting_preview(OmniMode mode)
         ui_charset_set(charsets[id]);
 }
 
-/// Put both settings back to what the box was raised on, the browse still in hand.
+/// Revert both settings to their opening values, keeping the browse.
 void ui_setting_rewind()
 {
     if (settingPreview.active == false)
         return;
 
-    // Through the captured view and document rather than the globals: the box holds
-    // the keyboard while it is up, so these are still the ones it was raised on.
+    // Use the captured view/document; still valid since the box has the keyboard.
     settingPreview.view.hex.columns = settingPreview.columns;
     settingPreview.view.hex.autoColumns = settingPreview.autoColumns;
     settingPreview.doc.charset = settingPreview.charset;
 }
 
-/// Ditto, and the browse is over.
+/// Ditto, ending the browse.
 void ui_setting_restore()
 {
     ui_setting_rewind();
     settingPreview = SettingPreview.init;
 }
 
-/// Ditto, keeping where the browse got to: the row was taken.
+/// Ditto, keeping the browse result (row taken).
 void ui_setting_drop()
 {
     settingPreview = SettingPreview.init;
 }
 
-/// Take the answer the columns prompt came back with, `id` being the row's width.
+/// Apply the columns prompt answer; `id` is the width.
 void ui_columns_commit(int id)
 {
-    if (id < 0) // the "not a column count" row; the box said so while it was up
+    if (id < 0) // the invalid-input row
         return;
     if (ui_columns_set(id) == false)
         ui_status("columns: %d is past the %d the grid draws", id, HEX_COLUMNS_MAX);
 }
 
-/// The naming prompt's one row: which run is being named, and what the text in the
-/// box would do to it.
+/// Naming prompt row: the run being named and the effect of the typed text.
 void ui_mark_name_preview(out string label, out string detail)
 {
     Document* d = markPrompt.doc;
@@ -4575,8 +4036,7 @@ void ui_mark_name_preview(out string label, out string detail)
         detail = ui_row_text(sformat(buf, `set to "%s"`, ui_clip(cast(string) typed, 48)));
 }
 
-/// Take the answer the prompt came back with. An empty one takes the name off
-/// again, which is the only way back to a plain bookmark short of clearing it.
+/// Apply the name. Empty removes the name.
 void ui_mark_name_commit(const(char)[] typed)
 {
     Document* d = markPrompt.doc;
@@ -4595,9 +4055,7 @@ void ui_mark_name_commit(const(char)[] typed)
         ui_status("bookmark at %#x unnamed", markPrompt.at);
 }
 
-/// A name as it goes into the list: the blanks either side dropped, and the tabs
-/// and newlines with them, since a name is one line of one column wherever it is
-/// shown or written out.
+/// Name cleanup: trim, and drop tabs and newlines (names are single-line).
 string ui_mark_name_clean(const(char)[] typed)
 {
     const(char)[] text = strip(typed);
@@ -4610,8 +4068,7 @@ string ui_mark_name_clean(const(char)[] typed)
     return cast(string) name;
 }
 
-/// Jump to the bookmark either side of the selection, wrapping at the ends, and
-/// select the whole of what was marked there.
+/// Jump to the next/previous bookmark (wrapping) and select it.
 public void ui_mark_step(int dir)
 {
     if (ui_on_settings())
@@ -4625,7 +4082,7 @@ public void ui_mark_step(int dir)
     ui_mark_select(focusedView, index);
 }
 
-/// Drop every bookmark on the focused document.
+/// Clear all bookmarks on the focused document.
 public void ui_mark_clear()
 {
     if (ui_on_settings())
@@ -4634,15 +4091,14 @@ public void ui_mark_clear()
     focusedDoc.marks = null;
 }
 
-/// Put `v`'s selection over the bookmark at `index` in its document's list.
+/// Select bookmark `index` in `v`.
 void ui_mark_select(ref View v, ptrdiff_t index)
 {
     ui_select_range(v, cast(size_t) v.doc.marks[index].at,
         cast(size_t) v.doc.marks[index].length);
 }
 
-/// Run one command from the '>' list. Everything here is an entry point the
-/// menubar already calls, so a command and its menu item cannot drift apart.
+/// Run a '>' command. All are menu entry points, so they can't diverge.
 void ui_omni_run(int id)
 {
     switch (id) {
@@ -4679,8 +4135,7 @@ void ui_omni_run(int id)
     case CMD_PANE_NEXT:  ui_cycle_pane(1);     break;
     case CMD_PANE_PREV:  ui_cycle_pane(-1);    break;
     case CMD_MARK_CLEAR: ui_mark_clear();      break;
-    // Back into the box on another prefix, which reopens next frame and grabs the
-    // keyboard, so the panel must not be handed focus on the way out.
+    // Reopens the box in another mode next frame; don't give the panel focus.
     case CMD_GOTO:      ui_omni_open(OMNI_ADDRESS);  return;
     case CMD_FIND:      ui_omni_open(OMNI_FIND);     return;
     case CMD_INSPECT:   ui_omni_open(OMNI_INSPECT);  return;
@@ -4694,8 +4149,7 @@ void ui_omni_run(int id)
     case CMD_SETTINGS:  ui_settings_open();    break;
     case CMD_ABOUT:     about_open();          break;
     case CMD_QUIT:
-        // Through SDL's own queue, so it meets the same unsaved-changes check as
-        // every other quit route.
+        // Via SDL's queue, for the unsaved-changes check.
         SDL_Event quit; // .init zeroes the union
         quit.type = SDL_EVENT_QUIT;
         SDL_PushEvent(&quit);
@@ -4703,30 +4157,27 @@ void ui_omni_run(int id)
     default:
         return;
     }
-    focusedView.hex.takeFocus = true; // whatever it was, the bytes take keys again after
+    focusedView.hex.takeFocus = true; // back to the bytes
 }
 
-/// True while something on screen moves on its own and the loop has to keep
-/// drawing rather than sleeping until the next event.
+/// Whether something animates and the loop must keep drawing.
 public bool ui_animating()
 {
     return elite_animating() || ui_tip_pending() || hex_edge_scrolling();
 }
 
-/// Build one frame of UI. Call between mu_begin and mu_end.
+/// Build one UI frame, between mu_begin and mu_end.
 public void ui_frame(mu_Context* ctx, int width, int height)
 {
     winW = width;
     winH = height;
 
-    // The menubar sits flush against the window's top and side edges. The body's
-    // inset is fixed when mu_begin_window_ex pushes it, so the padding is zeroed
-    // across that call and restored for the content below.
+    // Menubar flush with the window edges: zero padding across
+    // mu_begin_window_ex (it fixes the body inset), restore after.
     int padding = ctx.style.padding;
     ctx.style.padding = 0;
 
-    // ddui clamps only the vertical offset, so a sideways wheel over the window
-    // would slide its content off for good.
+    // ddui only clamps vertical scroll; pin x.
     mu_get_container(ctx, "vddhx").scroll.x = 0;
 
     int opened = mu_begin_window_ex(ctx, "vddhx",
@@ -4737,21 +4188,20 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 
     if (opened)
     {
-        // Keep the window glued to the full client area on resize.
+        // Fill the client area.
         mu_Container* win = mu_get_current_container(ctx);
         win.rect = mu_Rect(0, 0, width, height);
 
-        // Rows in this window abut: ddui's gap between rows is painted in the
-        // window's own colour, which stripes the chrome and the grid with pale
-        // seams. Restored on the way out, so the About dialog keeps stock spacing.
+        // No row gaps: ddui paints them in the window colour, striping the chrome.
+        // Restored after so the About dialog keeps default spacing.
         int spacing = ctx.style.spacing;
         ctx.style.spacing = 0;
         scope(exit) ctx.style.spacing = spacing;
 
-        // Ahead of the panes, so a walk that just answered draws its answer.
+        // Before the panes so job results show this frame.
         worker_pump();
 
-        // Pick up a file the async Open dialog chose since the last frame.
+        // File chosen in the Open dialog.
         if (atomicLoad(pendingReady))
         {
             atomicStore(pendingReady, false);
@@ -4769,19 +4219,16 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         if (elevate_poll(answer))
             ui_elevated(answer);
 
-        // Likewise a Save As destination, adopted as the document's home so later
-        // saves land in place without asking again.
+        // Save As destination.
         if (atomicLoad(pendingSaveReady))
         {
             atomicStore(pendingSaveReady, false);
             ui_save_pending(pendingSavePath.ptr.fromStringz.idup);
         }
 
-        // The omnibar and a dropdown are both one-at-a-time overlays, and neither
-        // can usefully sit over the other: ddui fronts an open menu every frame
-        // (mu_begin_menu), so a menu left up covers the box for as long as both are
-        // open. Whichever was raised last gets the window, checked either side of
-        // the bar because this frame's click is what opens a menu.
+        // Omnibar and menus are exclusive overlays (ddui raises open menus every
+        // frame). The most recently opened wins; checked on both sides of the bar
+        // since this frame's click opens menus.
         if (omni_shown(omni) && omniWasShown == false)
             ctx.menu_stack_len = 0;
 
@@ -4791,26 +4238,15 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             ui_omni_close();
         omniWasShown = omni_shown(omni);
 
-        // The panes take the rest of the window, save a strip at the bottom for the
-        // status bar.
+        // Panes fill the window above the status bar.
         int statusH = ctx.text_height(ctx.style.font) + 6;
         ui_panes(ctx, statusH);
 
-        // What is under the caret and what typing into it would do, in the strip
-        // ui_panes kept free above. Only what nothing else on screen says: which
-        // document and whether it is dirty are the window title and the tab, which
-        // pane is the number on its strip, which tab is the strip itself, and what
-        // the caret is standing in is the breadcrumb in its own panel's header.
-        // Anything tempted in here belongs on whichever of those owns it. A comparison
-        // up and a bookmark under the caret this line used to run off the window,
-        // which is the one state where a status bar has to stay readable.
+        // Status bar: only what isn't shown elsewhere (document and dirty state: title
+        // and tab; pane: strip number; tab: strip; structure: breadcrumbs). Keep it
+        // short so it stays readable in narrow windows.
         //
-        // The offset, the entry mode and the byte order come first because they are
-        // there in every frame and a fixed width: leading with them keeps all three
-        // at a column the eye can go straight to, whatever the two variable fields
-        // behind them are doing. The order sits by the entry mode, both of them
-        // being how the bytes under the caret are read and written rather than
-        // where they are.
+        // Fixed-width fields first (offset, entry mode, byte order) so they stay put.
         static immutable int[1] srow = [ -1 ];
         mu_layout_row(ctx, 1, srow.ptr, statusH);
         mu_Rect sr = mu_layout_next(ctx);
@@ -4824,20 +4260,17 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             mu_draw_text(ctx, ctx.style.font, cast(string) statusText[0 .. statusLen],
                 mu_Vec2(sr.x + 4, ty), mu_Color(200, 200, 150, 255));
         }
-        else if (ui_on_settings() == false) // no caret to report on
+        else if (ui_on_settings() == false) // no caret
         {
             size_t selLen = hex_total(focusedView.hex) ?
                 hex_sel_high(focusedView.hex) - hex_sel_low(focusedView.hex) + 1 : 0;
-            // The name of the run the caret is in: the wash says a byte is marked,
-            // and this is the only place that says what it was marked as.
+            // Bookmark name at the caret; shown only here.
             ptrdiff_t mark = bookmark_find(focusedDoc.marks, cast(long) focusedView.hex.cursor);
             char[64] markbuf = void;
             const(char)[] marked = mark >= 0 && focusedDoc.marks[mark].name.length ?
                 sformat(markbuf, "  [%s]", ui_clip(focusedDoc.marks[mark].name, 40)) : "";
 
-            // A bare caret selects the byte under it, so a cell that counted one
-            // was in nearly every frame saying nothing; above one it is the only
-            // place the length shows.
+            // Selection length, only when more than one byte.
             char[32] selbuf = void;
             const(char)[] selected = selLen > 1 ?
                 sformat(selbuf, "  (%u selected)", selLen) : "";
@@ -4850,22 +4283,20 @@ public void ui_frame(mu_Context* ctx, int width, int height)
                 mu_Vec2(sr.x + 4, ty), mu_Color(170, 170, 185, 255));
         }
 
-        // Last, so the title agrees with the status bar above rather than trailing
-        // an edit by a frame.
+        // Last, so the title matches this frame's edits.
         ui_window_title();
 
         mu_end_window(ctx);
     }
 
-    // Help > About, as its own root container so it floats over the main window.
+    // Floats over the main window.
     about_frame(ctx, width, height);
 
-    // What the About dialog is hiding, over the top of it.
+    // Easter egg, over About.
     elite_frame(ctx, width, height);
 
-    // The omnibar goes last, over everything. The mode is read before the box runs,
-    // so accepting acts on the list that was actually shown rather than on one a
-    // prefix typed this same frame would have swapped in.
+    // Omnibar last, on top. Mode read before the box runs so accept acts on the
+    // list that was shown.
     OmniMode mode = omni_mode(omni);
     int chosen;
     const(OmniItem)[] rows = ui_omni_active() ? ui_omni_items() : null;
@@ -4873,13 +4304,11 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     {
     case OmniAction.none:     ui_struct_preview(mode);
                               ui_setting_preview(mode);           break;
-    // Tab fills the box in rather than taking anything, so the box is still up and
-    // the '#' preview carries on as it does on a quiet frame.
+    // Complete keeps the box open; the '#' preview continues.
     case OmniAction.complete: cast(void) ui_omni_complete(mode, chosen);
                               ui_struct_preview(mode);
                               ui_setting_preview(mode);           break;
-    // A row taken is the preview made permanent: the caret is already on it, and
-    // ui_omni_accept puts it there again for the routes that never previewed.
+    // Accept commits the preview; ui_omni_accept handles non-preview routes.
     case OmniAction.accept:   ui_preview_drop(); ui_setting_drop();
                               ui_omni_accept(mode, chosen);       break;
     case OmniAction.transfer: ui_preview_drop(); ui_setting_drop();
@@ -4889,11 +4318,8 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     }
 }
 
-/// What a tab strip asked for this frame, held until every pane has been drawn.
-///
-/// A close can take a whole pane out of the grid, leaving the loops below walking
-/// arrays that moved under them. So the strips only report, and the one action a
-/// frame can carry is applied once the loops are done - still this frame.
+/// Tab strip action, applied after all panes draw: a close can remove a pane
+/// mid-loop.
 struct TabRequest
 {
     Pane* pane;
@@ -4902,30 +4328,23 @@ struct TabRequest
     int target;
 }
 
-/// A tab dragged clean out of its strip, belonging to no pane while it is in the
-/// air: where it came from, which item of that strip it is, and where the pointer
-/// has it. Drawn once every pane is down, so it passes over them all rather than
-/// being clipped to the lane it left.
+/// Tab dragged out of its strip: source pane, item, pointer rect. Drawn after
+/// all panes, unclipped.
 struct TabGhost
 {
-    Pane* pane; // null while nothing is in the air
+    Pane* pane; // null when no drag
     int index;
     mu_Rect rect;
 }
 
-/// Lay the grid out across the window and draw every pane in it.
-///
-/// A row of columns, splitters between them, sharing the width by weight; each
-/// column then shares its height out over the panes stacked in it the same way.
-/// The grid takes the whole window below the toolbar bar `statusH` pixels at the
-/// bottom, which the status bar then lands in.
+/// Lay out and draw the grid: columns by weight with splitters, then panes per
+/// column. Fills the window except `statusH` at the bottom.
 void ui_panes(mu_Context* ctx, int statusH)
 {
     size_t n = columns.length;
 
-    // One full-width row for the lot, then every column and splitter placed inside
-    // it by hand: ddui hands an absolute rect back without advancing its own
-    // layout, which is what lets a column be pinned to a computed rect.
+    // One full row, then columns placed manually: ddui returns absolute rects
+    // without advancing layout.
     static immutable int[1] full = [ -1 ];
     mu_layout_row(ctx, 1, full.ptr, -(statusH + ctx.style.spacing + 1));
     mu_Rect grid = mu_layout_next(ctx);
@@ -4948,22 +4367,15 @@ void ui_panes(mu_Context* ctx, int statusH)
         mu_Rect r = mu_Rect(x, grid.y, colSizes[i], grid.h);
         x += r.w;
 
-        // Everything a column draws is scoped under its own identity, and every
-        // pane under the pane's, so the widgets inside can use plain constant names
-        // and still come out unique - ddui seeds every id it hashes with the top of
-        // the id stack, containers included. That is what keeps two panes from
-        // sharing a scroll offset, and the two splitter axes from sharing a grab.
-        //
-        // What is hashed is the pointer's value, the bytes at `&c`, not the array
-        // slot it was read from, which moves whenever the grid grows.
+        // Scope ids per column and pane so inner widgets can use constant names
+        // (separate scroll and splitter state). Hashes the pointer value, not the
+        // array slot, which moves.
         mu_push_id(ctx, &c, (Column*).sizeof);
         scope(exit) mu_pop_id(ctx);
 
         ui_column(ctx, c, r, req, ghost);
 
-        // A splitter between each pair, dragged to trade width across it. The
-        // weights are written back through the scratch the layout was built from,
-        // so the columns redraw at the new sizes on the next frame.
+        // Splitters; new weights apply next frame.
         if (i + 1 < n)
         {
             mu_Rect sr = mu_Rect(x, grid.y, SPLIT_WIDTH, grid.h);
@@ -4975,33 +4387,22 @@ void ui_panes(mu_Context* ctx, int statusH)
         }
     }
 
-    // Which pane the keyboard is in, outlined once every pane is down, for the same
-    // reason the drop marker below is drawn there. Only with a choice of panes: an
-    // outline around the only one says nothing, and the tab strip's accent already
-    // covers a window that has never been split.
+    // Focus outline after all panes (painted on top). Only with several panes.
     if (ui_pane_count() > 1 && ui_pane_index(focused) >= 0)
         ui_outline(ctx, focused.rect, FOCUS_EDGE, FOCUS_EDGE_W);
 
-    // A file held over the window picks out the pane it would land in. After the
-    // loop so it washes over the panel rather than under it: a hex panel is a ddui
-    // panel, not a root container, so anything added later paints on top.
-    //
-    // The pane is looked up rather than trusted: a drag can be in flight while the
-    // window carries on working, and its pane may have closed since.
+    // Drop target highlight, after the loop so it paints over the panel. Validate
+    // the pane: it may have closed during the drag.
     if (dropPane && ui_pane_index(dropPane) >= 0)
         ui_mark_pane(ctx, dropPane.rect);
 
-    // A tab in the air between panes: the pane it would land in first, then the tab
-    // over the top of everything - here rather than in the strip it came from,
-    // which clips to its own lane.
+    // Tab drag: target highlight, then the tab on top, unclipped.
     if (ghost.pane)
     {
         Pane* src = ghost.pane;
         SplitZone zone;
         Pane* onto = ui_drop_target(ctx, zone);
-        // Back over its own pane is the drag being called off, so nothing is marked
-        // - unless it is against an edge, which splits the tab out and is a real
-        // destination.
+        // Back over its own pane cancels, unless on an edge with other tabs (split).
         if (onto && (onto !is src ||
                     (zone != SplitZone.centre && src.views.length > 1)))
             ui_mark_pane(ctx, ui_drop_rect(onto, zone));
@@ -5009,32 +4410,27 @@ void ui_panes(mu_Context* ctx, int statusH)
             tab_ghost(ctx, src.tabs, src.items[ghost.index], ghost.rect);
     }
 
-    // Every strip has had its say, so a hover nobody reported is the pointer having
-    // left the tabs altogether.
+    // No strip reported a hover: clear.
     if (tip.seen == false)
         tip = TabTip.init;
     tip.seen = false;
     ui_tip(ctx);
 
-    // Ditto for the byte under the pointer, except that the panels record it rather
-    // than report it, so this reads them instead of clearing a flag.
+    // Byte hover is read from the panels, not reported.
     ui_span_tip(ctx);
 
-    // Every pane has drawn, so where each is scrolled to is settled: carry that
-    // across the comparisons before anything can rearrange the grid.
+    // Sync diff scroll now that panes have drawn, before the grid changes.
     ui_sync_diffs();
 
-    // The loops are done with the grid, so a strip's request is safe to carry out
-    // even where it drops the pane that asked.
+    // Apply the strip request now that loops are done.
     switch (req.action)
     {
     case TabAction.select: ui_select_tab_in(req.pane, req.index); break;
     case TabAction.close:  ui_close_tab_in(req.pane, req.index);  break;
     case TabAction.add:    focused = req.pane; ui_new_tab();      break;
     case TabAction.move:   ui_move_tab(req.pane, req.index, req.target); break;
-    // Let go outside its own strip, it goes to whichever pane the pointer is over,
-    // into it or into a new pane splitting it. Released over nothing - a splitter,
-    // the status bar - it stays put, which is the way out of an accidental drag.
+    // Released outside its strip: join or split the pane under the pointer.
+    // Over nothing (splitter, status bar): cancelled.
     case TabAction.detach:
         SplitZone zone;
         Pane* onto = ui_drop_target(ctx, zone);
@@ -5044,20 +4440,12 @@ void ui_panes(mu_Context* ctx, int statusH)
     }
 }
 
-/// Put both halves of every comparison back on the same offset.
+/// Keep both sides of each diff at the same offset. The leader is whichever
+/// moved since last draw (compared to topSeen; scrolling has no hook).
 ///
-/// Two files are compared by reading across the window, so the panes have to hold
-/// the same offset on the same line. Which one leads is whichever the user just
-/// moved, told from the offset each was left at when it last drew: everything that
-/// scrolls a panel goes through its own topRow, so there is nothing to hook into
-/// but the result.
-///
-/// Only front tabs are read, a background view not having drawn and so not having
-/// moved. It is still written to, so a comparison whose other half is behind a tab
-/// is lined up already when that tab comes forward.
-///
-/// Called once every pane has drawn. Both sides moving in one frame is not
-/// something a user can do, so the first found leading is enough.
+/// Only front tabs are read (background views didn't move), but background
+/// peers are written so they're aligned when shown. Called after all panes
+/// draw. Only one side can move per frame.
 void ui_sync_diffs()
 {
     foreach (Column* c; columns)
@@ -5073,12 +4461,10 @@ void ui_sync_diffs()
             v.topForced = false;
 
             if (top == v.topSeen)
-                continue; // this side stayed put; it is not the one leading
+                continue; // didn't move
 
-            // It went where it was put, but not as far: a panel stops at its own
-            // last screenful, so the shorter file sits there while the longer one
-            // goes on. That is the end of the file rather than this side taking the
-            // lead, which would have it hauling the longer pane back up every frame.
+            // Clamped at its end (shorter file): not a lead, else it would drag the
+            // longer pane back every frame.
             if (forced && top < v.topSeen)
             {
                 v.topSeen = top;
@@ -5094,11 +4480,7 @@ void ui_sync_diffs()
     }
 }
 
-/// Lay one column's panes out down `r` and draw each one.
-///
-/// The same arithmetic as the row of columns above, one axis over: the height is
-/// shared by weight, a splitter sits between each pair, and dragging one trades
-/// height across that boundary alone.
+/// Lay out and draw a column's panes; same as ui_panes on the other axis.
 void ui_column(mu_Context* ctx, Column* c, mu_Rect r, ref TabRequest req,
     ref TabGhost ghost)
 {
@@ -5113,23 +4495,21 @@ void ui_column(mu_Context* ctx, Column* c, mu_Rect r, ref TabRequest req,
         paneWeights[i] = p.weight;
     split_layout(paneWeights[0 .. n], avail, paneSizes[0 .. n]);
 
-    c.rect = r; // for the drop preview; see Column.rect
+    c.rect = r; // see Column.rect
 
     int y = r.y;
     foreach (size_t i, Pane* p; c.panes)
     {
         mu_Rect pr = mu_Rect(r.x, y, r.w, paneSizes[i]);
         y += pr.h;
-        p.rect = pr; // for the out-of-frame hit test; see Pane.rect
+        p.rect = pr; // see Pane.rect
 
-        // Clicking anywhere in a pane moves the keyboard to it, so the menus, the
-        // omnibar and every chord act on the pane last worked in. The panel inside
-        // takes ddui's own focus from the same press; this is the application's
-        // notion of where the user is, alongside it.
+        // Clicking a pane focuses it for menus, omnibar and chords (alongside ddui's
+        // own focus).
         if (ctx.mouse_pressed == MU_MOUSE_LEFT && mu_mouse_over(ctx, pr))
             focused = p;
 
-        mu_push_id(ctx, &p, (Pane*).sizeof); // see ui_panes for why the pointer
+        mu_push_id(ctx, &p, (Pane*).sizeof); // see ui_panes
         scope(exit) mu_pop_id(ctx);
 
         mu_layout_set_next(ctx, pr, 0);
@@ -5154,21 +4534,15 @@ void ui_column(mu_Context* ctx, Column* c, mu_Rect r, ref TabRequest req,
     }
 }
 
-/// Pick a pane out as somewhere a drag would land: a wash over it and an edge
-/// around it. Shared by the two things that can be dropped into one, a file from
-/// outside the window and a tab from another pane.
+/// Drop target highlight (wash and edge), for file and tab drops.
 void ui_mark_pane(mu_Context* ctx, mu_Rect r)
 {
     mu_draw_rect(ctx, r, DROP_WASH);
     ui_outline(ctx, r, DROP_EDGE, DROP_EDGE_W);
 }
 
-/// Whether a hover is counting towards its tooltip but has not got there yet.
-///
-/// Public because the loop sleeps: the pointer has stopped moving, so nothing is
-/// going to arrive to wake it when the wait is up, and the frame the tip is due on
-/// would never be drawn. It stops holding the moment the tip is up, so this costs
-/// TIP_DELAY of frames per hover and nothing while one is on screen.
+/// Whether a tooltip delay is pending. Public since the loop sleeps when idle
+/// and nothing would wake it when the delay ends.
 public bool ui_tip_pending()
 {
     MonoTime now = MonoTime.currTime;
@@ -5177,16 +4551,13 @@ public bool ui_tip_pending()
     return spanTip.view !is null && now - spanTip.since < TIP_DELAY;
 }
 
-/// The tab tooltip: the full path of the document under the pointer, once it has
-/// rested there long enough.
-///
-/// Drawn from ui_panes once every pane is down, so it passes over the panels rather
-/// than being clipped to the strip it belongs to.
+/// Tab tooltip: full path after the hover delay. Drawn from ui_panes after all
+/// panes, unclipped.
 void ui_tip(mu_Context* ctx)
 {
     if (tip.pane is null || ui_tip_pending())
         return;
-    // The grid can have moved under a hover reported earlier in the same frame.
+    // The grid may have changed since the hover was reported.
     if (ui_pane_index(tip.pane) < 0 || tip.index >= tip.pane.views.length)
         return;
 
@@ -5195,7 +4566,7 @@ void ui_tip(mu_Context* ctx)
 
     mu_Font font = ctx.style.font;
     int th = ctx.text_height(font);
-    // Never wider than the window, however deep the path is nested.
+    // Elide to the window width.
     char[512] scratch = void;
     string text = ui_elide(ctx, full, winW - TIP_PAD * 2 - TIP_MARGIN * 2, scratch);
     if (text.length == 0)
@@ -5205,9 +4576,7 @@ void ui_tip(mu_Context* ctx)
     mu_Rect r = mu_Rect(tip.rect.x, tip.rect.y + tip.rect.h + TIP_DROP,
         tw + TIP_PAD * 2, th + TIP_PAD * 2);
 
-    // Held inside the window rather than pinned to the tab: a tab at the right edge
-    // would otherwise hang its path off the side, and the strip of a pane stacked at
-    // the bottom has no room under it.
+    // Clamp inside the window (right-edge tabs, bottom panes).
     r.x = mu_clamp(r.x, TIP_MARGIN, mu_max(TIP_MARGIN, winW - TIP_MARGIN - r.w));
     if (r.y + r.h > winH - TIP_MARGIN)
         r.y = tip.rect.y - TIP_DROP - r.h;
@@ -5217,21 +4586,12 @@ void ui_tip(mu_Context* ctx)
     mu_draw_text(ctx, font, text, mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD), TIP_TEXT);
 }
 
-/// The field tooltip: what the structure calls the byte under the pointer, once it has
-/// rested on it long enough.
-///
-/// Found by asking the panels which of them has the pointer (see SpanTip), and only
-/// worth putting up where there is a structure to name anything: on a document with none
-/// this is a hover that never resolves, which is the same as no hover at all.
-///
-/// Moving to another byte restarts the wait rather than following the pointer live: a
-/// label that redraws under a moving pointer is a distraction, and the one the user
-/// wants is the one they stopped on.
+/// Field tooltip: structure name of the byte under the pointer after the hover
+/// delay. Found via the panels (see SpanTip); only with a structure. Moving to
+/// another byte restarts the delay instead of following live.
 void ui_span_tip(mu_Context* ctx)
 {
-    // Only the view each pane is showing: a view behind a tab keeps whatever byte was
-    // under the pointer when it was last in front, having drawn no frame since to say
-    // otherwise, and would go on claiming the pointer from behind the tab it is under.
+    // Front views only: background views keep a stale hoverByte.
     View* over;
     foreach (Column* c; columns)
         foreach (Pane* p; c.panes)
@@ -5269,7 +4629,7 @@ void ui_span_tip(mu_Context* ctx)
     int th = ctx.text_height(font);
     int tw = ctx.text_width(font, path.ptr, cast(int) path.length);
 
-    // Below and right of the pointer, where a cursor arrow is not sitting on it.
+    // Below-right of the pointer, clear of the cursor.
     mu_Rect r = mu_Rect(ctx.mouse_pos.x + TIP_DROP, ctx.mouse_pos.y + th,
         tw + TIP_PAD * 2, th + TIP_PAD * 2);
     r.x = mu_clamp(r.x, TIP_MARGIN, mu_max(TIP_MARGIN, winW - TIP_MARGIN - r.w));
@@ -5282,7 +4642,7 @@ void ui_span_tip(mu_Context* ctx)
         mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD), TIP_TEXT);
 }
 
-/// A rectangle's four edges, `w` pixels thick, drawn inside it.
+/// Rect outline, `w` px, drawn inside.
 void ui_outline(mu_Context* ctx, mu_Rect r, mu_Color c, int w)
 {
     mu_draw_rect(ctx, mu_Rect(r.x, r.y, r.w, w), c);
@@ -5291,14 +4651,9 @@ void ui_outline(mu_Context* ctx, mu_Rect r, mu_Color c, int w)
     mu_draw_rect(ctx, mu_Rect(r.x + r.w - w, r.y, w, r.h), c);
 }
 
-/// Draw one pane: its tab strip, then the hex panel filling what is left of the
-/// column it was given.
-///
-/// One tab per view, named after the document it shows and carrying that document's
-/// unsaved-changes dot, so two views of one file are two tabs named the same. The
-/// item slice is rebuilt every frame, titles and dirty flags both moving under us.
-/// What the strip reports goes into `req` rather than happening here; see
-/// TabRequest.
+/// Draw a pane: tab strip, then the hex panel. One tab per view (two views of a
+/// file are two same-named tabs); items rebuilt per frame. Strip actions go to
+/// `req`; see TabRequest.
 void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
 {
     if (p.items.length < p.views.length)
@@ -5306,15 +4661,12 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     foreach (size_t i, View* v; p.views)
         p.items[i] = TabItem(v.doc.title, v.doc.editor && v.doc.editor.edited(),
             cast(int) ui_view_count(v.doc), ui_job_progress(v),
-            v.doc.restricted && v.doc.settingsPage == false); // nothing there to unlock
+            v.doc.restricted && v.doc.settingsPage == false); // nothing to unlock
 
-    // Only the pane taking keys lights its accent, so with several panes open it
-    // is never a guess which one a keystroke lands in.
+    // Only the focused pane lights its accent.
     p.tabs.unfocused = p !is focused;
 
-    // The number the jump keys count in, on the strip that answers to it. Only worth
-    // the room once there is a choice: a lone pane is nothing to pick out, and its
-    // strip is better off spending the pixels on tabs.
+    // Pane number for Ctrl+1..9, only with several panes.
     p.tabs.badge = ui_pane_count() > 1 ? ui_ordinal(ui_pane_index(p) + 1) : null;
 
     int at, target;
@@ -5327,8 +4679,7 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     mu_Rect hoverRect;
     if (tab_hover(p.tabs, hoverAt, hoverRect))
     {
-        // Moving to another tab restarts the wait; resting on the same one goes on
-        // counting, so sliding along a strip does not flash a path per tab.
+        // New tab restarts the delay; the same tab keeps counting.
         if (tip.pane !is p || tip.index != hoverAt)
         {
             tip.pane  = p;
@@ -5348,43 +4699,29 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
 
     v.hex.minimap = prefs.minimap;
 
-    // The set is the document's, the panel only draws through it, so the binding is
-    // remade each frame rather than being carried in the view: a tab dragged into
-    // another pane takes its document's set with it either way.
+    // Charset is per document; rebind each frame so moved tabs follow.
     v.hex.textFn    = &ui_charset_text;
     v.hex.textUser  = cast(void*) v.doc;
     v.hex.textLabel = v.doc.charset.id;
 
-    // Every view of a document being walked reads on; only the one waiting on the
-    // walk stops taking input, since the answer is about to move its caret.
+    // Other views of a busy document stay readable; only the waiting view is
+    // locked (its caret is about to move).
     v.hex.readOnly = ui_busy(v.doc) || v.doc.restricted;
     v.hex.locked   = ui_locked(v);
     if (ui_fixed(v.doc))
-        v.hex.insertMode = false; // the extent cannot grow or shrink
+        v.hex.insertMode = false; // fixed size
 
-    // Under the tab and over the grid, where VS Code puts it: the trail belongs to
-    // the view, so it goes inside the pane rather than on any window-wide bar, and
-    // it reads as a caption to the bytes under it. Drawn on every document, parsed
-    // or not - the classifier always has a word for the byte under the caret, and a
-    // strip that came and went with the format would move the grid under the user.
+    // Breadcrumbs under the tabs, above the grid (like VS Code). Always shown,
+    // even unparsed, so the grid doesn't shift.
     if (prefs.crumbs)
         crumb_bar(ctx, cast(string) viewCrumbs(v), CANVAS);
 
-    // The panel keeps its copy of the size live within a frame; this keeps it
-    // authoritative across them, and across panes, where an edit made in one is a
-    // size change the other has yet to hear about.
+    // The editor's size is authoritative across frames and panes.
     if (v.doc.editor)
         v.hex.dataSize = v.doc.editor.size();
 
-    // The same for the document this one is being compared against, which is a
-    // whole document the panel knows nothing about: its size for the colours to
-    // tell a changed byte from one this side simply has more of, and its cached
-    // block dropped so the frame reads it afresh. Both are one call a frame, and
-    // between them they mean an edit in either pane shows up in the colours.
-    //
-    // Only the reporting side needs any of it: the other is drawn as an ordinary
-    // view and never asks what the bytes beside it are, so it never allocates a
-    // block or reads the other document at all.
+    // For the reporting side: peer size (changed vs added) and drop the peer
+    // block, so edits in either pane show. The other side never reads the peer.
     if (diff_reports(v))
     {
         IDocumentEditor peer = diff_peer(v).doc.editor;
@@ -5392,16 +4729,12 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
         v.peerLen  = 0;
     }
 
-    // The panel fills the rest of the column, so nothing is reserved below it:
-    // the status bar is the window's, not this pane's. The name is a constant
-    // because ui_panes has this pane's id pushed: see the scope it sets up there.
-    // Check return with `& MU_RES_CHANGE`
+    // Fills the column; the status bar is the window's. Constant name: ui_panes
+    // pushed the pane id. Returns MU_RES_CHANGE on selection change.
     cast(void) hex_view(ctx, "hex", v.hex, render_font_mono(), 0);
 }
 
-/// Reorder the tab strip: take the view at `from` and put it at `to`, shifting
-/// whatever it passes over the other way. The drag route, so the strip the
-/// pointer leaves behind is the order that sticks.
+/// Move tab `from` to `to`, shifting those in between (drag reorder).
 void ui_move_tab(Pane* p, size_t from, size_t to)
 {
     if (p is null || from >= p.views.length || to >= p.views.length || from == to)
@@ -5419,13 +4752,9 @@ void ui_move_tab(Pane* p, size_t from, size_t to)
     p.current = tab_reindex(p.current, from, to);
 }
 
-/// Hand the view at `index` in pane `src` over to pane `dst`, where it joins the
-/// end of the strip and comes to the front: the drag-between-panes route.
-///
-/// The view goes across whole - caret, scroll position, document - so what was on
-/// screen in the old pane appears in the new one. A pane emptied by the move is
-/// closed, and the destination takes the keyboard either way. A null `dst`, let go
-/// over a splitter or the status bar, is no move at all.
+/// Move view `index` from `src` to the end of `dst` and show it (drag between
+/// panes). Caret, scroll and document come along. An emptied `src` closes; `dst`
+/// takes focus. Null `dst` (splitter, status bar) does nothing.
 void ui_move_view(Pane* src, size_t index, Pane* dst)
 {
     if (src is null || dst is null || src is dst || index >= src.views.length)
@@ -5433,30 +4762,21 @@ void ui_move_view(Pane* src, size_t index, Pane* dst)
 
     View* v = ui_take_view(src, index);
 
-    dst.views ~= v; // .length updated
+    dst.views ~= v;
     dst.current = dst.views.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     v.hex.takeFocus = true;
 
-    // The pane it came from may have nothing left in it. Panes are named by
-    // pointer, so the destination is unaffected by the grid closing over it.
+    // Close an emptied source; panes are pointers, so `dst` is unaffected.
     if (src.views.length == 0 && ui_pane_count() > 1)
         ui_drop_pane(src);
 
     focused = dst;
 }
 
-/// Ditto, but the view lands in a pane of its own beside `dst` rather than in
-/// `dst` itself: the drag-to-split route, where a tab let go against a pane's
-/// edge divides that pane instead of joining it.
-///
-/// `zone` says which edge, and so where the new pane goes: above or below `dst` in
-/// its own column, or in a new column to one side. The sideways case reaches around
-/// the whole column, exactly as ui_split does, the grid being two levels deep -
-/// ui_drop_rect shows that before the user lets go.
-///
-/// A tab dropped on the edge of its own pane splits off from it, which is how one is
-/// pulled into a split without visiting another pane first; a pane's last tab has
-/// nothing to split away from and stays put.
+/// Ditto, into a new pane beside `dst` (drag to an edge). `zone` picks the
+/// side: above/below in the column, or a new column (around the whole column,
+/// like ui_split; previewed by ui_drop_rect). Works on its own pane; a pane's
+/// last tab can't split off.
 void ui_split_into(Pane* src, size_t index, Pane* dst, SplitZone zone)
 {
     if (src is null || dst is null || index >= src.views.length)
@@ -5469,8 +4789,7 @@ void ui_split_into(Pane* src, size_t index, Pane* dst, SplitZone zone)
     if (src is dst && src.views.length < 2)
         return;
 
-    // Settled before anything moves: a destination somehow not in the grid must
-    // leave the view where it is rather than in a pane nothing draws.
+    // Validate before moving anything.
     size_t ci, pi;
     if (ui_locate(dst, ci, pi) == false)
         return;
@@ -5481,8 +4800,7 @@ void ui_split_into(Pane* src, size_t index, Pane* dst, SplitZone zone)
 
     if (zone == SplitZone.up || zone == SplitZone.down)
     {
-        // Half of the pane being dropped on, so the column's total is unchanged
-        // and nothing outside it moves.
+        // Half of `dst`, so the column total is unchanged.
         Column* c = columns[ci];
         p.weight = dst.weight / 2;
         dst.weight -= p.weight;
@@ -5501,19 +4819,15 @@ void ui_split_into(Pane* src, size_t index, Pane* dst, SplitZone zone)
         columns = columns[0 .. at] ~ c ~ columns[at .. $];
     }
 
-    // After the insertion, whose indices were read from the grid as it stood.
+    // After insertion: indices were read before.
     if (src.views.length == 0 && ui_pane_count() > 1)
         ui_drop_pane(src);
 
     focused = p;
 }
 
-/// Take the view at `index` out of `p`, leaving the front tab on whatever is
-/// nearest what it was showing: a tab taken from the left of it shifts it down, and
-/// taking the front one keeps the index, which now names its right-hand neighbour.
-///
-/// The pane may be left with nothing in it, which is for the caller to deal with -
-/// it has somewhere to put the view and this does not.
+/// Remove view `index` from `p`, keeping the front tab nearest its old
+/// position. May leave `p` empty; the caller handles it.
 View* ui_take_view(Pane* p, size_t index)
 {
     View* v = p.views[index];
@@ -5525,9 +4839,7 @@ View* ui_take_view(Pane* p, size_t index)
     return v;
 }
 
-/// Where the tab at `at` ends up once the one at `from` is moved to `to`. The
-/// moved tab lands on `to` itself; everything between the two shifts one place
-/// the other way, and everything outside that span stays where it is.
+/// New index of tab `at` after moving `from` to `to`.
 size_t tab_reindex(size_t at, size_t from, size_t to)
 {
     if (at == from)
@@ -5539,19 +4851,19 @@ size_t tab_reindex(size_t at, size_t from, size_t to)
 
 unittest
 {
-    // [A B C D], A to the middle: B and C shuffle down, D is untouched.
-    assert(tab_reindex(0, 0, 2) == 2); // the moved tab itself
+    // [A B C D], A to 2: B and C shift down, D unchanged.
+    assert(tab_reindex(0, 0, 2) == 2); // moved tab
     assert(tab_reindex(1, 0, 2) == 0);
     assert(tab_reindex(2, 0, 2) == 1);
     assert(tab_reindex(3, 0, 2) == 3);
 
-    // [A B C D], D to index 1: B and C shuffle up, A is untouched.
+    // [A B C D], D to 1: B and C shift up, A unchanged.
     assert(tab_reindex(3, 3, 1) == 1);
     assert(tab_reindex(1, 3, 1) == 2);
     assert(tab_reindex(2, 3, 1) == 3);
     assert(tab_reindex(0, 3, 1) == 0);
 
-    // A one-step swap either way, which is what a slow drag actually emits.
+    // Single-step swaps (slow drags).
     assert(tab_reindex(0, 0, 1) == 1);
     assert(tab_reindex(1, 0, 1) == 0);
     assert(tab_reindex(2, 0, 1) == 2);
@@ -5560,29 +4872,23 @@ unittest
         assert(tab_reindex(i, 2, 2) == i);
 }
 
-/// Draw the top menubar, on ddui's native one: it packs the titles left to right
-/// and handles the dropdowns and outside-click dismissal itself.
+/// Menubar, using ddui's native menus.
 void ui_menubar(mu_Context* ctx)
 {
     mu_begin_menubar(ctx);
 
-    // ddui recomputes a dropdown item's height and text inset from style.padding per
-    // item, where the bar title width and the popup's body margin are baked in
-    // during mu_begin_menu. So bumping padding around the mu_menu_item calls alone
-    // loosens the rows and leaves the frame untouched.
+    // ddui computes item height and inset from style.padding per item, but bar
+    // width and popup margin at mu_begin_menu, so padding only around items
+    // loosens rows without changing the frame.
     int basePadding = ctx.style.padding;
     int itemPadding = basePadding + 4;
 
-    // A dropdown takes its width from style.menu_width alone, so a label and a
-    // right-aligned shortcut overlap once they outgrow the stock 160px (as
-    // "Save As..." and Ctrl+Shift+S do). Measured rather than pinned to a pixel
-    // count that a change of font would quietly break again, and measured over the
-    // command table rather than the items below: every item here is one of those,
-    // and one width covers every dropdown anyway.
+    // Dropdown width is style.menu_width only; the stock 160px overlaps labels and
+    // shortcuts ("Save As..." / Ctrl+Shift+S). Measured over the command table,
+    // since all items come from it.
     int itemWidth(const(char)* label, const(char)* shortcut)
     {
-        // One padding inset each side, plus two more as the gap between the label
-        // and the shortcut, so they never touch.
+        // Padding each side plus a two-padding gap.
         return ctx.text_width(ctx.style.font, label, -1) +
                ctx.text_width(ctx.style.font, shortcut, -1) + itemPadding * 4;
     }
@@ -5596,14 +4902,11 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "File"))
     {
         ctx.style.padding = itemPadding;
-        // The ellipsis marks the entries that put up a dialog before doing
-        // anything, the way every desktop toolkit marks them.
+        // Ellipsis: opens a dialog first.
         if (mu_menu_item_ex(ctx, "New Tab",    "Ctrl+T",       0, 0)) ui_new_tab();
         if (mu_menu_item_ex(ctx, "Open...",    "Ctrl+O",       0, 0)) ui_open_dialog();
         if (mu_menu_item_ex(ctx, OPEN_DEVICE_LABEL.ptr, "",    0, 0)) ui_open_device_prompt();
         mu_menu_separator(ctx);
-        // The pair reads as one thing, so the end of a comparison sits with its
-        // start rather than being hunted for in another menu.
         if (mu_menu_item_ex(ctx, "Compare With...", "",        0, 0)) ui_compare_dialog();
         if (mu_menu_item_ex(ctx, "Stop Comparing",  "",        0, 0)) ui_compare_stop();
         mu_menu_separator(ctx);
@@ -5611,7 +4914,7 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Save As...", "Ctrl+Shift+S", 0, 0)) ui_save_as();
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Close Tab",  "Ctrl+W",       0, 0)) ui_close_current_tab();
-        // Through SDL's own queue, so main stays the single owner of the loop flag.
+        // Via SDL's queue; main owns the loop flag.
         if (mu_menu_item_ex(ctx, "Quit", "Ctrl+Q", 0, 0))
         {
             SDL_Event quit; // .init zeroes the union
@@ -5641,9 +4944,7 @@ void ui_menubar(mu_Context* ctx)
         mu_end_menu(ctx);
     }
 
-    // The items that only raise the omnibar on one of its modes keep the ellipsis:
-    // what they put up is a box that then wants typing, as much a dialog as the
-    // native ones in File.
+    // Omnibar-opening items get the ellipsis too (they prompt for input).
     if (mu_begin_menu(ctx, "Search"))
     {
         ctx.style.padding = itemPadding;
@@ -5654,7 +4955,6 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Go to Offset...", "Ctrl+G",     0, 0)) ui_omni_open(OMNI_ADDRESS);
         if (mu_menu_item_ex(ctx, "Go to Field...",  "",           0, 0)) ui_omni_open(OMNI_STRUCTURE);
         mu_menu_separator(ctx);
-        // Not a search of the document, but the same walk over it by another name.
         if (mu_menu_item_ex(ctx, "Skip Forward",  "Ctrl+Right",   0, 0)) ui_skip_element(false);
         if (mu_menu_item_ex(ctx, "Skip Back",     "Ctrl+Left",    0, 0)) ui_skip_element(true);
         if (mu_menu_item_ex(ctx, "Select Run Forward", "Ctrl+Shift+Right", 0, 0)) ui_skip_element(false, true);
@@ -5681,22 +4981,16 @@ void ui_menubar(mu_Context* ctx)
     {
         ctx.style.padding = itemPadding;
         if (mu_menu_item_ex(ctx, "Inspect Bytes...", "Alt+I", 0, 0)) ui_omni_open(OMNI_INSPECT);
-        // Which order the document is read in rides in the same column as the
-        // on/off states below it, being the same kind of fact about this tab.
+        // Value in the shortcut column, like the toggles below.
         if (mu_menu_item_ex(ctx, "Byte Order", focusedDoc.endian == Endian.bigEndian ? "Big" : "Little", 0, 0))
             ui_endian_toggle();
-        // The two settings the grid itself shows: what a row holds, and what the
-        // text lane reads the bytes through. Both raise the box on a question -
-        // hence the ellipsis - rather than stepping, a width being a number to type
-        // and a set being one of six to pick. The value stays in the shortcut
-        // column, so the menu reads as the settings it is.
+        // Prompts (ellipsis), with the current value in the shortcut column.
         if (mu_menu_item_ex(ctx, "Columns...", ui_columns_label(), 0, 0))
             ui_columns_prompt();
         if (mu_menu_item_ex(ctx, "Character Set...", focusedDoc.charset.id.ptr, 0, 0))
             ui_charset_prompt();
         mu_menu_separator(ctx);
-        // No native checkmark on a ddui menu item, so the on/off state rides in the
-        // shortcut column instead.
+        // No checkmarks in ddui; state goes in the shortcut column.
         if (mu_menu_item_ex(ctx, "Minimap", prefs.minimap ? "On" : "Off", 0, 0))
             ui_toggle_minimap();
         if (mu_menu_item_ex(ctx, "Breadcrumbs", prefs.crumbs ? "On" : "Off", 0, 0))
@@ -5720,7 +5014,7 @@ void ui_menubar(mu_Context* ctx)
 
 version (Screenshots)
 {
-    /// What a key binding can move, read back by the key driver (keys.d).
+    /// State read back by the key driver (keys.d).
     public struct Probe
     {
         bool omni;

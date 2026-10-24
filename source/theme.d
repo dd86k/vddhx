@@ -1,13 +1,7 @@
-/// Colours by role, in one place.
+/// Colours by role, including byte classes. A theme file replaces these tables.
 ///
-/// Every colour the grid puts on a byte comes through here, the byte classes included:
-/// what the plain uncoloured view does is a mapping like any other rather than a
-/// hardcoded scheme sitting beside the structure overlay. A theme file, when there is
-/// one, replaces the tables below and nothing else.
-///
-/// Roles that cover a lot of bytes at once - data, text, padding - are deliberately the
-/// quiet ones, and the vivid colours are spent on the fields that appear once or twice
-/// in a record. A colour repeated over half the screen stops being information.
+/// High-coverage roles (data, text, padding) are muted on purpose; vivid
+/// colours go to rare fields. Keep it that way.
 /// Authors: dd86k <dd@dax.moe>
 module theme;
 
@@ -15,27 +9,22 @@ import ddui;
 
 import structure;
 
-/// Colour the glyphs of a byte covered by `role`. StructureRole.none has no colour of its
-/// own: it means nothing claimed the byte, which is the caller's cue to classify it.
+/// Glyph colour for `role`. StructureRole.none has no colour: the caller
+/// classifies the byte instead.
 ///
-/// `shade` is the alternating bit off the span (see StructureSpan.shade) and answers the
-/// same hue a step off, which is what tells IHDR's three scalars apart. A step rather
-/// than a colour of its own: a palette handed out per field runs dry on a format with
-/// more fields than colours, and says something where there is nothing to say.
+/// `shade` (see StructureSpan.shade) shifts luminance to separate adjacent
+/// fields. A shift, not a per-field palette, which would run out of colours.
 mu_Color theme_role(StructureRole role, bool shade = false)
 {
     mu_Color c = theme_base(role);
     return shade && c.a ? theme_shade(c) : c;
 }
 
-/// The same colour a step off in luminance, away from whichever end it sits nearer.
-///
-/// Dark roles brighten and bright ones darken, so neither twin walks into the panel
-/// background or washes out; a fixed direction would sink `zero` and `reserved`, which
-/// start close to the background already.
+/// Shift luminance toward the middle: dark brightens, bright darkens. A fixed
+/// direction would sink `zero` and `reserved` into the background.
 private mu_Color theme_shade(mu_Color c)
 {
-    enum STEP = 52; // ~20%, the least that reads as a different field at glyph size
+    enum STEP = 52; // ~20%, smallest visible difference at glyph size
 
     int lum = (c.r * 30 + c.g * 59 + c.b * 11) / 100;
     int d = lum >= 128 ? -STEP : STEP;
@@ -57,14 +46,14 @@ private mu_Color theme_base(StructureRole role)
     case zero:       return mu_Color(90, 90, 100, 255);    // charcoal
     case printable:  return mu_Color(220, 220, 220, 255);  // off-white
     case whitespace: return mu_Color(120, 170, 200, 255);  // steel blue
-    case control:    return mu_Color(200, 130, 90, 255);   // burnt orange (darker)
+    case control:    return mu_Color(200, 130, 90, 255);   // burnt orange
     case unmapped:   return mu_Color(150, 190, 130, 255);  // sage green
 
     case magic:      return mu_Color(240, 205, 115, 255);  // gold
     case length:     return mu_Color(120, 195, 235, 255);  // sky blue
-    case offset:     return mu_Color(150, 170, 255, 255);  // periwinkle (light purple)
+    case offset:     return mu_Color(150, 170, 255, 255);  // periwinkle
     case count:      return mu_Color(105, 210, 185, 255);  // teal
-    case flags:      return mu_Color(215, 150, 230, 255);  // orchid (bright rich purple)
+    case flags:      return mu_Color(215, 150, 230, 255);  // orchid
     case scalar:     return mu_Color(205, 215, 230, 255);  // pale blue-grey
     case text:       return mu_Color(185, 225, 160, 255);  // light green
     case timestamp:  return mu_Color(245, 175, 125, 255);  // peach
@@ -76,34 +65,28 @@ private mu_Color theme_base(StructureRole role)
     }
 }
 
-/// Colour a structure border is drawn in, `level` levels in from the outermost span.
+/// Border colour for a structure `level` levels deep.
 ///
-/// Neutral on purpose, and the only thing here that is. Every hue in the table above is
-/// spoken for by a role, and the blues by the caret, the selection and the focused
-/// pane's edge; a border tinted into either family reads as one of them. Grey is the
-/// one thing left that says "chrome" - it is what the offset column is drawn in - so a
-/// record's box groups the bytes without claiming to mean anything about them.
+/// Grey on purpose: role hues and the selection/caret/focus blues are all
+/// taken, and grey reads as chrome (like the offset column).
 mu_Color theme_edge(int level)
 {
     return level <= 0 ?
-        mu_Color(165, 168, 180, 220) :  // light grey: the record, all that is drawn today
-        mu_Color(120, 122, 132, 170);   // mid grey: anything nested inside it, quieter
+        mu_Color(165, 168, 180, 220) :  // light grey: record
+        mu_Color(120, 122, 132, 170);   // mid grey: nested
 }
 
 unittest
 {
-    // Every role but `none` answers with something visible, or a byte would come out
-    // invisible against the panel.
+    // Every role but `none` must be visible against the panel.
     foreach (StructureRole role; StructureRole.min .. cast(StructureRole)(StructureRole.max + 1))
     {
         mu_Color c = theme_role(role);
         assert((role == StructureRole.none) == (c.a == 0));
     }
 
-    // The classifier roles keep the colours the grid has always drawn them in: the
-    // panel's own hex_classify is what an uncoloured view uses, and a byte no structure
-    // covers must not change colour for having been named through here instead.
-    // hex_classify reads a byte as ASCII, so that is the set the two have to agree on.
+    // Classifier roles must match hex_classify's colours (which reads ASCII), so
+    // unclaimed bytes look the same either way.
     import hexview : hex_classify;
     import ddhx.charset : ASCII;
     foreach (ubyte value; [0x00, 'A', '\n', 0x01, 0x7f, 0x80, 0xff])
@@ -112,8 +95,7 @@ unittest
 
     assert(theme_edge(0) != theme_edge(1));
 
-    // The shade is a different colour from the one it alternates with, keeps the alpha,
-    // and moves away from whichever end the role sits nearer.
+    // Shade differs, keeps alpha, and moves away from the nearer end.
     foreach (StructureRole role; StructureRole.min .. cast(StructureRole)(StructureRole.max + 1))
     {
         if (role == StructureRole.none)

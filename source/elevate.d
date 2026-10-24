@@ -1,11 +1,9 @@
-/// Opening what this process may not: an elevated copy of vddhx opens the target
-/// and hands the handle back, so the editor itself never runs privileged.
+/// Privileged opens: an elevated copy of vddhx opens the target and hands the
+/// handle back, so the editor never runs privileged.
 ///
-/// The copy is started through pkexec on Posix and UAC on Windows, and does
-/// nothing but open the one path. Posix passes the descriptor back over a socket
-/// pair standing in for its stdin and stdout, the only descriptors pkexec leaves
-/// open; Windows duplicates the handle straight into this process and exits with
-/// its value.
+/// Posix: pkexec; the fd comes back over a socketpair on stdin/stdout (the only
+/// fds pkexec keeps). Windows: UAC; the helper duplicates the handle into this
+/// process and exits with its value.
 module elevate;
 
 import core.atomic : atomicLoad, atomicStore, cas;
@@ -13,21 +11,21 @@ import core.thread : Thread;
 import ddhx.document : INVALID_OSHANDLE, OSHANDLE;
 import os.error : OSException;
 
-/// What the elevated copy is started with; main hands what follows it to
-/// elevate_helper before SDL is touched.
+/// Argument for the elevated copy; main passes the rest to elevate_helper
+/// before SDL init.
 enum string ELEVATE_ARG = "--elevated-open";
 
 struct Elevated
 {
     string path;
     bool write;
-    /// INVALID_OSHANDLE unless it worked; owned by whoever polls it.
+    /// INVALID_OSHANDLE on failure; owned by the poller.
     OSHANDLE handle = INVALID_OSHANDLE;
-    /// Why it did not, for the status bar.
+    /// Failure reason for the status bar.
     string error;
 }
 
-/// Whether `e` is a refusal on permissions, the one failure elevation can fix.
+/// Whether `e` is a permission error, the only one elevation fixes.
 bool elevate_denied(Exception e)
 {
     OSException os = cast(OSException) e;
@@ -45,10 +43,10 @@ bool elevate_denied(Exception e)
     }
 }
 
-/// Ask for `path` opened by an elevated copy, `write` adding write access. The OS
-/// prompt can sit there as long as the user leaves it, so this runs on a thread of
-/// its own and `wake` is called once elevate_poll has an answer.
-/// Returns: false when another request is still out.
+/// Request `path` opened by an elevated copy. Runs on its own thread since the
+/// OS prompt can wait indefinitely; `wake` is called once elevate_poll has an
+/// answer.
+/// Returns: false if a request is already pending.
 bool elevate_request(string path, bool write, void function() nothrow wake)
 {
     if (cas(&running, false, true) == false)
@@ -67,7 +65,7 @@ bool elevate_request(string path, bool write, void function() nothrow wake)
     return true;
 }
 
-/// Take the answer to the last request, once there is one.
+/// Take the answer to the last request, if any.
 bool elevate_poll(out Elevated answer)
 {
     if (atomicLoad(finished) == false)
@@ -93,8 +91,8 @@ version (Posix)
     import core.sys.posix.sys.uio : iovec;
     import core.sys.posix.unistd : close;
 
-    /// The elevated side: open `args[0]` (`args[1]` being "r" or "rw") and send the
-    /// descriptor down stdout, or the errno that stopped it.
+    /// Elevated side: open `args[0]` (`args[1]`: "r" or "rw"), send the fd or errno
+    /// down stdout.
     int elevate_helper(string[] args)
     {
         import core.stdc.errno : EINVAL, errno;
@@ -144,7 +142,7 @@ version (Posix)
         Pid pid;
         {
             File chan;
-            chan.fdopen(sv[1], "r+b"); // owns sv[1] now; this end is the child's
+            chan.fdopen(sv[1], "r+b"); // owns sv[1] now, the child's end
             pid = spawnProcess(["pkexec", selfPath(), ELEVATE_ARG, job.path, job.write ? "rw" : "r"],
                 chan, chan, stderr, null, Config.none);
         }
@@ -157,7 +155,7 @@ version (Posix)
         msg.msg_iovlen = 1;
         msg.msg_control = control.ptr;
         msg.msg_controllen = control.length;
-        // Comes back empty when pkexec gives up before the copy ever runs.
+        // Empty if pkexec gave up before running the helper.
         ptrdiff_t got = recvmsg(sv[0], &msg, 0);
         int code = wait(pid);
 
@@ -184,12 +182,11 @@ version (Windows)
 {
     import core.sys.windows.windows;
 
-    /// Exit codes with this bit are a Win32 error rather than a handle, which
-    /// never carries it.
+    /// Set in exit codes carrying a Win32 error; never set in a handle.
     private enum uint FAILED = 0x8000_0000;
 
-    /// The elevated side: open `args[0]` (`args[1]` being "r" or "rw") and
-    /// duplicate the handle into process `args[2]`, exiting with its value.
+    /// Elevated side: open `args[0]` (`args[1]`: "r" or "rw"), duplicate the handle
+    /// into process `args[2]`, exit with its value.
     int elevate_helper(string[] args)
     {
         import std.conv : to;
@@ -218,9 +215,8 @@ version (Windows)
         if (DuplicateHandle(GetCurrentProcess(), h, parent, &dup, 0, FALSE,
                 DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE) == FALSE)
             return FAILED | GetLastError();
-        // Handles are 32-bit significant even in a 64-bit process, so the exit code
-        // carries one whole.
-        return cast(int) cast(size_t) dup;
+        // Handles only use 32 significant bits, even on 64-bit.
+        return cast(int) dup;
     }
 
     private void elevate_run(ref Elevated job)

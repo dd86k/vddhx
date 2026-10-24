@@ -39,7 +39,7 @@ private enum HELP =
 
 int main(string[] args)
 {
-    // The elevated copy elevate.d starts: one open, no window.
+    // Elevated helper (elevate.d): one open, no window.
     if (args.length > 1 && args[1] == ELEVATE_ARG)
         return elevate_helper(args[2 .. $]);
 
@@ -61,14 +61,14 @@ int main(string[] args)
 
     version (Windows)
     {
-        // The GUI subsystem starts without stderr; only borrow a console on request.
+        // GUI subsystem has no stderr; attach a console only on request.
         if (console && console_attach())
             logAddAppender(new ConsoleAppender());
     }
     else
         logAddAppender(new ConsoleAppender());
 
-    // Screenshot runs would rotate out the log of the session worth keeping.
+    // Don't let screenshot runs rotate out a real session's log.
     bool logfile = true;
     version (Screenshots)
     {
@@ -77,8 +77,7 @@ int main(string[] args)
     }
     logging_init(loglevel, logfile);
 
-    // Under the dynamic configuration nothing may touch SDL_* or TTF_* before
-    // this, the screenshot driver included.
+    // Dynamic config: no SDL_*/TTF_* call before this, screenshot driver included.
     if (loader_init() == false)
         return 1;
     scope(exit) loader_quit();
@@ -126,8 +125,7 @@ int main(string[] args)
 
     SDL_StartTextInput(window);
 
-    // Allocated because otherwise mu_Context does not fit in the default
-    // MSVC stack size :)
+    // mu_Context is (or was?) too large for the default MSVC stack, which is 1 MiB.
     import core.stdc.stdlib : malloc;
     mu_Context *ctx = cast(mu_Context*) malloc(mu_Context.sizeof);
     if (ctx == null)
@@ -142,54 +140,48 @@ int main(string[] args)
     mu_init(ctx);
     ctx.text_width  = &render_text_width;
     ctx.text_height = &render_text_height;
-    ctx.style.font  = render_font_ui(); // TTF_Font* handle carried on every text command
-    ctx.get_clipboard = &clipboardGet;  // so the omnibar's box takes Ctrl+C / X / V
+    ctx.style.font  = render_font_ui();
+    ctx.get_clipboard = &clipboardGet;  // omnibar Ctrl+C/X/V
     ctx.set_clipboard = &clipboardSet;
     ui_style(ctx);
 
-    // Ahead of ui_init, whose first tab already takes the defaults.
+    // Before ui_init: the first tab uses the defaults.
     prefs_load();
 
-    // Give the UI the window so File > Open can parent its native dialog to it.
+    // Window is the parent for native file dialogs.
     ui_init(window);
 
-    // One tab each, the first taking over the blank one we start on. A failure
-    // just leaves the tab out (ui_open logs the reason).
+    // One tab per path; the first reuses the initial blank tab. Failures are
+    // skipped (ui_open logs them).
     foreach (string path; paths)
         ui_open(path);
 
     logDebugging("Starting loop");
 
-    // Frames still owed to the last input. One is not enough: a click that opens a
-    // popup or moves focus lands on the frame after the one that read it.
+    // Frames to draw after input. A click opening a popup or moving focus takes
+    // effect a frame later, so 1 isn't enough.
     enum FRAMES_PER_INPUT = 3;
 
     bool running = true;
-    int frames = FRAMES_PER_INPUT; // the first frame is owed to nothing: draw it
+    int frames = FRAMES_PER_INPUT; // draw the first frame
     Duration interval = frameInterval(window);
     MonoTime frameStart;
     bool skipped;
     version (Screenshots) bool wantShot;
     while (running)
     {
-        // Idle: sleep in SDL rather than rebuild an identical frame on every
-        // display refresh. Everything that changes the screen arrives as an event,
-        // the async file dialogs pushing their own (ui_wakeup) from their thread.
-        // The null leaves the event in the queue for the drain below.
-        //
-        // ui_animating is the one thing that can owe a frame to nothing: while it
-        // holds, the loop free-runs on vsync.
+        // Idle: block in SDL instead of redrawing identical frames. All screen
+        // changes arrive as events (file dialogs push via ui_wakeup). null leaves
+        // the event queued for the drain below. While ui_animating, run on vsync.
         if (frames <= 0 && ui_animating() == false && SDL_WaitEvent(null) == false)
         {
-            // Only ever false on error, and a broken queue does not heal: going
-            // back to sleep on it would spin the loop at full speed instead.
+            // Only fails on error; retrying would busy-loop.
             logCritical("SDL_WaitEvent: %s", SDL_GetError().fromStringz);
             break;
         }
 
-        // Nothing was presented last frame, so nothing waited on vsync: hold the
-        // loop to the refresh rate, or motion would build frames nobody sees.
-        // Before the drain, so whatever arrives while waiting makes this frame.
+        // Nothing presented last frame, so no vsync wait happened: throttle to the
+        // refresh rate here. Before the drain so events during the wait make it in.
         if (skipped)
         {
             Duration left = interval - (MonoTime.currTime - frameStart);
@@ -206,14 +198,13 @@ int main(string[] args)
             switch (event.type)
             {
             case SDL_EVENT_QUIT:
-                // Single choke point for every quit route: the File > Quit menu
-                // and Ctrl+Q push this too, so all three meet the same check.
+                // All quit routes (window close, File > Quit, Ctrl+Q) go through this check.
                 if (ui_may_quit())
                     running = false;
                 break;
             case SDL_EVENT_WINDOW_FIRST: .. case SDL_EVENT_WINDOW_LAST:
             case SDL_EVENT_RENDER_TARGETS_RESET, SDL_EVENT_RENDER_DEVICE_RESET:
-                // The back buffer is stale or gone, whatever ddui thinks of it.
+                // Back buffer is stale or lost.
                 mu_invalidate(ctx);
                 if (event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED)
                     interval = frameInterval(window);
@@ -258,7 +249,7 @@ int main(string[] args)
         render_commands(renderer, ctx);
         version (FrameStats) stats_end(Phase.render);
 
-        // Capture from the finished backbuffer, before present.
+        // Capture from the finished backbuffer, before presenting.
         version (Screenshots)
         {
             if (wantShot)
@@ -286,7 +277,7 @@ int main(string[] args)
     return 0;
 }
 
-/// One refresh of the display the window is on, 60 Hz when it will not say.
+/// Display refresh interval, 60 Hz if unknown.
 Duration frameInterval(SDL_Window* window)
 {
     const(SDL_DisplayMode)* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
@@ -294,10 +285,8 @@ Duration frameInterval(SDL_Window* window)
     return nsecs(cast(long)(1_000_000_000 / hz));
 }
 
-// Startup gives out before there is a window to draw the reason into, and a
-// desktop launcher has no console to leave it on: SDL's box is the only surface
-// left, and it is drawn by the platform rather than by the fonts we just failed
-// to find.
+// No window or console (desktop launch) to report startup failures, so use
+// SDL's message box, which uses platform fonts.
 private int fatal(SDL_Window* window, string message)
 {
     logCritical("%s", message);
@@ -305,15 +294,14 @@ private int fatal(SDL_Window* window, string message)
     return 1;
 }
 
-/// ddui clipboard hooks, for the omnibar's text box (the hex panel does its own
-/// in ui.d, bytes not being text). SDL hands out a copy the caller frees while
-/// ddui expects a borrowed pointer, hence the static buffer; text too long for it
-/// is cut back on a UTF-8 boundary so a paste never carries half a character.
+/// ddui clipboard hooks for the omnibar (hex panel has its own in ui.d).
+/// SDL returns an owned copy but ddui expects a borrowed pointer, hence the
+/// static buffer. Overlong text is cut on a UTF-8 boundary.
 extern (C) private const(char)* clipboardGet(mu_Context* ctx) nothrow
 {
     __gshared char[4096] buffer;
 
-    char* text = SDL_GetClipboardText(); // an empty string when there is nothing
+    char* text = SDL_GetClipboardText(); // empty string if none
     if (text is null)
         return null;
     scope(exit) SDL_free(text);
@@ -324,7 +312,7 @@ extern (C) private const(char)* clipboardGet(mu_Context* ctx) nothrow
         buffer[n] = text[n];
         ++n;
     }
-    if (text[n]) // cut short: step back off any partial character
+    if (text[n]) // truncated: back off partial character
         while (n > 0 && (buffer[n] & 0xc0) == 0x80)
             --n;
     buffer[n] = 0;
@@ -337,9 +325,8 @@ extern (C) private void clipboardSet(mu_Context* ctx, const(char)* str) nothrow
     SDL_SetClipboardText(str);
 }
 
-// Ctrl+Shift+F12 grabs the current frame, dodging both desktop PrintScreen
-// capture and the Linux Ctrl+Alt+F* terminal switch. Ahead of input_event, so a
-// frame can be captured whatever else has the keyboard.
+// Ctrl+Shift+F12 captures the frame; avoids PrintScreen and Linux's
+// Ctrl+Alt+F* VT switch. Checked before input_event so it always works.
 version (Screenshots)
 private bool shotChord(ref const(SDL_Event) event)
 {
@@ -354,7 +341,7 @@ private bool console_attach()
     import core.sys.windows.wincon : AttachConsole, AllocConsole, ATTACH_PARENT_PROCESS;
     import std.stdio : stdout, stderr;
 
-    // Allocating covers a shortcut launch, where there is no parent console.
+    // Alloc for shortcut launches with no parent console.
     if (AttachConsole(ATTACH_PARENT_PROCESS) == FALSE && AllocConsole() == FALSE)
         return false;
     try
@@ -367,7 +354,7 @@ private bool console_attach()
     return true;
 }
 
-// The Windows GUI subsystem starts with no stdout to print to.
+// GUI subsystem has no stdout, this tries attach the console on Windows before printing.
 private int cli_print(string text)
 {
     import std.stdio : write;

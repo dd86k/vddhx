@@ -9,30 +9,21 @@ dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="b8
 dependency "ddlogger" repository="git+https://github.com/dd86k/ddlogger.git" version="dcab663a80d496c1d3c7fee4c406ed7f763e5fdb"
 dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="0bfad84e39ce8bf48667fdaa163d00100a3ae789"
 
-# Windows: no console window; --console attaches one for logs (source/main.d).
-# The entry keeps D main, which LDC emits as C wmain and DMD as C main.
+# Windows: GUI subsystem (--console attaches one, see source/main.d).
+# D main is wmain under LDC, main under DMD.
 lflags "/SUBSYSTEM:WINDOWS" platform="windows"
 lflags "/ENTRY:wmainCRTStartup" platform="windows-ldc"
 lflags "/ENTRY:mainCRTStartup" platform="windows-dmd"
 
-# bindbc-sdl baselines at SDL 3.2.0
+# bindbc-sdl's baseline is SDL 3.2.0
 versions "SDL_TTF_3_2_2"
 
-# How SDL3 gets into the binary. The default configuration expects the SDL3 and
-# SDL3_ttf shared libraries on the system and opens them at startup
-# (source/loader.d); the "static" one links the archives in, needing nothing
-# installed to run.
-#
-# dub build             # dynamic
-# dub build -c static   # static
+# dub build             # SDL3 loaded at runtime (source/loader.d)
+# dub build -c static   # SDL3 linked in, nothing to install
 configuration "application" {
 	targetType "executable"
 	mainSourceFile "source/main.d"
 
-	// bindbc-sdl's default subconfiguration: every binding is a function
-	// pointer bound by loadSDL()/loadSDLTTF(), so the libraries are only
-	// needed at runtime and a missing one is a message rather than a
-	// failure to start.
 	subConfiguration "bindbc-sdl" "dynamic"
 }
 
@@ -40,27 +31,17 @@ configuration "static" {
 	targetType "executable"
 	mainSourceFile "source/main.d"
 
-	// The "static" subconfiguration makes bindbc-sdl emit direct extern
-	// bindings (sets version BindSDL_Static) instead of runtime function
-	// pointers, so loader_init() compiles away to nothing.
 	subConfiguration "bindbc-sdl" "static"
 
-	// Posix: tools/build-sdl3.d installs libSDL3.a, libSDL3_ttf.a and the
-	// vendored libfreetype.a/libharfbuzz.a into ~/.local by default.
-	// The -L below makes those win over the system's shared ones, which only
-	// --vendored=false builds rely on. List them after SDL3_ttf (which needs
-	// their symbols). The script warns when SDL's .pc files list a lib
-	// missing here.
+	// Posix: from tools/build-sdl3.d, in ~/.local (wins over system libs).
+	// Order matters: harfbuzz/freetype after SDL3_ttf. build-sdl3.d warns when
+	// sdl3.pc lists a lib missing here.
 	libs "SDL3_ttf" "harfbuzz" "freetype" "SDL3" platform="posix"
 	lflags "-L$HOME/.local/lib" platform="posix"
 
-	// Windows: tools/build-sdl3.d installs into ./install by default.
-	// MSVC renames the static archives to SDL3-static.lib and
-	// SDL3_ttf-static.lib so they cannot collide with the DLL import libraries
-	// of the same name. SDL3_ttf plus its vendored
-	// static freetype/harfbuzz come first; the rest are the transitive system
-	// dependencies SDL reports in its installed sdl3.pc, plus what the vendored
-	// harfbuzz needs for its Uniscribe shaper (usp10) and UuidCreate (rpcrt4).
+	// Windows: from tools/build-sdl3.d, in ./install. MSVC names the static
+	// libs *-static.lib. Order matters: SDL3_ttf, harfbuzz, freetype, then SDL3
+	// and its system deps (from sdl3.pc; usp10, rpcrt4 for harfbuzz).
 	libs "SDL3_ttf-static" "harfbuzz" "freetype" \
 	     "SDL3-static" \
 	     "kernel32" "user32" "gdi32" "winmm" "imm32" "ole32" "oleaut32" \
@@ -70,12 +51,9 @@ configuration "static" {
 	lflags "/LIBPATH:$PACKAGE_DIR/install/lib" platform="windows"
 }
 
-// Debug-only frame capture. Adds the Ctrl+Shift+F12 live shortcut and the
-// --screenshot headless driver (source/screenshots.d), both writing into
-// ./screenshots. Kept out of the default build via a buildType so `dub build`
-// stays release-clean: `dub build -b screenshots`. A buildType rather than a
-// configuration because it only adds flags, so it composes with the SDL linkage
-// pair above: `dub build -c static -b screenshots`.
+// Debug frame capture: Ctrl+Shift+F12 and --screenshot (source/screenshots.d).
+// A buildType so it composes with configurations:
+// `dub build -c static -b screenshots`
 buildType "screenshots" {
 	versions "Screenshots"
 	buildOptions "debugMode" "debugInfo"
