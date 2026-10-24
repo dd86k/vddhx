@@ -810,6 +810,22 @@ int screenshot_run(string[] args)
     frame();
     shot("omni-find-miss.bmp");
 
+    // Pattern write prompt: the row says what Enter writes, or what's wrong.
+    tap(HEX_KEY_HOME); // drop the find hit's selection
+    ui_write_prompt(false, true);
+    frame();
+    mu_input_text(&ctx, "0x40:0x7f x:de ad be ef");
+    frame(); frame();
+    shot("omni-write.bmp");
+    ui_omni_close();
+    ui_write_prompt(true, true);
+    frame();
+    mu_input_text(&ctx, "16 deadbeef");
+    frame(); frame();
+    shot("omni-write-bad.bmp");
+    ui_omni_close();
+    frame();
+
     // Scenario 14: inspector, filtered by type name.
     ui_omni_toggle(OMNI_INSPECT);
     frame(); frame();

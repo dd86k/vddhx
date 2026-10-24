@@ -37,6 +37,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     keys_panes();
     keys_caret();
     keys_edit();
+    keys_patterns();
     keys_marks();
 
     Files files = keys_files();
@@ -258,6 +259,40 @@ void keys_edit()
     press(SDLK_BACKSPACE);
     expect(ui_probe().size == before.size, "Backspace removes the byte");
     press(SDLK_INSERT);
+}
+
+void keys_patterns()
+{
+    press(SDLK_HOME, CTRL);
+    Probe before = ui_probe();
+
+    press(SDLK_P, CTRL | SHIFT);
+    type("Insert Range");
+    press(SDLK_RETURN);
+    Probe p = ui_probe();
+    expect(p.omni && p.mode == OmniMode.prompt, "Insert Range... asks for text");
+    type("4 x:ab");
+    press(SDLK_RETURN);
+    p = ui_probe();
+    expect(p.size == before.size + 4, "a length range inserts that many bytes");
+    expect(p.anchor == 0 && p.cursor == 3, "the written bytes end up selected");
+    press(SDLK_Z, CTRL);
+    expect(ui_probe().size == before.size, "one Ctrl+Z undoes the insert");
+
+    // A selection stands in for the range.
+    press(SDLK_HOME, CTRL);
+    press(SDLK_RIGHT, SHIFT);
+    press(SDLK_RIGHT, SHIFT);
+    press(SDLK_P, CTRL | SHIFT);
+    type("Replace...");
+    press(SDLK_RETURN);
+    type("x:de ad");
+    press(SDLK_RETURN);
+    p = ui_probe();
+    expect(p.size == before.size && p.edited, "Replace... fills the selection in place");
+    expect(p.anchor == 0 && p.cursor == 2, "the selection is kept");
+    press(SDLK_Z, CTRL);
+    expect(ui_probe().edited == before.edited, "one Ctrl+Z undoes the fill");
 }
 
 void keys_marks()

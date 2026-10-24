@@ -16,6 +16,7 @@ import settings : settings_page;
 import preferences : prefs, prefs_save;
 import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
+import edit : EditRequest, edit_parse;
 import bookmarks;
 import crumbs;
 import disks : DISKS_LISTED, Disk, disks_list, disks_size;
@@ -311,6 +312,7 @@ enum PromptKind
     columns,
     charset,
     openDevice,
+    write,
 }
 /// Ditto. Only valid while the box is in OmniMode.prompt.
 __gshared PromptKind promptKind;
@@ -2504,7 +2506,8 @@ enum
 {
     CMD_NEW_TAB, CMD_OPEN, CMD_OPEN_DEVICE, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS,
     CMD_CLOSE_TAB, CMD_READONLY,
-    CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE, CMD_GOTO,
+    CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE,
+    CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_GOTO,
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_INSPECT, CMD_STRUCTURE,
     CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
@@ -2531,6 +2534,10 @@ immutable Entry[] COMMANDS = [
     Entry("Copy",             "Ctrl+C",       CMD_COPY,         "clipboard yank hex"),
     Entry("Copy as Text",     "Ctrl+Shift+C", CMD_COPY_TEXT,    "clipboard yank ascii string chars characters column lane"),
     Entry("Paste",            "Ctrl+V",       CMD_PASTE,        "clipboard insert put"),
+    Entry("Replace...",       "",             CMD_REPLACE,      "fill overwrite pattern stamp repeat"),
+    Entry("Insert...",        "",             CMD_INSERT,       "add splice pattern repeat"),
+    Entry("Replace Range...", "",             CMD_REPLACE_RANGE,"fill overwrite pattern stamp repeat span"),
+    Entry("Insert Range...",  "",             CMD_INSERT_RANGE, "add splice pattern repeat span"),
     Entry("Go to Offset...",  "Ctrl+G",       CMD_GOTO,         "goto jump seek address position"),
     Entry("Find...",          "Ctrl+F",       CMD_FIND,         "search grep pattern bytes string"),
     Entry("Find Next",        "Ctrl+N",       CMD_FIND_NEXT,    "search again forward"),
@@ -2814,6 +2821,11 @@ const(OmniItem)[] ui_omni_items()
             break;
         case PromptKind.openDevice:
             ui_device_rows(&put);
+            break;
+        case PromptKind.write:
+            string wlabel, wdetail;
+            ui_write_preview(wlabel, wdetail);
+            put(wlabel, wdetail, 0, false, true);
             break;
         }
         break;
@@ -3397,6 +3409,7 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         case PromptKind.openDevice:
             ui_device_commit(id);
             return; // opened tab has focus
+        case PromptKind.write:    ui_write_commit(omni_query(omni));   break;
         }
         focusedView.hex.takeFocus = true;
         break;
@@ -3953,7 +3966,8 @@ __gshared SettingPreview settingPreview;
 void ui_setting_preview(OmniMode mode)
 {
     if (mode != OmniMode.prompt || ui_omni_active() == false
-        || promptKind == PromptKind.markName || promptKind == PromptKind.openDevice)
+        || promptKind == PromptKind.markName || promptKind == PromptKind.openDevice
+        || promptKind == PromptKind.write)
     {
         ui_setting_restore(); // box moved on or another question
         return;
@@ -4068,6 +4082,164 @@ string ui_mark_name_clean(const(char)[] typed)
     return cast(string) name;
 }
 
+/// Pattern write being typed: target view, kind, and the selection it opened
+/// on. A multi-byte selection stands in for the range, as in ddhx.
+struct WritePrompt
+{
+    View* view;
+    bool insert;    /// patternInsert, else patternReplace.
+    bool ranged;    /// -range form: text starts with a range.
+    bool selected;  /// Multi-byte selection; `high` is valid.
+    long low, high;
+}
+/// Ditto.
+__gshared WritePrompt writePrompt;
+
+/// Last parse of the write prompt, reused while the text is unchanged.
+__gshared string writeText;
+/// Ditto.
+__gshared bool writeParsed;
+/// Ditto.
+__gshared string writeError;
+/// Ditto.
+__gshared EditRequest writeReq;
+
+/// Prompt for a pattern write (ddhx's replace, insert, and -range forms).
+public void ui_write_prompt(bool insert, bool ranged)
+{
+    if (ui_on_settings())
+        return;
+    View* v = &focusedView();
+    if (v.doc.editor is null || ui_refuse_edit(v.doc))
+        return;
+
+    long total = cast(long) hex_total(v.hex);
+    long low   = v.hex.active ? cast(long) hex_sel_low(v.hex) : 0;
+    long high  = v.hex.active ? cast(long) hex_sel_high(v.hex) : 0;
+    if (low > total) low = total;
+    if (high >= total) high = total - 1; // exclude the append slot
+    writePrompt = WritePrompt(v, insert, ranged, high > low, low, high);
+    writeParsed = false;
+
+    string hint;
+    if (writePrompt.selected)
+        hint = "pattern for the selection: x:00, utf8:abc, u16:1";
+    else if (ranged)
+        hint = "range then pattern: 0x100:+16 x:00";
+    else
+        hint = "pattern, written once at the caret: x:00, utf8:abc";
+    promptKind = PromptKind.write;
+    omni_prompt(omni, hint);
+}
+
+/// Parse `typed` into `req` for the write prompt, filling in the selection or
+/// caret when no range is typed. Returns: null, or what's wrong.
+string ui_write_parse(const(char)[] typed, out EditRequest req)
+{
+    if (writeParsed && writeText == typed)
+    {
+        req = writeReq;
+        return writeError;
+    }
+
+    WritePrompt* w = &writePrompt;
+    bool ranged = w.ranged && w.selected == false;
+    writeError = edit_parse(typed, ranged, w.view.doc.endian, w.low,
+        w.view.doc.editor.size(), writeReq);
+    if (writeError is null && ranged == false)
+    {
+        writeReq.start  = w.low;
+        writeReq.length = w.selected ? w.high - w.low + 1 : writeReq.data.length;
+    }
+    writeText   = typed.idup;
+    writeParsed = true;
+    req = writeReq;
+    return writeError;
+}
+
+/// Write prompt row: what Enter writes where, or what's wrong.
+void ui_write_preview(out string label, out string detail)
+{
+    WritePrompt* w = &writePrompt;
+    string verb = w.insert ? "Insert" : "Replace";
+    char[96] buf = void;
+
+    EditRequest req;
+    string error = ui_write_parse(omni_query(omni), req);
+    if (error)
+    {
+        if (w.selected)
+            label = ui_row_text(sformat(buf, "%s selection 0x%08x, %d byte(s)", verb, w.low,
+                w.high - w.low + 1));
+        else if (w.ranged)
+            label = verb;
+        else
+            label = ui_row_text(sformat(buf, "%s at 0x%08x", verb, w.low));
+        detail = ui_row_text(error);
+        return;
+    }
+
+    label = ui_row_text(sformat(buf, "%s %d byte(s) at 0x%08x", verb, req.length, req.start));
+
+    // Leading pattern bytes, like bookmark rows.
+    static immutable string digits = "0123456789abcdef";
+    enum SHOWN = 8;
+    char[SHOWN * 3 + 3] hex = void;
+    size_t n;
+    foreach (size_t i, ubyte b; req.data[0 .. req.data.length < SHOWN ? $ : SHOWN])
+    {
+        if (i) hex[n++] = ' ';
+        hex[n++] = digits[b >> 4];
+        hex[n++] = digits[b & 0x0f];
+    }
+    if (req.data.length > SHOWN)
+    {
+        hex[n .. n + 4] = " ...";
+        n += 4;
+    }
+    detail = ui_row_text(sformat(buf, "%s, repeated", hex[0 .. n]));
+}
+
+/// Apply the write prompt's `typed` text. Selects what was written.
+void ui_write_commit(const(char)[] typed)
+{
+    WritePrompt* w = &writePrompt;
+    View* v = w.view;
+    Document* d = v.doc;
+    string verb = w.insert ? "insert" : "replace";
+
+    EditRequest req;
+    string error = ui_write_parse(typed, req);
+    if (error)
+    {
+        ui_status("%s: %s", verb, error);
+        return;
+    }
+    if (ui_refuse_edit(d))
+        return;
+
+    try
+    {
+        if (w.insert)
+            d.editor.patternInsert(req.start, req.length, req.data.ptr, req.data.length);
+        else
+            d.editor.patternReplace(req.start, req.length, req.data.ptr, req.data.length);
+    }
+    catch (Exception e)
+    {
+        logError("%s failed: %s", verb, e.msg);
+        return;
+    }
+    if (w.insert)
+        bookmark_shift(d.marks, req.start, req.length);
+    ++d.revision;
+    structureEdited(d, req.start);
+
+    v.hex.dataSize = d.editor.size();
+    ui_select_range(*v, cast(size_t) req.start, cast(size_t) req.length);
+    logDebugging("%s: %d byte(s) at %#x", verb, req.length, req.start);
+}
+
 /// Jump to the next/previous bookmark (wrapping) and select it.
 public void ui_mark_step(int dir)
 {
@@ -4145,6 +4317,10 @@ void ui_omni_run(int id)
     case CMD_COLUMNS:   ui_columns_prompt();         return;
     case CMD_CHARSET:   ui_charset_prompt();         return;
     case CMD_OPEN_DEVICE: ui_open_device_prompt();   return;
+    case CMD_REPLACE:       ui_write_prompt(false, false); return;
+    case CMD_INSERT:        ui_write_prompt(true, false);  return;
+    case CMD_REPLACE_RANGE: ui_write_prompt(false, true);  return;
+    case CMD_INSERT_RANGE:  ui_write_prompt(true, true);   return;
     case CMD_KEYS:      ui_omni_open(OMNI_HELP);     return;
     case CMD_SETTINGS:  ui_settings_open();    break;
     case CMD_ABOUT:     about_open();          break;
