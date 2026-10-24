@@ -474,11 +474,21 @@ public void ui_status_dismiss()
 __gshared char[4096] pendingPath;
 shared bool pendingReady;
 
-/// Pending path is for "Compare With...", against this view. Main thread only.
-/// Validate the view before use: the dialog isn't modal.
-__gshared bool pendingCompare;
+/// What the pending path is for. Main thread only.
+enum Pick
+{
+    open,      /// Open in a tab.
+    compare,   /// Diff against compareFrom.
+    marksLoad, /// Load bookmarks into marksFrom.
+    marksSave, /// Save the bookmarks of marksFrom.
+}
 /// Ditto.
+__gshared Pick pendingPick;
+/// View "Compare With..." was raised from. Validate before use: the dialog
+/// isn't modal.
 __gshared View* compareFrom;
+/// Ditto for the bookmark dialogs.
+__gshared Document* marksFrom;
 
 /// Ditto for Save As. The callback does no GC work; the write happens on the
 /// main thread.
@@ -1566,15 +1576,16 @@ void ui_file_dialog(SDL_DialogFileCallback picked, bool save)
 /// opens it.
 public void ui_open_dialog()
 {
+    pendingPick = Pick.open;
     ui_file_dialog(&ui_on_file_picked, false);
 }
 
-/// Open dialog for "Compare With..."; pendingCompare marks the result.
+/// Open dialog for "Compare With...".
 public void ui_compare_dialog()
 {
     if (ui_on_settings())
         return;
-    pendingCompare = true;
+    pendingPick = Pick.compare;
     compareFrom    = focusedPane.views[focusedPane.current];
     ui_file_dialog(&ui_on_file_picked, false);
 }
@@ -2511,6 +2522,7 @@ enum
     CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_MARK_ALL, CMD_INSPECT, CMD_STRUCTURE,
     CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
+    CMD_MARK_LOAD, CMD_MARK_SAVE,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
     CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_COLUMNS, CMD_CHARSET,
     CMD_SETTINGS, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
@@ -2555,6 +2567,8 @@ immutable Entry[] COMMANDS = [
     Entry("Previous Bookmark","[",            CMD_MARK_PREV,    "mark back backward"),
     Entry("Bookmarks...",     "",             CMD_MARK_LIST,    "marks list show all"),
     Entry("Clear Bookmarks",  "",             CMD_MARK_CLEAR,   "marks remove delete none"),
+    Entry("Load Bookmarks...","",             CMD_MARK_LOAD,    "marks open import read file ddhx"),
+    Entry("Save Bookmarks...","",             CMD_MARK_SAVE,    "marks write export file ddhx"),
     Entry("Split Pane Right", "Ctrl+\\",      CMD_SPLIT,        "vsplit vertical side view new second"),
     Entry("Split Pane Down",  "Ctrl+Shift+\\",CMD_SPLIT_DOWN,   "hsplit horizontal below view new second"),
     Entry("Close Pane",       "",             CMD_CLOSE_PANE,   "unsplit remove"),
@@ -4319,6 +4333,106 @@ public void ui_mark_clear()
     focusedDoc.marks = null;
 }
 
+/// Open dialog for loading a bookmark file into the focused document.
+public void ui_marks_load_dialog()
+{
+    if (ui_on_settings())
+        return;
+    pendingPick = Pick.marksLoad;
+    marksFrom   = &focusedDoc();
+    ui_file_dialog(&ui_on_file_picked, false);
+}
+
+/// Save dialog for the focused document's bookmarks.
+public void ui_marks_save_dialog()
+{
+    if (ui_on_settings())
+        return;
+    if (focusedDoc.marks.length == 0)
+    {
+        ui_status("no bookmarks to save");
+        return;
+    }
+    pendingPick = Pick.marksSave;
+    marksFrom   = &focusedDoc();
+    ui_file_dialog(&ui_on_file_picked, true);
+}
+
+/// Document a bookmark dialog was raised for, or null if its tab closed since.
+Document* ui_marks_target()
+{
+    Document* d = marksFrom;
+    marksFrom = null;
+    foreach (Document* open; docs)
+    {
+        if (open is d)
+            return d;
+    }
+    ui_status("the document is gone");
+    return null;
+}
+
+/// Add the bookmarks in file `path` to the dialog's document. All or nothing.
+void ui_marks_load(string path)
+{
+    import std.file : getSize, readText;
+
+    Document* d = ui_marks_target();
+    if (d is null)
+        return;
+
+    // Far past any real list (100000 marks is ~2 MiB). Stops reading a binary.
+    enum ulong MARKS_FILE_MAX = 64 * 1024 * 1024;
+    string text;
+    try
+    {
+        if (getSize(path) > MARKS_FILE_MAX)
+        {
+            ui_status("%s is too large for a bookmark file", ui_clip(baseName(path), 40));
+            return;
+        }
+        text = readText(path);
+    }
+    catch (Exception e)
+    {
+        logError("bookmarks: cannot read %s: %s", path, e.msg);
+        ui_status("cannot read %s: %s", ui_clip(baseName(path), 32), ui_clip(e.msg, 44));
+        return;
+    }
+
+    Bookmark[] runs;
+    size_t line;
+    string error = bookmark_parse(text, runs, line);
+    if (error)
+    {
+        logWarn("bookmarks: %s:%u: %s", path, line, error);
+        ui_status("%s, line %u: %s", ui_clip(baseName(path), 32), line, error);
+        return;
+    }
+
+    bookmark_add_all(d.marks, runs);
+    ui_status("loaded %u bookmark(s) from %s", runs.length, ui_clip(baseName(path), 40));
+}
+
+/// Write the dialog's document bookmarks to `path`, replacing it.
+void ui_marks_save(string path)
+{
+    import std.file : write;
+
+    Document* d = ui_marks_target();
+    if (d is null)
+        return;
+
+    try write(path, bookmark_format(d.marks));
+    catch (Exception e)
+    {
+        logError("bookmarks: cannot write %s: %s", path, e.msg);
+        ui_status("cannot save %s: %s", ui_clip(baseName(path), 32), ui_clip(e.msg, 44));
+        return;
+    }
+    ui_status("saved %u bookmark(s) to %s", d.marks.length, ui_clip(baseName(path), 40));
+}
+
 /// Select bookmark `index` in `v`.
 void ui_mark_select(ref View v, ptrdiff_t index)
 {
@@ -4363,6 +4477,8 @@ void ui_omni_run(int id)
     case CMD_PANE_NEXT:  ui_cycle_pane(1);     break;
     case CMD_PANE_PREV:  ui_cycle_pane(-1);    break;
     case CMD_MARK_CLEAR: ui_mark_clear();      break;
+    case CMD_MARK_LOAD:  ui_marks_load_dialog(); break;
+    case CMD_MARK_SAVE:  ui_marks_save_dialog(); break;
     // Reopens the box in another mode next frame; don't give the panel focus.
     case CMD_GOTO:      ui_omni_open(OMNI_ADDRESS);  return;
     case CMD_FIND:      ui_omni_open(OMNI_FIND);     return;
@@ -4439,13 +4555,15 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         {
             atomicStore(pendingReady, false);
             string picked = pendingPath.ptr.fromStringz.idup;
-            if (pendingCompare)
+            Pick pick = pendingPick;
+            pendingPick = Pick.open;
+            final switch (pick)
             {
-                pendingCompare = false;
-                ui_compare_with(picked);
+            case Pick.open:      cast(void) ui_open(picked); break;
+            case Pick.compare:   ui_compare_with(picked); break;
+            case Pick.marksLoad: ui_marks_load(picked); break;
+            case Pick.marksSave: ui_marks_save(picked); break;
             }
-            else
-                cast(void) ui_open(picked);
         }
 
         Elevated answer;
@@ -5207,6 +5325,9 @@ void ui_menubar(mu_Context* ctx)
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "List Bookmarks...", "",       0, 0)) ui_omni_open(OMNI_BOOKMARK);
         if (mu_menu_item_ex(ctx, "Clear Bookmarks",   "",       0, 0)) ui_mark_clear();
+        mu_menu_separator(ctx);
+        if (mu_menu_item_ex(ctx, "Load Bookmarks...", "",       0, 0)) ui_marks_load_dialog();
+        if (mu_menu_item_ex(ctx, "Save Bookmarks...", "",       0, 0)) ui_marks_save_dialog();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }

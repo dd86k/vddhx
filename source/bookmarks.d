@@ -178,6 +178,70 @@ void bookmark_shift(ref Bookmark[] list, long at, long shift)
     bookmark_merge(list); // removal can make bookmarks touch
 }
 
+/// Bookmarks as ddhx's bookmark-save writes them, one "0xADDR\tLENGTH" per line.
+/// A name goes in a third field, which ddhx ignores on load.
+string bookmark_format(const(Bookmark)[] list)
+{
+    import std.array : appender, Appender;
+    import std.format : formattedWrite;
+    import std.string : tr;
+
+    Appender!string text = appender!string;
+    text.put("# ddhx bookmarks\n");
+    foreach (ref const(Bookmark) b; list)
+    {
+        text.formattedWrite("0x%x\t%d", b.at, b.length);
+        if (b.name.length)
+            text.formattedWrite("\t%s", tr(b.name, "\r\n", "  "));
+        text.put('\n');
+    }
+    return text.data;
+}
+
+/// Parse bookmark_format text, sorted and merged into `list`. Blank lines and
+/// '#' comments are skipped. Returns null, or the error with its line in `line`.
+string bookmark_parse(const(char)[] text, out Bookmark[] list, out size_t line)
+{
+    import std.algorithm.mutation : SwapStrategy;
+    import std.algorithm.sorting : sort;
+    import std.conv : ConvException, parse;
+    import std.string : indexOfAny, lineSplitter, strip, stripLeft;
+    import address : address_number;
+
+    foreach (const(char)[] raw; lineSplitter(text))
+    {
+        ++line;
+        const(char)[] rest = strip(raw);
+        if (rest.length == 0 || rest[0] == '#')
+            continue;
+
+        ptrdiff_t space = indexOfAny(rest, " \t");
+        if (space <= 0)
+            return "expected '<address> <length>'";
+
+        Bookmark b;
+        if (address_number(rest[0 .. space], b.at) == false)
+            return "invalid address";
+        rest = stripLeft(rest[space .. $]);
+        try b.length = parse!long(rest);
+        catch (ConvException)
+            return "invalid length";
+        if (rest.length && rest[0] != ' ' && rest[0] != '\t')
+            return "invalid length";
+        if (b.length <= 0)
+            return "length must be positive";
+        if (b.at > long.max - b.length)
+            return "bookmark ends past the largest offset";
+        b.name = strip(rest).idup;
+        list ~= b;
+    }
+
+    line = 0;
+    sort!((a, b) => a.at < b.at, SwapStrategy.stable)(list);
+    bookmark_merge(list);
+    return null;
+}
+
 /// Add a bookmark, absorbing overlapping ones and touching same-named ones.
 private void bookmark_add(ref Bookmark[] list, long at, long length, string name)
 {
@@ -417,4 +481,28 @@ unittest
         Bookmark(0x40, 1) ]);
     assert(list == [ Bookmark(0x00, 4), Bookmark(0x08, 5, "magic"), Bookmark(0x30, 2),
         Bookmark(0x40, 1) ]);
+}
+
+/// Saving and loading.
+unittest
+{
+    Bookmark[] list = [ Bookmark(0x10, 4), Bookmark(0x20, 2, "magic\nnumber") ];
+    string text = bookmark_format(list);
+    assert(text == "# ddhx bookmarks\n0x10\t4\n0x20\t2\tmagic number\n");
+
+    Bookmark[] back;
+    size_t line;
+    assert(bookmark_parse(text, back, line) is null);
+    assert(back == [ Bookmark(0x10, 4), Bookmark(0x20, 2, "magic number") ]);
+
+    // ddhx files, hand-written ones: any order, decimal, spaces, CRLF.
+    assert(bookmark_parse("0x30 1\r\n\n  # note\n16   2\n0x11\t4\n", back, line) is null);
+    assert(back == [ Bookmark(0x10, 5), Bookmark(0x30, 1) ]);
+
+    assert(bookmark_parse("0x10 4\n0x20\n", back, line) !is null && line == 2);
+    assert(bookmark_parse("zz 4\n", back, line) !is null && line == 1);
+    assert(bookmark_parse("0x10 4x\n", back, line) !is null);
+    assert(bookmark_parse("0x10 0\n", back, line) !is null);
+    assert(bookmark_parse("0x10 -1\n", back, line) !is null);
+    assert(bookmark_parse("", back, line) is null && back.length == 0);
 }

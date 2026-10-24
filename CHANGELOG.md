@@ -15,6 +15,8 @@ Rules:
 
 - **Bookmarks**: "Bookmark All Matches..." command.
   Search data and mark new bookmarks using a pattern. Esc cancels it.
+- **Bookmarks**: "Save Bookmarks..." and "Load Bookmarks...", in ddhx's format.
+  Names are kept.
 - "Replace..." and "Insert..." commands with their Range equivalent.
   Same syntax as ddhx.
 - **Settings**: Add `writemode readonly`.

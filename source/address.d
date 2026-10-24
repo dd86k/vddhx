@@ -153,7 +153,7 @@ private:
 
 /// Parse an integer in the base its prefix names (0x, 0b, leading 0, else
 /// decimal). Refuses overflow.
-bool address_number(const(char)[] text, out long value) pure nothrow @safe @nogc
+public bool address_number(const(char)[] text, out long value) pure nothrow @safe @nogc
 {
     text = strip(text);
 

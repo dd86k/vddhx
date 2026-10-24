@@ -43,6 +43,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     Files files = keys_files();
     keys_open(files);
     keys_navigate();
+    keys_marks_file(files);
     keys_write(files);
     uiPickAuto = null;
 
@@ -318,10 +319,10 @@ void keys_quit()
 }
 
 /// `nav`: zeros with needles at NEEDLE_A and NEEDLE_B. `drop`, `edit`: copies.
-/// `saved`: doesn't exist yet.
+/// `saved`, `marks`: don't exist yet.
 struct Files
 {
-    string nav, drop, edit, saved, fresh;
+    string nav, drop, edit, saved, fresh, marks;
 }
 
 enum size_t NAV_SIZE = 0x1000;
@@ -346,10 +347,11 @@ Files keys_files()
     f.edit  = buildPath(dir, "edit.bin");
     f.saved = buildPath(dir, "saved.bin");
     f.fresh = buildPath(dir, "fresh.bin");
+    f.marks = buildPath(dir, "marks.txt");
     write(f.nav, bytes);
     write(f.drop, bytes);
     write(f.edit, bytes);
-    foreach (string gone; [ f.saved, f.fresh ])
+    foreach (string gone; [ f.saved, f.fresh, f.marks ])
         if (exists(gone))
             remove(gone);
     return f;
@@ -442,6 +444,30 @@ void keys_navigate()
     type("0xcafebabe");
     press(SDLK_RETURN);
     expect(low() == NEEDLE_A && ui_probe().marks == marks + 2, "Ctrl+F finds again");
+}
+
+void keys_marks_file(ref const(Files) f)
+{
+    void run(string command)
+    {
+        press(SDLK_P, CTRL | SHIFT);
+        type(command);
+        press(SDLK_RETURN);
+        frame();
+    }
+
+    // keys_navigate left the two needles marked.
+    size_t marks = ui_probe().marks;
+    uiPickAuto = f.marks;
+    run("Save Bookmarks");
+    expect(exists(f.marks) && cast(string) read(f.marks) ==
+        "# ddhx bookmarks\n0x100\t4\n0x300\t4\n", "Save Bookmarks... writes the ddhx format");
+
+    run("Clear Bookmarks");
+    run("Load Bookmarks");
+    expect(ui_probe().marks == marks, "Load Bookmarks... reads them back");
+    run("Load Bookmarks");
+    expect(ui_probe().marks == marks, "...merging with the ones there");
 }
 
 void keys_write(ref const(Files) f)
