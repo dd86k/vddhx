@@ -230,7 +230,8 @@ struct HexView
     long topRow;
     // Sub-row wheel remainder.
     int wheelAccum;
-    // Horizontal scroll, in glyphs so the edge never splits one.
+    // Horizontal scroll of the byte lanes, in glyphs so the edge never splits
+    // one. The offset column stays pinned.
     int leftCol;
     int wheelAccumX;
     // Rows that fit, measured per frame; for hex_set_caret scrolling between
@@ -894,9 +895,10 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     int charW = lay.charW;
 
     int originX = r.x - v.leftCol * charW;
+    int laneX = r.x + lay.hexStart * charW; // pinned offset title before it
     int endX = r.x + r.w - stripW;
-    if (hex_fits(originX, 6, charW, r.x, endX))
-        mu_draw_text(ctx, font, "offset", 6, mu_Vec2(originX, r.y), dim);
+    if (hex_fits(r.x, 6, charW, r.x, endX))
+        mu_draw_text(ctx, font, "offset", 6, mu_Vec2(r.x, r.y), dim);
 
     int cols = v.columns > 0 ? v.columns : 16;
     char[2] cell = void;
@@ -906,7 +908,7 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
         int x = originX + hex_col_for(lay, i) * charW;
         if (x + 2 * charW > endX)
             break; // past the edge
-        if (hex_fits(x, 2, charW, r.x, endX) == false)
+        if (hex_fits(x, 2, charW, laneX, endX) == false)
             continue;
         hex_format(cell.ptr, i % wrap, 2, v.offsetBase);
         mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(x, r.y), dim);
@@ -915,7 +917,7 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     // Text lane header shows the charset (its only display).
     const(char)[] label = v.textLabel.length ? v.textLabel : "ascii";
     int ax = originX + lay.asciiStart * charW;
-    if (hex_fits(ax, cast(int) label.length, charW, r.x, endX))
+    if (hex_fits(ax, cast(int) label.length, charW, laneX, endX))
         mu_draw_text(ctx, font, label.ptr, cast(int) label.length, mu_Vec2(ax, r.y), dim);
 
     mu_pop_clip_rect(ctx);
@@ -948,10 +950,10 @@ unittest
     enum int STRIP = MINIMAP_WIDTH;
 
     // Count two-glyph draws on line `topY` (header labels, hex pairs) and check
-    // all text stays in `startX .. endX`.
+    // all text stays in `startX .. endX`, lanes right of the pinned offset.
     int columnsOn(int topY, int startX, int endX)
     {
-        int drawn, columns;
+        int drawn, columns, pinned;
         mu_Command* cmd;
         while (mu_get_next_command(&ctx, &cmd))
         {
@@ -963,8 +965,13 @@ unittest
             assert(cmd.text.pos.x + w <= endX);
             if (w == 2 * CW && cmd.text.pos.y == topY)
                 ++columns;
+            if (w == 2 * CW)
+                assert(cmd.text.pos.x >= startX + lay.hexStart * CW);
+            else if (cmd.text.pos.y == topY && cmd.text.pos.x == startX)
+                ++pinned;
         }
         assert(drawn > 0); // else the checks pass vacuously
+        assert(pinned == 1); // offset title or row offset, even scrolled
         return columns;
     }
 
@@ -1195,9 +1202,11 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
 
     // Press places the caret, drag extends. mu_mouse_over respects the clip
     // (scrollbar, header excluded). Drags require the press in this grid, not
-    // focus: see HexView.dragSel. Hits are measured from the unscrolled origin.
+    // focus: see HexView.dragSel. Hits are measured from the unscrolled origin,
+    // except over the pinned offset column.
     mu_Rect grid = body;
-    grid.x -= v.leftCol * lay.charW;
+    if (ctx.mouse_pos.x >= body.x + lay.hexStart * lay.charW)
+        grid.x -= v.leftCol * lay.charW;
     v.hoverByte = mu_mouse_over(ctx, body) ?
         hex_hit(lay, grid, v.topRow, rowH, cols, total, ctx.mouse_pos.x, ctx.mouse_pos.y, true) :
         -1;
@@ -1453,7 +1462,8 @@ void hex_delete(ref HexView v, bool back, int cols, int visibleRows)
 }
 
 // Scroll the caret into view after a keyboard move; hex_view re-clamps.
-// Horizontally reveals the hex pair, scrolling fully left if it fits there.
+// Horizontally reveals the hex pair right of the pinned offset column,
+// scrolling fully left if it fits there.
 void hex_reveal(ref HexView v, size_t cursor, int cols, int visibleRows)
 {
     long row = cast(long)(cursor / cols);
@@ -1464,8 +1474,9 @@ void hex_reveal(ref HexView v, size_t cursor, int cols, int visibleRows)
 
     int start = hex_col_for(v.gridLay, cast(int)(cursor % cols));
     int end = start + 2;
-    if (start < v.leftCol)
-        v.leftCol = end <= v.visCols ? 0 : start;
+    int pin = v.gridLay.hexStart;
+    if (start - pin < v.leftCol)
+        v.leftCol = end <= v.visCols ? 0 : start - pin;
     else if (end - v.leftCol > v.visCols)
         v.leftCol = end - v.visCols;
 }
@@ -1484,7 +1495,7 @@ unittest
     hex_reveal(v, 14, 16, 4);
     assert(v.leftCol == hex_col_for(v.gridLay, 15) + 2 - 20); // already visible
     hex_reveal(v, 3, 16, 4);
-    assert(v.leftCol == hex_col_for(v.gridLay, 3));
+    assert(v.leftCol == hex_col_for(v.gridLay, 3) - v.gridLay.hexStart); // past the pin
     hex_reveal(v, 0, 16, 4);
     assert(v.leftCol == 0); // fits from the left
 }
@@ -1830,18 +1841,20 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     long rows  = (cast(long) total + cols - 1) / cols;
     int charW = lay.charW;
     int originX = body.x - v.leftCol * charW;
+    int laneX = body.x + lay.hexStart * charW;
+    int endX = body.x + body.w;
+    // Lanes scroll under the pinned offset column, clipped so rects stay off it.
+    // One pixel early: caret and outlines sit 1px outside their glyphs.
+    mu_Rect lanes = mu_Rect(laneX - 1, body.y, mu_max(0, endX - laneX + 1), body.h);
 
     // Empty document: draw the first offset and a caret.
     if (rows == 0)
     {
-        char[24] off = void;
-        int digits = lay.offsetDigits > off.length ? cast(int) off.length : lay.offsetDigits;
-        hex_format(off.ptr, cast(ulong) v.baseAddress, digits, v.offsetBase);
-        if (hex_fits(originX, digits, charW, body.x, body.x + body.w))
-            mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, body.y),
-                mu_Color(150, 150, 160, 255));
+        hex_draw_offset(ctx, v, lay, body.x, endX, body.y, 0, font);
+        mu_push_clip_rect(ctx, lanes);
         if (v.active)
             hex_draw_caret(ctx, lay, originX, body.y, 0, charW, rowH, hex_caret_nib(v));
+        mu_pop_clip_rect(ctx);
         return;
     }
 
@@ -1855,9 +1868,14 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     size_t selHigh = hex_sel_high(v);
 
     for (long row = firstRow; row <= lastRow; ++row)
+        hex_draw_offset(ctx, v, lay, body.x, endX,
+            body.y + cast(int)((row - topRow) * rowH), row * cols, font);
+
+    mu_push_clip_rect(ctx, lanes);
+    for (long row = firstRow; row <= lastRow; ++row)
     {
         int y = body.y + cast(int)((row - topRow) * rowH);
-        hex_draw_row(ctx, v, lay, colorFn, v.backFn, originX, body.x, body.x + body.w, y,
+        hex_draw_row(ctx, v, lay, colorFn, v.backFn, originX, laneX, endX, y,
             row, cols, rowH, charW, selLow, selHigh, font);
     }
 
@@ -1872,6 +1890,18 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
             hex_draw_caret(ctx, lay, originX, y, col, charW, rowH, hex_caret_nib(v));
         }
     }
+    mu_pop_clip_rect(ctx);
+}
+
+/// Draw the offset of byte `at` at `x`, if it fits before `endX`.
+void hex_draw_offset(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
+    int x, int endX, int y, long at, mu_Font font)
+{
+    char[24] off = void;
+    int digits = lay.offsetDigits > off.length ? cast(int) off.length : lay.offsetDigits;
+    hex_format(off.ptr, cast(ulong)(v.baseAddress + at), digits, v.offsetBase);
+    if (hex_fits(x, digits, lay.charW, x, endX))
+        mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(x, y), mu_Color(150, 150, 160, 255));
 }
 
 void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
@@ -1881,14 +1911,6 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     size_t total = hex_total(v);
     size_t rowStart = cast(size_t)(row * cols);
     int count = cast(int) mu_min(cast(size_t) cols, total - rowStart);
-
-    mu_Color offColor = mu_Color(150, 150, 160, 255);
-
-    char[24] off = void;
-    int digits = lay.offsetDigits > off.length ? cast(int) off.length : lay.offsetDigits;
-    hex_format(off.ptr, cast(ulong)(v.baseAddress + row * cols), digits, v.offsetBase);
-    if (hex_fits(originX, digits, charW, startX, endX))
-        mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, y), offColor);
 
     // Backgrounds by priority: hook wash, selection, then the wash outline. The
     // outline goes over the selection so a fresh mark under it stays visible.

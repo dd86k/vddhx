@@ -23,6 +23,10 @@ Rules:
 - Decimal and octal offsets: "Offset Format..." per view, `address` in Settings.
   Same values as ddhx.
 
+### Changed
+
+- The offset column stays in place when scrolling sideways.
+
 ## v0.1.1
 
 ### Added
