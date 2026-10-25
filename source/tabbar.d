@@ -109,7 +109,7 @@ private enum int TAB_DRAG_MIN = 4;
 /// Strip height: menubar height plus accent headroom and inactive tab lift.
 int tab_bar_height(mu_Context* ctx)
 {
-    return ctx.style.size.y + ctx.style.padding * 2 + TAB_HEADROOM + TAB_LIFT;
+    return mu_row_height(ctx) + TAB_HEADROOM + TAB_LIFT;
 }
 
 /// Draw and handle a tab strip. `selected`: active tab (-1 for none), `bar`:

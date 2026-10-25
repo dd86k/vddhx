@@ -237,9 +237,6 @@ __gshared int[] paneSizes;
 /// Minimum pane width when dragging: offsets and a few bytes stay legible.
 enum int PANE_MIN = 180;
 
-/// Widget row height beyond the text line, in points.
-private enum int ROW_SLACK = 3;
-
 /// Minimum pane height when dragging: tab strip and a row or two.
 enum int PANE_MIN_H = 120;
 
@@ -4660,10 +4657,6 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 {
     winW = width;
     winH = height;
-
-    // Widget rows (menubar, tabs, menus, settings) follow the text size. At
-    // 14 pt DejaVu (17 px line) this is ddui's default of 10.
-    ctx.style.size.y = mu_max(10, ctx.text_height(ctx.style.font) + ROW_SLACK - ctx.style.padding * 2);
 
     // Menubar flush with the window edges: zero padding across
     // mu_begin_window_ex (it fixes the body inset), restore after.
