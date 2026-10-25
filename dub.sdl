@@ -18,6 +18,9 @@ lflags "/ENTRY:mainCRTStartup" platform="windows-dmd"
 # bindbc-sdl's baseline is SDL 3.2.0
 versions "SDL_TTF_3_2_2"
 
+# Embedded last-resort font (source/render.d)
+stringImportPaths "assets/fonts"
+
 # dub build             # SDL3 loaded at runtime (source/loader.d)
 # dub build -c static   # SDL3 linked in, nothing to install
 configuration "application" {

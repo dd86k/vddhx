@@ -9,13 +9,12 @@ import core.stdc.string : strlen;
 import std.file : exists;
 import std.format : format;
 import std.math : ceil, lround;
-import std.path : baseName, buildPath;
+import std.path : buildPath;
 import std.string : fromStringz, toStringz;
 import bindbc.sdl; // re-exports TTF_* in the static config
 import ddlogger;
 import ddui;
 import elite : MU_COMMAND_SHIP, elite_draw;
-import icon : exeDir;
 
 // Sets the scale only; render_text_height reports actual line height.
 private enum float FONT_SIZE = 14.0f;
@@ -158,8 +157,8 @@ else
 // Set by render_init; per-user on Windows and macOS.
 private __gshared string[] fontDirs;
 
-// Bundled fonts beside the executable, same names. Last resort.
-private __gshared string bundledDir;
+/// DejaVu Sans Mono, built in. UI and mono face when nothing else opens.
+private immutable ubyte[] embeddedFont = cast(immutable(ubyte)[]) import("DejaVuSansMono.ttf");
 
 version (OSX) {}
 else version (Posix) version = Fontconfig;
@@ -203,19 +202,22 @@ string render_init(SDL_Renderer* renderer)
     SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
 
     fontDirs = font_dirs();
-    bundledDir = buildPath(exeDir(), "assets", "fonts");
 
     // Missing faces are reported without SDL_GetError: SDL wasn't involved.
     fontUI = openFace("UI", "sans-serif", 0, uiNames);
     if (fontUI is null)
+        fontUI = openEmbedded("UI");
+    if (fontUI is null)
     {
-        logCritical("no UI font; looked for %-(%s, %) in %-(%s, %), %s", uiNames, fontDirs, bundledDir);
+        logCritical("no UI font; looked for %-(%s, %) in %-(%s, %)", uiNames, fontDirs);
         return "No font found.\n\nInstall a TrueType font: fonts-noto or " ~
             "fonts-dejavu will do.";
     }
 
     // No mono face: not fatal, hex panel is just unaligned.
     fontMono = openFace("mono", "monospace", 0, monoNames);
+    if (fontMono is null)
+        fontMono = openEmbedded("mono");
     if (fontMono is null)
     {
         logWarn("no monospace font, falling back to the UI face (the hex grid " ~
@@ -380,8 +382,8 @@ string[] driverNames()
     return names;
 }
 
-// Open a face: fontconfig match first, then known files, installed before
-// bundled. `probe`: required codepoint, or 0.
+// Open a face: fontconfig match first, then known files.
+// `probe`: required codepoint, or 0.
 TTF_Font* openFace(string role, string pattern, dchar probe, const(string)[] names)
 {
     string matched = fc_match(pattern);
@@ -393,10 +395,6 @@ TTF_Font* openFace(string role, string pattern, dchar probe, const(string)[] nam
         foreach (string dir; fontDirs)
             if (TTF_Font* f = openPath(role, buildPath(dir, name), probe))
                 return f;
-
-    foreach (string name; names)
-        if (TTF_Font* f = openPath(role, buildPath(bundledDir, baseName(name)), probe))
-            return f;
 
     return null;
 }
@@ -415,6 +413,22 @@ TTF_Font* openPath(string role, string path, dchar probe)
     }
     TTF_CloseFont(f);
     return null;
+}
+
+/// Open the built-in face for `role`, or null.
+TTF_Font* openEmbedded(string role)
+{
+    SDL_IOStream* io = SDL_IOFromConstMem(embeddedFont.ptr, embeddedFont.length);
+    if (io is null)
+        return null;
+    TTF_Font* f = TTF_OpenFontIO(io, true, FONT_SIZE);
+    if (f is null)
+    {
+        logWarn("embedded font: %s", SDL_GetError().fromStringz);
+        return null;
+    }
+    logInfo("%s face: embedded DejaVu Sans Mono", role);
+    return f;
 }
 
 // Open a fallback face and add it to both primaries.
