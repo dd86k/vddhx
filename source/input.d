@@ -98,6 +98,14 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
                 ui_omni_toggle(OMNI_FIND);
                 break;
             }
+            // Text size, any time. Plus too: some layouts have it unshifted.
+            switch (event.key.key)
+            {
+            case SDLK_EQUALS, SDLK_PLUS, SDLK_KP_PLUS: ui_zoom(1);  return;
+            case SDLK_MINUS, SDLK_KP_MINUS:            ui_zoom(-1); return;
+            case SDLK_0, SDLK_KP_0:                    ui_zoom(0);  return;
+            default:
+            }
         }
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_ALT &&
             event.key.key == SDLK_I)

@@ -15,9 +15,11 @@ import bindbc.sdl; // re-exports TTF_* in the static config
 import ddlogger;
 import ddui;
 import elite : MU_COMMAND_SHIP, elite_draw;
+import preferences : FONT_SIZE, FONT_SIZE_MAX, FONT_SIZE_MIN;
 
-// Sets the scale only; render_text_height reports actual line height.
-private enum float FONT_SIZE = 14.0f;
+/// Text size in points, before density. Sets the scale only,
+/// render_text_height reports actual line height.
+private __gshared float fontSize = FONT_SIZE;
 
 // Output pixels per point. ddui works in points; geometry is mapped here and
 // faces are sized to match, so glyphs rasterise at output resolution.
@@ -290,17 +292,22 @@ void render_set_density(float d)
         return;
     logInfo("pixel density: %g", d);
     density = d;
-
-    TTF_SetFontSize(fontUI, FONT_SIZE * d);
-    if (fontMono !is fontUI)
-        TTF_SetFontSize(fontMono, FONT_SIZE * d);
-    foreach (TTF_Font* f; fallbacks[0 .. fallbackCount])
-        TTF_SetFontSize(f, FONT_SIZE * d);
-
-    foreach (ref TextEntry e; textCache)
-        TTF_DestroyText(e.text);
-    textCache = null;
+    resize();
 }
+
+/// Set the text size in points, clamped to FONT_SIZE_MIN..FONT_SIZE_MAX.
+void render_set_size(int pt)
+{
+    if (pt < FONT_SIZE_MIN) pt = FONT_SIZE_MIN;
+    if (pt > FONT_SIZE_MAX) pt = FONT_SIZE_MAX;
+    if (pt == fontSize)
+        return;
+    fontSize = pt;
+    resize();
+}
+
+/// Text size in points.
+int render_size() => cast(int) fontSize;
 
 /// mu_Context text measuring callbacks. `font` is a TTF_Font*.
 extern (C) int render_text_width(mu_Font font, const(char)* str, int len)
@@ -370,6 +377,21 @@ mu_Rect toPixels(mu_Rect r)
 }
 int toPixels(int v) => cast(int) lround(v * density);
 
+/// Apply fontSize and density to every face and drop shaped text.
+void resize()
+{
+    float px = fontSize * density;
+    TTF_SetFontSize(fontUI, px);
+    if (fontMono !is fontUI)
+        TTF_SetFontSize(fontMono, px);
+    foreach (TTF_Font* f; fallbacks[0 .. fallbackCount])
+        TTF_SetFontSize(f, px);
+
+    foreach (ref TextEntry e; textCache)
+        TTF_DestroyText(e.text);
+    textCache = null;
+}
+
 // Round up so text-sized boxes don't clip.
 int toPoints(int v) => cast(int) ceil(v / density);
 
@@ -403,7 +425,7 @@ TTF_Font* openPath(string role, string path, dchar probe)
 {
     if (exists(path) == false)
         return null;
-    TTF_Font* f = TTF_OpenFont(path.toStringz, FONT_SIZE);
+    TTF_Font* f = TTF_OpenFont(path.toStringz, fontSize * density);
     if (f is null)
         return null;
     if (probe == 0 || TTF_FontHasGlyph(f, probe))
@@ -421,7 +443,7 @@ TTF_Font* openEmbedded(string role)
     SDL_IOStream* io = SDL_IOFromConstMem(embeddedFont.ptr, embeddedFont.length);
     if (io is null)
         return null;
-    TTF_Font* f = TTF_OpenFontIO(io, true, FONT_SIZE);
+    TTF_Font* f = TTF_OpenFontIO(io, true, fontSize * density);
     if (f is null)
     {
         logWarn("embedded font: %s", SDL_GetError().fromStringz);

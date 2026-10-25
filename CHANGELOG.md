@@ -22,6 +22,9 @@ Rules:
 - **Settings**: Add `writemode readonly`.
 - Decimal and octal offsets: "Offset Format..." per view, `address` in Settings.
   Same values as ddhx.
+- **Settings**: Text size (`fontsize`). Ctrl+= and Ctrl+- zoom for the session,
+  Ctrl+0 goes back to the setting.
+- Built-in font, used when the system has none.
 
 ### Changed
 

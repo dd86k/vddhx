@@ -13,6 +13,13 @@ import hexview : HEX_COLUMNS_MAX, HexBase;
 /// Mode new tabs start in. Read-only only sets the tab's starting state.
 enum WriteMode { overwrite, insert, readonly }
 
+/// Default text size in points.
+enum int FONT_SIZE = 14;
+/// Smallest text size in points.
+enum int FONT_SIZE_MIN = 6;
+/// Largest text size in points.
+enum int FONT_SIZE_MAX = 72;
+
 /// Copied into documents and views on creation; changes don't affect open ones.
 struct Prefs
 {
@@ -23,6 +30,7 @@ struct Prefs
     HexBase address;        /// Offset base default.
     bool minimap = true;    /// Show minimap.
     bool crumbs = true;     /// Show breadcrumbs.
+    int fontsize = FONT_SIZE;   /// Text size in points.
 }
 
 /// Ditto.
@@ -31,7 +39,7 @@ __gshared Prefs prefs;
 /// All keys, in the order a new file lists them.
 immutable string[] PREFS_KEYS = [
     "columns", "charset", "endian", "writemode", "address", "minimap",
-    "breadcrumbs",
+    "breadcrumbs", "fontsize",
 ];
 
 private enum string APPNAME = "vddhx";
@@ -163,6 +171,17 @@ bool prefs_set(ref Prefs p, string key, string value)
         }
     case "minimap":     return prefs_bool(value, p.minimap);
     case "breadcrumbs": return prefs_bool(value, p.crumbs);
+    case "fontsize":
+        import std.conv : to;
+        int pt;
+        try
+            pt = to!int(value);
+        catch (Exception)
+            return false;
+        if (pt < FONT_SIZE_MIN || pt > FONT_SIZE_MAX)
+            return false;
+        p.fontsize = pt;
+        return true;
     default:            return false;
     }
 }
@@ -181,6 +200,7 @@ string prefs_get(ref const(Prefs) p, string key)
     case "address":     return to!string(p.address);
     case "minimap":     return p.minimap ? "on" : "off";
     case "breadcrumbs": return p.crumbs ? "on" : "off";
+    case "fontsize":    return to!string(p.fontsize);
     default:            assert(false, key);
     }
 }
@@ -330,5 +350,10 @@ unittest
     assert(p.address == HexBase.dec);
     assert(prefs_set(p, "address", "binary") == false);
     assert(prefs_set(p, "minimap", "true") == false);
+    assert(prefs_set(p, "fontsize", "18"));
+    assert(p.fontsize == 18);
+    assert(prefs_get(p, "fontsize") == "18");
+    assert(prefs_set(p, "fontsize", "5") == false);
+    assert(prefs_set(p, "fontsize", "big") == false);
     assert(prefs_set(p, "nope", "on") == false);
 }

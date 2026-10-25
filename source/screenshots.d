@@ -989,6 +989,14 @@ int screenshot_run(string[] args)
     mu_input_mousemove(&ctx, 400, 400);
     frame();
 
+    // Text size: four points up, then back. Grid rows and lanes follow the face.
+    foreach (int i; 0 .. 4)
+        ui_zoom(1);
+    frame(); frame();
+    shot("zoom.bmp");
+    ui_zoom(0);
+    frame();
+
     // Scenario 15: bookmarks, one byte then four, in grid and minimap. The mark is
     // under the selection, so shot-mark-range shows after the caret moves.
     ui_mark_toggle();

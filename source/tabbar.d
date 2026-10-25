@@ -100,6 +100,8 @@ private enum int TAB_PAD      = 4; // added to style.padding
 private enum int TAB_INSET    = 4; // left of first tab
 private enum int TAB_BAR_H    = 3; // progress bar height
 private enum int TAB_LOCK_W   = 8; // padlock body width
+/// Line height the dot and padlock are drawn for at 1x.
+private enum int TAB_ICON_TH  = 17;
 
 // Drag threshold, so hand jitter on click doesn't reorder.
 private enum int TAB_DRAG_MIN = 4;
@@ -434,7 +436,7 @@ int tab_width(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     if (tag.length)
         tw += ctx.text_width(ctx.style.font, tag.ptr, cast(int) tag.length) + inset;
     if (it.locked)
-        tw += TAB_LOCK_W + inset;
+        tw += TAB_LOCK_W * tab_scale(closeW) + inset;
     return mu_clamp(tw + closeW + inset * 2 + TAB_GAP, bar.minWidth, bar.maxWidth);
 }
 
@@ -541,16 +543,20 @@ unittest
     assert(tab_float_x(500, sliver, 10, 300, 100) == 10);
 }
 
-// Padlock TAB_LOCK_W wide at `x`, centred on a `th` line at `y`. Drawn with
-// rects; the UI font may lack a glyph.
+/// Whole-number scale for the dot and padlock on a `th` line, so they stay crisp.
+int tab_scale(int th) => mu_max(1, th / TAB_ICON_TH);
+
+// Padlock TAB_LOCK_W wide (scaled) at `x`, centred on a `th` line at `y`. Drawn
+// with rects; the UI font may lack a glyph.
 void tab_lock(mu_Context* ctx, int x, int y, int th, mu_Color ink)
 {
-    enum int BODY_H = 6, SHACKLE_H = 4, STROKE = 2;
-    int top = y + (th - BODY_H - SHACKLE_H) / 2;
-    mu_draw_rect(ctx, mu_Rect(x + 1, top, TAB_LOCK_W - 2, STROKE), ink);
-    mu_draw_rect(ctx, mu_Rect(x + 1, top, STROKE, SHACKLE_H), ink);
-    mu_draw_rect(ctx, mu_Rect(x + TAB_LOCK_W - 1 - STROKE, top, STROKE, SHACKLE_H), ink);
-    mu_draw_rect(ctx, mu_Rect(x, top + SHACKLE_H, TAB_LOCK_W, BODY_H), ink);
+    int k = tab_scale(th);
+    int body = 6 * k, shackle = 4 * k, stroke = 2 * k, w = TAB_LOCK_W * k;
+    int top = y + (th - body - shackle) / 2;
+    mu_draw_rect(ctx, mu_Rect(x + k, top, w - 2 * k, stroke), ink);
+    mu_draw_rect(ctx, mu_Rect(x + k, top, stroke, shackle), ink);
+    mu_draw_rect(ctx, mu_Rect(x + w - k - stroke, top, stroke, shackle), ink);
+    mu_draw_rect(ctx, mu_Rect(x, top + shackle, w, body), ink);
 }
 
 // Flush right; an inset would waste label room.
@@ -584,11 +590,12 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     // Same baseline for all tabs so labels don't jump.
     int textY = r.y + TAB_HEADROOM + (r.h - TAB_HEADROOM - th) / 2;
 
-    if (it.locked && textW > TAB_LOCK_W + inset)
+    int lockW = TAB_LOCK_W * tab_scale(th);
+    if (it.locked && textW > lockW + inset)
     {
         tab_lock(ctx, textX, textY, th, ink);
-        textX += TAB_LOCK_W + inset;
-        textW -= TAB_LOCK_W + inset;
+        textX += lockW + inset;
+        textW -= lockW + inset;
     }
 
     // View count, dropped if it would force eliding the label (even-share layout
@@ -628,8 +635,9 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     if (it.modified && closeHot == false)
     {
         // Dot in place of the X, swapped on hover.
-        mu_draw_rect(ctx, mu_Rect(closeR.x + (closeR.w - TAB_DOT) / 2,
-            closeR.y + (closeR.h - TAB_DOT) / 2, TAB_DOT, TAB_DOT), ink);
+        int dot = TAB_DOT * tab_scale(th);
+        mu_draw_rect(ctx, mu_Rect(closeR.x + (closeR.w - dot) / 2,
+            closeR.y + (closeR.h - dot) / 2, dot, dot), ink);
     }
     else if (active || bodyHot || closeHot)
     {

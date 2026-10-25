@@ -147,6 +147,7 @@ int main(string[] args)
 
     // Before ui_init: the first tab uses the defaults.
     prefs_load();
+    ui_zoom(0);
 
     // Window is the parent for native file dialogs.
     ui_init(window);

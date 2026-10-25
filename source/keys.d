@@ -14,6 +14,7 @@ import ddlogger;
 import ddui;
 import input : input_event;
 import omnibar : OmniMode;
+import render : render_size;
 import ui;
 
 private __gshared mu_Context* ctx;
@@ -35,6 +36,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     keys_omnibar();
     keys_tabs();
     keys_panes();
+    keys_zoom();
     keys_caret();
     keys_edit();
     keys_patterns();
@@ -209,6 +211,19 @@ void keys_panes()
         press(SDLK_W, CTRL);
     }
     expect(ui_probe().pane == 0, "back to one pane");
+}
+
+/// Text size shortcuts: a point per press, Ctrl+0 back to the setting.
+void keys_zoom()
+{
+    int base = render_size();
+    press(SDLK_EQUALS, CTRL);
+    press(SDLK_KP_PLUS, CTRL);
+    expect(render_size() == base + 2, "Ctrl+= and Ctrl+keypad+ grow the text");
+    press(SDLK_MINUS, CTRL);
+    expect(render_size() == base + 1, "Ctrl+- shrinks the text");
+    press(SDLK_0, CTRL);
+    expect(render_size() == base, "Ctrl+0 restores the text size");
 }
 
 void keys_caret()

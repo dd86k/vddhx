@@ -13,7 +13,7 @@ import ddhx.editor : IDocumentEditor;
 import ddhx.editor.piecev4 : PieceV4DocumentEditor;
 import about : about_open, about_frame;
 import settings : settings_page;
-import preferences : prefs, prefs_save, WriteMode;
+import preferences : prefs, prefs_save, WriteMode, FONT_SIZE_MAX, FONT_SIZE_MIN;
 import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
 import edit : EditRequest, edit_parse;
@@ -35,7 +35,7 @@ import worker : BackgroundWorker, worker_pump, worker_wake;
 import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector;
 import ddhx.charset : Charset, charsets, ASCII;
 import std.system : Endian;
-import render : render_font_mono;
+import render : render_font_mono, render_set_size;
 import std.array : Appender, appender;
 import std.format : format, sformat, formattedWrite;
 import std.path : baseName;
@@ -236,6 +236,9 @@ __gshared int[] paneSizes;
 
 /// Minimum pane width when dragging: offsets and a few bytes stay legible.
 enum int PANE_MIN = 180;
+
+/// Widget row height beyond the text line, in points.
+private enum int ROW_SLACK = 3;
 
 /// Minimum pane height when dragging: tab strip and a row or two.
 enum int PANE_MIN_H = 120;
@@ -2526,6 +2529,7 @@ enum
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_MARK_LOAD, CMD_MARK_SAVE,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
+    CMD_ZOOM_IN, CMD_ZOOM_OUT, CMD_ZOOM_RESET,
     CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_COLUMNS, CMD_CHARSET, CMD_ADDRESS,
     CMD_SETTINGS, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
 }
@@ -2576,6 +2580,9 @@ immutable Entry[] COMMANDS = [
     Entry("Close Pane",       "",             CMD_CLOSE_PANE,   "unsplit remove"),
     Entry("Next Pane",        "",             CMD_PANE_NEXT,    "forward switch go"),
     Entry("Previous Pane",    "",             CMD_PANE_PREV,    "back backward switch go"),
+    Entry("Zoom In",          "Ctrl+=",       CMD_ZOOM_IN,      "font text size bigger larger increase magnify"),
+    Entry("Zoom Out",         "Ctrl+-",       CMD_ZOOM_OUT,     "font text size smaller decrease shrink"),
+    Entry("Reset Zoom",       "Ctrl+0",       CMD_ZOOM_RESET,   "font text size default normal actual restore"),
     Entry("Toggle Minimap",   "",             CMD_MINIMAP,      "ribbon overview scrollbar sidebar"),
     Entry("Toggle Breadcrumbs","",            CMD_CRUMBS,       "crumbs path field structure format layout trail"),
     Entry("Toggle Byte Order","",             CMD_ENDIAN,       "endian endianness little big le be swap order inspector pattern"),
@@ -2622,6 +2629,8 @@ immutable Entry[] SHORTCUTS = [
     Entry("Find",                         "Ctrl+F"),
     Entry("Find next / previous",         "Ctrl+N / Ctrl+Shift+N"),
     Entry("Inspect bytes at the caret",   "Alt+I"),
+    Entry("Text size bigger / smaller",   "Ctrl+= / Ctrl+-"),
+    Entry("Text size back to the setting", "Ctrl+0"),
     Entry("Toggle bookmark",              "Ctrl+B"),
     Entry("Name the bookmark at the caret", "Ctrl+Shift+B"),
     Entry("Next / previous bookmark",     "] / ["),
@@ -3178,6 +3187,22 @@ public void ui_toggle_crumbs()
 {
     prefs.crumbs = prefs.crumbs == false;
     cast(void) prefs_save();
+}
+
+/// Session zoom in points, on top of the saved text size.
+private __gshared int zoom;
+
+/// Grow (1) or shrink (-1) the text a point for this session, or go back to
+/// the saved size (0). Also applies a changed saved size.
+public void ui_zoom(int step)
+{
+    int pt = step ? prefs.fontsize + zoom + step : prefs.fontsize;
+    if (pt < FONT_SIZE_MIN) pt = FONT_SIZE_MIN;
+    if (pt > FONT_SIZE_MAX) pt = FONT_SIZE_MAX;
+    zoom = pt - prefs.fontsize;
+    render_set_size(pt);
+    if (step)
+        ui_status("text size %d pt", pt);
 }
 
 /// Set the document's charset (shared by its views). No message: the lane
@@ -4570,6 +4595,9 @@ void ui_omni_run(int id)
     case CMD_COPY:      cast(void)ui_copy();             break;
     case CMD_COPY_TEXT: cast(void)ui_copy_text();        break;
     case CMD_PASTE:     ui_paste();            break;
+    case CMD_ZOOM_IN:   ui_zoom(1);            break;
+    case CMD_ZOOM_OUT:  ui_zoom(-1);           break;
+    case CMD_ZOOM_RESET: ui_zoom(0);           break;
     case CMD_MINIMAP:   ui_toggle_minimap();   break;
     case CMD_CRUMBS:    ui_toggle_crumbs();    break;
     case CMD_ENDIAN:    ui_endian_toggle();    break;
@@ -4632,6 +4660,10 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 {
     winW = width;
     winH = height;
+
+    // Widget rows (menubar, tabs, menus, settings) follow the text size. At
+    // 14 pt DejaVu (17 px line) this is ddui's default of 10.
+    ctx.style.size.y = mu_max(10, ctx.text_height(ctx.style.font) + ROW_SLACK - ctx.style.padding * 2);
 
     // Menubar flush with the window edges: zero padding across
     // mu_begin_window_ex (it fixes the body inset), restore after.
@@ -5470,6 +5502,10 @@ void ui_menubar(mu_Context* ctx)
             ui_toggle_minimap();
         if (mu_menu_item_ex(ctx, "Breadcrumbs", prefs.crumbs ? "On" : "Off", 0, 0))
             ui_toggle_crumbs();
+        mu_menu_separator(ctx);
+        if (mu_menu_item_ex(ctx, "Zoom In",    "Ctrl+=", 0, 0)) ui_zoom(1);
+        if (mu_menu_item_ex(ctx, "Zoom Out",   "Ctrl+-", 0, 0)) ui_zoom(-1);
+        if (mu_menu_item_ex(ctx, "Reset Zoom", "Ctrl+0", 0, 0)) ui_zoom(0);
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }

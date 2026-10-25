@@ -10,6 +10,7 @@ import ddui;
 import ddhx.charset : Charset, charsets;
 import preferences;
 import hexview : HexBase;
+import ui : ui_zoom;
 
 private enum int CATEGORY_W = 120;
 private enum int LABEL_W = 120;
@@ -85,22 +86,24 @@ void settings_label(mu_Context* ctx, string label)
 
 // Shows the current value until edited; input is committed on Enter or blur,
 // so typing "24" doesn't save "2" first.
-struct ColumnsBox
+struct ValueBox
 {
     char[16] buf;
     bool editing;
 }
 
-bool settings_columns(mu_Context* ctx, ref ColumnsBox box, string key, int current, out int cols)
+/// Text box for one saved key, true when a valid value was committed to prefs.
+bool settings_value(mu_Context* ctx, ref ValueBox box, string key)
 {
-    import std.format : sformat;
+    import core.stdc.string : strlen;
 
     mu_Id id = mu_get_id(ctx, key.ptr, key.length);
     if (ctx.focus != id && box.editing == false)
     {
-        char[] text = current ? sformat(box.buf[0 .. $ - 1], "%d", current)
-                              : sformat(box.buf[0 .. $ - 1], "auto");
-        box.buf[text.length] = 0;
+        string text = prefs_get(prefs, key);
+        size_t n = text.length < box.buf.length ? text.length : box.buf.length - 1;
+        box.buf[0 .. n] = text[0 .. n];
+        box.buf[n] = 0;
     }
 
     int res = mu_textbox_raw(ctx, box.buf.ptr, cast(int) box.buf.length, id, mu_layout_next(ctx), 0);
@@ -111,12 +114,8 @@ bool settings_columns(mu_Context* ctx, ref ColumnsBox box, string key, int curre
         return false;
     box.editing = false;
 
-    import core.stdc.string : strlen;
-    Prefs parsed;
-    if (prefs_set(parsed, "columns", cast(string) box.buf[0 .. strlen(box.buf.ptr)]) == false)
-        return false; // next frame restores the current value
-    cols = parsed.columns;
-    return true;
+    // Invalid input: the next frame restores the current value.
+    return prefs_set(prefs, key, cast(string) box.buf[0 .. strlen(box.buf.ptr)]);
 }
 
 bool settings_charset(mu_Context* ctx, ref int index, immutable(Charset)* current)
@@ -161,20 +160,16 @@ bool settings_address(mu_Context* ctx, ref int index, HexBase current)
 void settings_defaults(mu_Context* ctx)
 {
     // Separate statics: dropdowns are identified by their index's address.
-    __gshared ColumnsBox columns;
+    __gshared ValueBox columns;
     __gshared int charset, endian, writemode, address;
 
     settings_note(ctx, "What new tabs start with.");
 
     bool changed;
 
-    int cols;
     settings_label(ctx, "Columns");
-    if (settings_columns(ctx, columns, "default-columns", prefs.columns, cols))
-    {
-        prefs.columns = cols;
+    if (settings_value(ctx, columns, "columns"))
         changed = true;
-    }
 
     settings_label(ctx, "Character set");
     if (settings_charset(ctx, charset, prefs.charset))
@@ -210,8 +205,16 @@ void settings_defaults(mu_Context* ctx)
 void settings_appearance(mu_Context* ctx)
 {
     __gshared int minimap, crumbs;
+    __gshared ValueBox fontsize;
 
     bool changed;
+
+    settings_label(ctx, "Text size");
+    if (settings_value(ctx, fontsize, "fontsize"))
+    {
+        ui_zoom(0);
+        changed = true;
+    }
 
     settings_label(ctx, "");
     minimap = prefs.minimap;
