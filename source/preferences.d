@@ -31,6 +31,8 @@ struct Prefs
     bool minimap = true;    /// Show minimap.
     bool crumbs = true;     /// Show breadcrumbs.
     int fontsize = FONT_SIZE;   /// Text size in points.
+    string font;        /// UI font file or name, empty for the default.
+    string monofont;    /// Hex panel font file or name, empty for the default.
 }
 
 /// Ditto.
@@ -39,7 +41,7 @@ __gshared Prefs prefs;
 /// All keys, in the order a new file lists them.
 immutable string[] PREFS_KEYS = [
     "columns", "charset", "endian", "writemode", "address", "minimap",
-    "breadcrumbs", "fontsize",
+    "breadcrumbs", "fontsize", "font", "monofont",
 ];
 
 private enum string APPNAME = "vddhx";
@@ -182,6 +184,8 @@ bool prefs_set(ref Prefs p, string key, string value)
             return false;
         p.fontsize = pt;
         return true;
+    case "font":        p.font = value;     return true;
+    case "monofont":    p.monofont = value; return true;
     default:            return false;
     }
 }
@@ -201,11 +205,30 @@ string prefs_get(ref const(Prefs) p, string key)
     case "minimap":     return p.minimap ? "on" : "off";
     case "breadcrumbs": return p.crumbs ? "on" : "off";
     case "fontsize":    return to!string(p.fontsize);
+    case "font":        return prefs_quote(p.font);
+    case "monofont":    return prefs_quote(p.monofont);
     default:            assert(false, key);
     }
 }
 
 private:
+
+/// `value` as one argument for the file: bare, single-quoted if it has spaces
+/// or quotes, double-quoted with escapes if it also has a single quote.
+string prefs_quote(string value)
+{
+    import std.algorithm.searching : any, canFind;
+    import std.ascii : isWhite;
+    import std.array : replace;
+
+    if (value.length == 0)
+        return value;
+    if (value.any!(c => isWhite(c) || c == '"' || c == '\'') == false && value[0] != '#')
+        return value;
+    if (value.canFind('\'') == false)
+        return "'" ~ value ~ "'";
+    return `"` ~ value.replace(`\`, `\\`).replace(`"`, `\"`) ~ `"`;
+}
 
 // Same values as ddhx's configuration.boolean.
 bool prefs_bool(string value, ref bool field)
@@ -279,7 +302,8 @@ void prefs_merge(ref string[] text, ref const(Prefs) p)
 
     foreach (string key; PREFS_KEYS)
     {
-        string line = key ~ " " ~ prefs_get(p, key);
+        string line = prefs_get(p, key);
+        line = line.length ? key ~ " " ~ line : key;
 
         ptrdiff_t at = -1;
         foreach (size_t i, string l; text)
@@ -356,4 +380,13 @@ unittest
     assert(prefs_set(p, "fontsize", "5") == false);
     assert(prefs_set(p, "fontsize", "big") == false);
     assert(prefs_set(p, "nope", "on") == false);
+
+    // Font names round-trip through quoting.
+    foreach (string name; [ "Iosevka", "DejaVu Sans Mono", "it's.ttf", `C:\f "x".ttf`, "#x" ])
+    {
+        string[] text = [ "font " ~ prefs_quote(name) ];
+        Prefs q;
+        prefs_parse(q, text, "test");
+        assert(q.font == name, q.font);
+    }
 }

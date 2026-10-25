@@ -24,6 +24,7 @@ Rules:
   Same values as ddhx.
 - **Settings**: Text size (`fontsize`). Ctrl+= and Ctrl+- zoom for the session,
   Ctrl+0 goes back to the setting.
+- **Settings**: UI and hex fonts (`font`, `monofont`), by file or font name.
 - Built-in font, used when the system has none.
 
 ### Changed

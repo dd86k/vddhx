@@ -35,7 +35,8 @@ import worker : BackgroundWorker, worker_pump, worker_wake;
 import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector;
 import ddhx.charset : Charset, charsets, ASCII;
 import std.system : Endian;
-import render : render_font_mono, render_set_size;
+import render : render_font_mono, render_font_spec, render_font_ui, render_set_font,
+    render_set_size;
 import std.array : Appender, appender;
 import std.format : format, sformat, formattedWrite;
 import std.path : baseName;
@@ -482,6 +483,8 @@ enum Pick
     compare,   /// Diff against compareFrom.
     marksLoad, /// Load bookmarks into marksFrom.
     marksSave, /// Save the bookmarks of marksFrom.
+    font,      /// Set as the UI font.
+    monofont,  /// Set as the hex panel font.
 }
 /// Ditto.
 __gshared Pick pendingPick;
@@ -1557,7 +1560,8 @@ public void ui_drop_file(string path, int x, int y)
 }
 
 // All native file dialogs go through here so scripted runs can answer them.
-void ui_file_dialog(SDL_DialogFileCallback picked, bool save)
+void ui_file_dialog(SDL_DialogFileCallback picked, bool save,
+    const(SDL_DialogFileFilter)[] filters = null)
 {
     version (Screenshots)
     {
@@ -1571,7 +1575,8 @@ void ui_file_dialog(SDL_DialogFileCallback picked, bool save)
     if (save)
         SDL_ShowSaveFileDialog(picked, null, uiWindow, null, 0, null);
     else
-        SDL_ShowOpenFileDialog(picked, null, uiWindow, null, 0, null, false);
+        SDL_ShowOpenFileDialog(picked, null, uiWindow, filters.ptr, cast(int) filters.length,
+            null, false);
 }
 
 /// Native Open dialog, async: ui_on_file_picked stores the path, the next frame
@@ -3186,6 +3191,52 @@ public void ui_toggle_crumbs()
     cast(void) prefs_save();
 }
 
+/// Font settings wait for the next frame start, see ui_fonts.
+private __gshared bool fontsPending, fontsSave;
+
+/// Apply prefs.font and prefs.monofont at the next frame start, then save
+/// them if `save`. A saved font that fails to open is put back.
+public void ui_fonts(bool save)
+{
+    fontsPending = true;
+    fontsSave |= save;
+    ui_wakeup();
+}
+
+/// Font picker for the UI (`mono` false) or hex panel font.
+public void ui_font_dialog(bool mono)
+{
+    static immutable SDL_DialogFileFilter[1] filter = [
+        SDL_DialogFileFilter("Fonts", "ttf;otf;ttc"),
+    ];
+    pendingPick = mono ? Pick.monofont : Pick.font;
+    ui_file_dialog(&ui_on_file_picked, false, filter);
+}
+
+/// Open the pending font settings, see ui_fonts.
+private void ui_fonts_apply()
+{
+    if (fontsPending == false)
+        return;
+    fontsPending = false;
+
+    string*[2] specs = [ &prefs.font, &prefs.monofont ];
+    foreach (size_t i, string* spec; specs)
+    {
+        bool mono = i == 1;
+        if (render_set_font(mono, *spec))
+            continue;
+        ui_status("%s font not found: %s", mono ? "hex" : "UI", *spec);
+        // Keep the file's value at startup: the font may come back.
+        if (fontsSave)
+            *spec = render_font_spec(mono);
+    }
+
+    if (fontsSave)
+        cast(void) prefs_save();
+    fontsSave = false;
+}
+
 /// Session zoom in points, on top of the saved text size.
 private __gshared int zoom;
 
@@ -4663,6 +4714,10 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     int padding = ctx.style.padding;
     ctx.style.padding = 0;
 
+    // Before any draw command: queued text holds the face.
+    ui_fonts_apply();
+    ctx.style.font = render_font_ui();
+
     // ddui only clamps vertical scroll; pin x.
     mu_get_container(ctx, "vddhx").scroll.x = 0;
 
@@ -4700,6 +4755,8 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             case Pick.compare:   ui_compare_with(picked); break;
             case Pick.marksLoad: ui_marks_load(picked); break;
             case Pick.marksSave: ui_marks_save(picked); break;
+            case Pick.font:      prefs.font = picked;     ui_fonts(true); break;
+            case Pick.monofont:  prefs.monofont = picked; ui_fonts(true); break;
             }
         }
 

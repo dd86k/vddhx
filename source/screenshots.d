@@ -20,6 +20,7 @@ import ddlogger;
 import ddui;
 import hexview : HexBase, HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
+import preferences : prefs;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
@@ -995,6 +996,17 @@ int screenshot_run(string[] args)
     frame(); frame();
     shot("zoom.bmp");
     ui_zoom(0);
+    frame();
+
+    // Fonts swap between frames: the UI takes the mono face, the hex font is
+    // missing and stays.
+    prefs.font = "assets/fonts/DejaVuSansMono.ttf";
+    prefs.monofont = "No Such Font";
+    ui_fonts(false);
+    frame(); frame();
+    shot("fonts.bmp");
+    prefs.font = prefs.monofont = null;
+    ui_fonts(false);
     frame();
 
     // Scenario 15: bookmarks, one byte then four, in grid and minimap. The mark is

@@ -6,7 +6,7 @@
 module render;
 
 import core.stdc.string : strlen;
-import std.file : exists;
+import std.file : exists, isFile;
 import std.format : format;
 import std.math : ceil, lround;
 import std.path : buildPath;
@@ -30,6 +30,9 @@ private __gshared TTF_TextEngine* engine;
 // Both share the fallback chain.
 private __gshared TTF_Font* fontUI;
 private __gshared TTF_Font* fontMono;
+
+// Font setting each face was opened from, empty for the default.
+private __gshared string uiSpec, monoSpec;
 
 // Kept so render_quit can close them after the primaries.
 private __gshared TTF_Font*[8] fallbacks;
@@ -206,9 +209,7 @@ string render_init(SDL_Renderer* renderer)
     fontDirs = font_dirs();
 
     // Missing faces are reported without SDL_GetError: SDL wasn't involved.
-    fontUI = openFace("UI", "sans-serif", 0, uiNames);
-    if (fontUI is null)
-        fontUI = openEmbedded("UI");
+    fontUI = openDefault(false);
     if (fontUI is null)
     {
         logCritical("no UI font; looked for %-(%s, %) in %-(%s, %)", uiNames, fontDirs);
@@ -217,9 +218,7 @@ string render_init(SDL_Renderer* renderer)
     }
 
     // No mono face: not fatal, hex panel is just unaligned.
-    fontMono = openFace("mono", "monospace", 0, monoNames);
-    if (fontMono is null)
-        fontMono = openEmbedded("mono");
+    fontMono = openDefault(true);
     if (fontMono is null)
     {
         logWarn("no monospace font, falling back to the UI face (the hex grid " ~
@@ -234,17 +233,7 @@ string render_init(SDL_Renderer* renderer)
         format(":charset=%04X", cast(uint) icons[MU_ICON_CLOSE].code),
         icons[MU_ICON_CLOSE].code, symNames);
 
-    // After the chain is built: TTF_FontHasGlyph checks fallbacks too.
-    foreach (size_t i, ref immutable(Icon) icon; icons)
-    {
-        if (icon.glyph is null)
-            continue;
-        bool has = TTF_FontHasGlyph(fontUI, icon.code);
-        iconText[i] = has ? icon.glyph : icon.plain;
-        if (has == false)
-            logInfo("no glyph for U+%04X, drawing icon %u as '%s'", cast(uint) icon.code,
-                cast(uint) i, icon.plain.fromStringz);
-    }
+    resolveIcons();
     return null;
 }
 
@@ -269,6 +258,7 @@ void render_quit()
     if (fontUI)
         TTF_CloseFont(fontUI);
     fontUI = null;
+    uiSpec = monoSpec = null;
 
     if (engine)
     {
@@ -283,6 +273,47 @@ TTF_Font* render_font_ui() => fontUI;
 
 /// Monospace face for the hex panel. Swap into ctx.style.font around it.
 TTF_Font* render_font_mono() => fontMono;
+
+/// Font setting the UI or hex panel (`mono`) face was opened from, empty for
+/// the default.
+string render_font_spec(bool mono) => mono ? monoSpec : uiSpec;
+
+/// Replace the UI or hex panel face with `spec`: a font file, or a font name
+/// (fontconfig, else a file in the system font folders). Empty restores the
+/// default face. False if nothing opened, the current face stays.
+bool render_set_font(bool mono, string spec)
+{
+    string* current = mono ? &monoSpec : &uiSpec;
+    if (spec == *current)
+        return true;
+
+    string role = mono ? "mono" : "UI";
+    TTF_Font* f = spec.length ? openCustom(role, spec) : openDefault(mono);
+    if (f is null)
+    {
+        logWarn("%s font not found: %s", role, spec);
+        return false;
+    }
+    if (mono && TTF_FontIsFixedWidth(f) == false)
+        logInfo("%s is not monospace, the hex grid will not align", spec);
+
+    // Shaped text holds the old face.
+    flushText();
+    foreach (TTF_Font* fb; fallbacks[0 .. fallbackCount])
+        TTF_AddFallbackFont(f, fb);
+
+    TTF_Font** slot = mono ? &fontMono : &fontUI;
+    TTF_Font* old = *slot;
+    *slot = f;
+    // Still in use when the mono face fell back to the UI face.
+    if (old !is fontUI && old !is fontMono)
+        TTF_CloseFont(old);
+    *current = spec;
+
+    if (mono == false)
+        resolveIcons();
+    return true;
+}
 
 /// Set the window pixel density; 0 (SDL_GetWindowPixelDensity failure) is
 /// ignored.
@@ -387,9 +418,62 @@ void resize()
     foreach (TTF_Font* f; fallbacks[0 .. fallbackCount])
         TTF_SetFontSize(f, px);
 
+    flushText();
+}
+
+/// Destroy all shaped text.
+void flushText()
+{
     foreach (ref TextEntry e; textCache)
         TTF_DestroyText(e.text);
     textCache = null;
+}
+
+/// Pick each icon's glyph, or its plain text if no face has it. Run after the
+/// fallback chain is built: TTF_FontHasGlyph checks fallbacks too.
+void resolveIcons()
+{
+    foreach (size_t i, ref immutable(Icon) icon; icons)
+    {
+        if (icon.glyph is null)
+            continue;
+        bool has = TTF_FontHasGlyph(fontUI, icon.code);
+        iconText[i] = has ? icon.glyph : icon.plain;
+        if (has == false)
+            logInfo("no glyph for U+%04X, drawing icon %u as '%s'", cast(uint) icon.code,
+                cast(uint) i, icon.plain.fromStringz);
+    }
+}
+
+/// Default UI or mono face: system match, then the embedded one. Null if none.
+TTF_Font* openDefault(bool mono)
+{
+    TTF_Font* f = mono ?
+        openFace("mono", "monospace", 0, monoNames) :
+        openFace("UI", "sans-serif", 0, uiNames);
+    return f ? f : openEmbedded(mono ? "mono" : "UI");
+}
+
+/// Face from a font setting: file path, then font name. Null if none.
+TTF_Font* openCustom(string role, string spec)
+{
+    import std.path : expandTilde;
+
+    string path = expandTilde(spec);
+    if (TTF_Font* f = openPath(role, path, 0))
+        return f;
+
+    string matched = fc_match(spec, true);
+    if (matched.length)
+        if (TTF_Font* f = openPath(role, matched, 0))
+            return f;
+
+    static immutable string[4] exts = [ "", ".ttf", ".otf", ".ttc" ];
+    foreach (string dir; fontDirs)
+        foreach (string ext; exts)
+            if (TTF_Font* f = openPath(role, buildPath(dir, spec ~ ext), 0))
+                return f;
+    return null;
 }
 
 // Round up so text-sized boxes don't clip.
@@ -423,7 +507,7 @@ TTF_Font* openFace(string role, string pattern, dchar probe, const(string)[] nam
 
 TTF_Font* openPath(string role, string path, dchar probe)
 {
-    if (exists(path) == false)
+    if (exists(path) == false || isFile(path) == false)
         return null;
     TTF_Font* f = TTF_OpenFont(path.toStringz, fontSize * density);
     if (f is null)
@@ -495,8 +579,10 @@ version (Fontconfig)
     private __gshared fcPatternDestroy_t    FcPatternDestroy;
     private __gshared bool fcTried;
 
-    // Returns: matched file, or null (no library or no fonts).
-    string fc_match(string pattern)
+    // Returns: matched file, or null (no library or no fonts). `exact`: also
+    // null unless the match has the pattern's family, since fontconfig always
+    // returns its best effort.
+    string fc_match(string pattern, bool exact = false)
     {
         if (fcOpen() == false)
             return null;
@@ -505,6 +591,12 @@ version (Fontconfig)
         if (pat is null)
             return null;
         scope(exit) FcPatternDestroy(pat);
+
+        // Read before substitution adds aliases.
+        string family;
+        const(char)* fam;
+        if (exact && FcPatternGetString(pat, "family", 0, &fam) == FcResultMatch && fam)
+            family = fam.fromStringz.idup;
 
         // Standard pre-match setup: apply config rules, then defaults.
         FcConfigSubstitute(null, pat, FcMatchPattern);
@@ -519,7 +611,21 @@ version (Fontconfig)
         const(char)* file;
         if (FcPatternGetString(match, "file", 0, &file) != FcResultMatch || file is null)
             return null;
+        if (family.length && fc_has_family(match, family) == false)
+            return null;
         return file.fromStringz.idup;
+    }
+
+    // Whether any of the match's family names is `family`, case-insensitive.
+    private bool fc_has_family(void* match, string family)
+    {
+        import std.uni : icmp;
+
+        const(char)* name;
+        for (int i; FcPatternGetString(match, "family", i, &name) == FcResultMatch; ++i)
+            if (name && icmp(name.fromStringz, family) == 0)
+                return true;
+        return false;
     }
 
     private enum FcMatchPattern = 0;
@@ -571,7 +677,7 @@ version (Fontconfig)
 else
 {
     // No fontconfig on Windows and macOS.
-    string fc_match(string pattern) => null;
+    string fc_match(string pattern, bool exact = false) => null;
 }
 
 version (Windows)

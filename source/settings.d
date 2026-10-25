@@ -10,11 +10,12 @@ import ddui;
 import ddhx.charset : Charset, charsets;
 import preferences;
 import hexview : HexBase;
-import ui : ui_zoom;
+import ui : ui_font_dialog, ui_fonts, ui_zoom;
 
 private enum int CATEGORY_W = 120;
 private enum int LABEL_W = 120;
 private enum int FIELD_W = 260;
+private enum int BROWSE_W = 80;
 
 private enum Category { defaults, appearance }
 private static immutable string[] CATEGORY_NAMES = [ "Defaults", "Appearance" ];
@@ -118,6 +119,48 @@ bool settings_value(mu_Context* ctx, ref ValueBox box, string key)
     return prefs_set(prefs, key, cast(string) box.buf[0 .. strlen(box.buf.ptr)]);
 }
 
+// Font setting box, committed like ValueBox. Paths need the room.
+struct FontBox
+{
+    char[1024] buf;
+    bool editing;
+}
+
+/// Font row for the UI or hex panel (`mono`): text box and Browse button.
+void settings_font(mu_Context* ctx, ref FontBox box, string label, bool mono)
+{
+    import core.stdc.string : strlen;
+
+    static immutable int[3] row = [ LABEL_W, FIELD_W, BROWSE_W ];
+    mu_layout_row(ctx, 3, row.ptr, 0);
+    mu_label(ctx, label);
+
+    string* spec = mono ? &prefs.monofont : &prefs.font;
+    mu_Id id = mu_get_id(ctx, &box, box.sizeof);
+    if (ctx.focus != id && box.editing == false)
+    {
+        size_t n = spec.length < box.buf.length ? spec.length : box.buf.length - 1;
+        box.buf[0 .. n] = (*spec)[0 .. n];
+        box.buf[n] = 0;
+    }
+
+    int res = mu_textbox_raw(ctx, box.buf.ptr, cast(int) box.buf.length, id, mu_layout_next(ctx), 0);
+    if (res & MU_RES_CHANGE)
+        box.editing = true;
+    if ((res & MU_RES_SUBMIT) || (box.editing && ctx.focus != id))
+    {
+        box.editing = false;
+        import std.string : strip;
+        *spec = strip(box.buf[0 .. strlen(box.buf.ptr)]).idup;
+        ui_fonts(true);
+    }
+
+    mu_push_id(ctx, &box, box.sizeof);
+    if (mu_button(ctx, "Browse..."))
+        ui_font_dialog(mono);
+    mu_pop_id(ctx);
+}
+
 bool settings_charset(mu_Context* ctx, ref int index, immutable(Charset)* current)
 {
     __gshared const(char)*[] names;
@@ -206,6 +249,7 @@ void settings_appearance(mu_Context* ctx)
 {
     __gshared int minimap, crumbs;
     __gshared ValueBox fontsize;
+    __gshared FontBox font, monofont;
 
     bool changed;
 
@@ -215,6 +259,10 @@ void settings_appearance(mu_Context* ctx)
         ui_zoom(0);
         changed = true;
     }
+
+    settings_font(ctx, font, "UI font", false);
+    settings_font(ctx, monofont, "Hex font", true);
+    settings_note(ctx, "A font file or name, empty for the default.");
 
     settings_label(ctx, "");
     minimap = prefs.minimap;
