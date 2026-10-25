@@ -8,7 +8,7 @@ module preferences;
 import std.system : Endian;
 import ddlogger;
 import ddhx.charset : Charset, ASCII, findCharset;
-import hexview : HEX_COLUMNS_MAX;
+import hexview : HEX_COLUMNS_MAX, HexBase;
 
 /// Mode new tabs start in. Read-only only sets the tab's starting state.
 enum WriteMode { overwrite, insert, readonly }
@@ -20,6 +20,7 @@ struct Prefs
     immutable(Charset)* charset = &ASCII;   /// Change charset default.
     Endian endian = Endian.littleEndian;    /// Change endianness default.
     WriteMode writemode;    /// Change write mode default.
+    HexBase address;        /// Offset base default.
     bool minimap = true;    /// Show minimap.
     bool crumbs = true;     /// Show breadcrumbs.
 }
@@ -29,7 +30,8 @@ __gshared Prefs prefs;
 
 /// All keys, in the order a new file lists them.
 immutable string[] PREFS_KEYS = [
-    "columns", "charset", "endian", "writemode", "minimap", "breadcrumbs",
+    "columns", "charset", "endian", "writemode", "address", "minimap",
+    "breadcrumbs",
 ];
 
 private enum string APPNAME = "vddhx";
@@ -150,6 +152,15 @@ bool prefs_set(ref Prefs p, string key, string value)
         case "readonly":  p.writemode = WriteMode.readonly;  return true;
         default:          return false;
         }
+    case "address":
+        // ddhx's values, spelled out or short.
+        switch (value)
+        {
+        case "hexadecimal", "hex": p.address = HexBase.hex; return true;
+        case "decimal", "dec":     p.address = HexBase.dec; return true;
+        case "octal", "oct":       p.address = HexBase.oct; return true;
+        default:                   return false;
+        }
     case "minimap":     return prefs_bool(value, p.minimap);
     case "breadcrumbs": return prefs_bool(value, p.crumbs);
     default:            return false;
@@ -167,6 +178,7 @@ string prefs_get(ref const(Prefs) p, string key)
     case "charset":     return p.charset.id;
     case "endian":      return p.endian == Endian.bigEndian ? "big" : "little";
     case "writemode":   return to!string(p.writemode);
+    case "address":     return to!string(p.address);
     case "minimap":     return p.minimap ? "on" : "off";
     case "breadcrumbs": return p.crumbs ? "on" : "off";
     default:            assert(false, key);
@@ -311,6 +323,12 @@ unittest
     assert(p.writemode == WriteMode.readonly);
     assert(prefs_get(p, "writemode") == "readonly");
     assert(prefs_set(p, "writemode", "digit") == false);
+    assert(prefs_set(p, "address", "octal"));
+    assert(p.address == HexBase.oct);
+    assert(prefs_get(p, "address") == "oct");
+    assert(prefs_set(p, "address", "dec"));
+    assert(p.address == HexBase.dec);
+    assert(prefs_set(p, "address", "binary") == false);
     assert(prefs_set(p, "minimap", "true") == false);
     assert(prefs_set(p, "nope", "on") == false);
 }

@@ -20,6 +20,8 @@ Rules:
 - "Replace..." and "Insert..." commands with their Range equivalent.
   Same syntax as ddhx.
 - **Settings**: Add `writemode readonly`.
+- Decimal and octal offsets: "Offset Format..." per view, `address` in Settings.
+  Same values as ddhx.
 
 ## v0.1.1
 

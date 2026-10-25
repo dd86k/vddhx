@@ -18,7 +18,7 @@ import std.string : fromStringz;
 import bindbc.sdl;
 import ddlogger;
 import ddui;
-import hexview : HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
+import hexview : HexBase, HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
@@ -950,6 +950,25 @@ int screenshot_run(string[] args)
     ui_omni_close();
     frame();
 
+    // Offset base: octal by browsing, then decimal by name. Lane headers and the
+    // status bar follow. Left on decimal for the View menu shot.
+    ui_address_prompt();
+    frame(); frame();
+    tap(OMNI_KEY_DOWN);
+    tap(OMNI_KEY_DOWN);
+    frame(); frame();
+    shot("prompt-address-browse.bmp");
+    tap(MU_KEY_RETURN);
+    frame(); frame();
+    shot("address-oct.bmp");
+    ui_address_prompt();
+    frame();
+    mu_input_text(&ctx, "dec");
+    frame(); frame();
+    tap(MU_KEY_RETURN);
+    frame(); frame();
+    shot("address-dec.bmp");
+
     // View menu shows both values in the shortcut column. Non-default values, so a
     // hardcoded label would show.
     mu_Vec2 viewMenu = find("View");
@@ -964,6 +983,7 @@ int screenshot_run(string[] args)
     frame();
 
     ui_charset_set(&ASCII);
+    ui_address_set(HexBase.hex);
     cast(void) ui_columns_set(16);
     // Move the pointer off the tab strip, or later shots show a hovered close box.
     mu_input_mousemove(&ctx, 400, 400);
@@ -1128,13 +1148,14 @@ int screenshot_run(string[] args)
     // Scenario 18: menu items that open the omnibar, clicked with the mouse
     // (regression: the box closed on the opening click). One shot for the sheet;
     // the rest check for a row of the expected mode.
-    static immutable string[3][8] raises = [
+    static immutable string[3][9] raises = [
         [ "Help",      "Keyboard Shortcuts...", "Omnibar: this sheet" ],
         [ "Search",    "Find...",               "bytes as written" ],
         [ "Search",    "Go to Offset...",       "waiting for an offset" ],
         [ "View",      "Inspect Bytes...",      "u8" ],
         [ "View",      "Columns...",            "fit the row to the pane" ],
         [ "View",      "Character Set...",      "IBM PC Code Page 437" ],
+        [ "View",      "Offset Format...",      "Octal" ],
         [ "Bookmarks", "List Bookmarks...",     "no bookmarks in this document" ],
         [ "Bookmarks", "Name Bookmark...",      "type a name, Enter to set" ],
     ];

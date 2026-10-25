@@ -27,6 +27,20 @@ enum
     HEX_KEY_REDO  = (1 << 17),  // @suppress(dscanner.style.undocumented_declaration)
 }
 
+/// Number base of the offset column and lane headers.
+enum HexBase { hex, dec, oct }
+
+/// Digit radix of `base`.
+uint hex_radix(HexBase base)
+{
+    final switch (base)
+    {
+    case HexBase.hex: return 16;
+    case HexBase.dec: return 10;
+    case HexBase.oct: return 8;
+    }
+}
+
 /// Glyph colour for the byte at `offset`. `value` saves a buffer read;
 /// `user` is HexView.colorUser.
 alias HexColorFn = mu_Color function(size_t offset, ubyte value, void* user);
@@ -126,6 +140,8 @@ struct HexView
     long baseAddress;
     /// Minimum offset digits; widened as needed.
     int offsetDigits = 8;
+    /// Base of the offset column and lane headers. Bytes stay hex.
+    HexBase offsetBase;
     /// Minimap ribbon; false shows a plain scrollbar instead. Read per frame.
     bool minimap = true;
 
@@ -583,14 +599,15 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
     // offset (last byte), so it can't overflow.
     if (v.autoColumns && v.bodyW > 0)
         v.columns = hex_fit_columns(v.bodyW, charW,
-            hex_fit_digits(cast(ulong)(v.baseAddress + total), v.offsetDigits));
+            hex_fit_digits(cast(ulong)(v.baseAddress + total), v.offsetDigits,
+                v.offsetBase));
 
     int cols = v.columns > 0 ? v.columns : 16;
     long rows  = (cast(long) total + cols - 1) / cols;
 
-    // Widen for the last row's offset, else offsets past 0xffffffff lose digits.
+    // Widen for the last row's offset, else large offsets lose digits.
     long lastRowOff = v.baseAddress + (rows > 0 ? (rows - 1) * cols : 0);
-    int offsetDigits = hex_fit_digits(cast(ulong) lastRowOff, v.offsetDigits);
+    int offsetDigits = hex_fit_digits(cast(ulong) lastRowOff, v.offsetDigits, v.offsetBase);
 
     HexLayout lay = hex_layout(offsetDigits, cols, charW);
 
@@ -695,14 +712,15 @@ struct HexLayout
     int charW;      // cached
 }
 
-// Hex digits for `maxOffset`, at least `min`. Max is 16 (ulong.max), which
-// the offset buffer in hex_draw_row fits.
-int hex_fit_digits(ulong maxOffset, int min)
+// Digits for `maxOffset` in `base`, at least `min`. Max is 22 (octal
+// ulong.max), which the offset buffer in hex_draw_row fits.
+int hex_fit_digits(ulong maxOffset, int min, HexBase base = HexBase.hex)
 {
-    import core.bitop : bsr;
-
     if (min <= 0) min = 8;
-    int digits = maxOffset ? bsr(maxOffset) / 4 + 1 : 1;
+    uint radix = hex_radix(base);
+    int digits = 1;
+    for (ulong rest = maxOffset / radix; rest; rest /= radix)
+        ++digits;
     return digits > min ? digits : min;
 }
 
@@ -718,6 +736,14 @@ unittest
 
     assert(hex_fit_digits(0, 0) == 8); // bad floor: 8
     assert(hex_fit_digits(0, -4) == 8);
+
+    import std.conv : octal;
+    assert(hex_fit_digits(99_999_999, 8, HexBase.dec) == 8);
+    assert(hex_fit_digits(100_000_000, 8, HexBase.dec) == 9);
+    assert(hex_fit_digits(ulong.max, 8, HexBase.dec) == 20);
+    assert(hex_fit_digits(octal!77777777, 8, HexBase.oct) == 8);
+    assert(hex_fit_digits(octal!100000000, 8, HexBase.oct) == 9);
+    assert(hex_fit_digits(ulong.max, 8, HexBase.oct) == 22);
 }
 
 // Max columns fitting `availW` pixels, min 1. Inverse of hex_layout.
@@ -806,13 +832,14 @@ unittest
 
 immutable char[16] HEX_DIGITS = "0123456789abcdef";
 
-// `digits` hex chars of `value` into buf, most significant first.
-void hex_format(char* buf, ulong value, int digits)
+// `digits` chars of `value` in `base` into buf, most significant first.
+void hex_format(char* buf, ulong value, int digits, HexBase base = HexBase.hex)
 {
+    uint radix = hex_radix(base);
     for (int i = digits - 1; i >= 0; --i)
     {
-        buf[i] = HEX_DIGITS[value & 0xf];
-        value >>= 4;
+        buf[i] = HEX_DIGITS[value % radix];
+        value /= radix;
     }
 }
 
@@ -830,6 +857,12 @@ unittest
 
     hex_format(buf.ptr, 0x100000000UL, 4);
     assert(buf[0 .. 4] == "0000"); // truncated to low nibbles
+
+    hex_format(buf.ptr, 1234, 8, HexBase.dec);
+    assert(buf[0 .. 8] == "00001234");
+
+    hex_format(buf.ptr, 0x1ff, 4, HexBase.oct);
+    assert(buf[0 .. 4] == "0777");
 }
 
 // Whether `chars` glyphs at `x` fit within `startX .. endX`. Text clipped
@@ -867,6 +900,7 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
 
     int cols = v.columns > 0 ? v.columns : 16;
     char[2] cell = void;
+    uint wrap = hex_radix(v.offsetBase) * hex_radix(v.offsetBase); // labels wrap at 2 digits
     for (int i; i < cols; ++i)
     {
         int x = originX + hex_col_for(lay, i) * charW;
@@ -874,7 +908,7 @@ void hex_header(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
             break; // past the edge
         if (hex_fits(x, 2, charW, r.x, endX) == false)
             continue;
-        hex_format(cell.ptr, i & 0xff, 2);
+        hex_format(cell.ptr, i % wrap, 2, v.offsetBase);
         mu_draw_text(ctx, font, cell.ptr, 2, mu_Vec2(x, r.y), dim);
     }
 
@@ -1802,7 +1836,7 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     {
         char[24] off = void;
         int digits = lay.offsetDigits > off.length ? cast(int) off.length : lay.offsetDigits;
-        hex_format(off.ptr, cast(ulong) v.baseAddress, digits);
+        hex_format(off.ptr, cast(ulong) v.baseAddress, digits, v.offsetBase);
         if (hex_fits(originX, digits, charW, body.x, body.x + body.w))
             mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, body.y),
                 mu_Color(150, 150, 160, 255));
@@ -1852,7 +1886,7 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
 
     char[24] off = void;
     int digits = lay.offsetDigits > off.length ? cast(int) off.length : lay.offsetDigits;
-    hex_format(off.ptr, cast(ulong)(v.baseAddress + row * cols), digits);
+    hex_format(off.ptr, cast(ulong)(v.baseAddress + row * cols), digits, v.offsetBase);
     if (hex_fits(originX, digits, charW, startX, endX))
         mu_draw_text(ctx, font, off.ptr, digits, mu_Vec2(originX, y), offColor);
 

@@ -311,6 +311,7 @@ enum PromptKind
     markName,
     columns,
     charset,
+    address,
     openDevice,
     write,
 }
@@ -554,6 +555,7 @@ View* newView(Document* d)
     if (prefs.columns)
         v.hex.columns = prefs.columns;
     v.hex.insertMode = prefs.writemode == WriteMode.insert;
+    v.hex.offsetBase = prefs.address;
     return v;
 }
 
@@ -2524,7 +2526,7 @@ enum
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_MARK_LOAD, CMD_MARK_SAVE,
     CMD_SPLIT, CMD_SPLIT_DOWN, CMD_CLOSE_PANE, CMD_PANE_NEXT, CMD_PANE_PREV,
-    CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_COLUMNS, CMD_CHARSET,
+    CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_COLUMNS, CMD_CHARSET, CMD_ADDRESS,
     CMD_SETTINGS, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
 }
 
@@ -2579,6 +2581,7 @@ immutable Entry[] COMMANDS = [
     Entry("Toggle Byte Order","",             CMD_ENDIAN,       "endian endianness little big le be swap order inspector pattern"),
     Entry("Columns...",       "",             CMD_COLUMNS,      "width row bytes per line wrap 8 16 24 32 auto fit resize"),
     Entry("Character Set...", "",             CMD_CHARSET,      "charset encoding text lane ascii cp437 ibm dos oem ebcdic mainframe mac roman latin1 iso 8859 win1252 windows"),
+    Entry("Offset Format...", "",             CMD_ADDRESS,      "address offsets base radix hex hexadecimal dec decimal oct octal"),
     Entry("Settings",         "",             CMD_SETTINGS,     "preferences options configure defaults rc vddhxrc"),
     Entry("Keyboard Shortcuts...", "",        CMD_KEYS,          "keys chords bindings help cheat sheet"),
     Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
@@ -2773,10 +2776,10 @@ const(OmniItem)[] ui_omni_items()
         foreach (size_t i, ref Bookmark mark; focusedDoc.marks)
         {
             char[48] head = void;
-            size_t used = sformat(head, "0x%08x", mark.at).length;
+            size_t used = sformat(head, "%s", ui_offset(mark.at, true)).length;
             if (mark.length > 1)
-                used += sformat(head[used .. $], " .. 0x%08x",
-                    mark.at + mark.length - 1).length;
+                used += sformat(head[used .. $], " .. %s",
+                    ui_offset(mark.at + mark.length - 1, true)).length;
             string bytes = ui_bookmark_bytes(mark);
             if (mark.name.length == 0)
             {
@@ -2787,7 +2790,7 @@ const(OmniItem)[] ui_omni_items()
             // ("@magic", "@1f40").
             char[128] detail = void;
             put(mark.name,
-                ui_row_text(sformat(detail, "0x%08x  %s", mark.at, bytes)),
+                ui_row_text(sformat(detail, "%s  %s", ui_offset(mark.at, true), bytes)),
                 cast(int) i, false, false, ui_row_text(head[0 .. used]));
         }
         break;
@@ -2808,7 +2811,7 @@ const(OmniItem)[] ui_omni_items()
             char[128] path = void;
             char[64] where = void;
             put(ui_row_text(spanLabel(spans, i, path)),
-                ui_row_text(sformat(where, "0x%08x  %d byte%s", s.at, s.length,
+                ui_row_text(sformat(where, "%s  %d byte%s", ui_offset(s.at, true), s.length,
                     s.length == 1 ? "" : "s")),
                 cast(int) i, false, false, structure_role_name(s.role));
         }
@@ -2817,8 +2820,8 @@ const(OmniItem)[] ui_omni_items()
         {
             const(StructureSpan) last = spans[$ - 1];
             char[64] far = void;
-            put(ui_row_text(sformat(far, "%d fields, and more past 0x%08x",
-                    spans.length, last.at + last.length)), null, -1);
+            put(ui_row_text(sformat(far, "%d fields, and more past %s",
+                    spans.length, ui_offset(last.at + last.length, true))), null, -1);
         }
         break;
     case OmniMode.prompt:
@@ -2835,6 +2838,9 @@ const(OmniItem)[] ui_omni_items()
             break;
         case PromptKind.charset:
             ui_charset_rows(&put);
+            break;
+        case PromptKind.address:
+            ui_address_rows(&put);
             break;
         case PromptKind.openDevice:
             ui_device_rows(&put);
@@ -2966,7 +2972,7 @@ void ui_goto_preview(out string label, out string detail)
 
     char[96] buf = void;
     size_t total = hex_total(focusedView.hex);
-    label = ui_row_text(sformat(buf, "Go to 0x%08x", a.pos));
+    label = ui_row_text(sformat(buf, "Go to %s", ui_offset(a.pos, true)));
 
     // Show the absolute offset and percentage.
     int percent = total ? cast(int)((a.pos * 100) / cast(long) total) : 0;
@@ -3179,6 +3185,52 @@ public void ui_toggle_crumbs()
 public void ui_charset_set(immutable(Charset)* set)
 {
     focusedDoc.charset = set;
+}
+
+/// Set the focused view's offset base. Per view like columns, splits inherit
+/// it. No message: the menu and the lane headers show it.
+public void ui_address_set(HexBase base)
+{
+    focusedView.hex.offsetBase = base;
+}
+
+/// Offset for labels and messages, formatted with `%s` in a view's base. Text
+/// stays valid Go to input: 0x for hex, a leading zero for octal, so decimal
+/// is never zero-padded.
+struct Offset
+{
+    long at;        /// Document offset.
+    HexBase base;   /// Base to print in.
+    bool pad;       /// Zero-pad hex and octal to 8 digits.
+
+    /// Write the text to `sink`.
+    void toString(scope void delegate(const(char)[]) sink) const
+    {
+        import std.format : formattedWrite;
+        final switch (base)
+        {
+        case HexBase.hex: sink.formattedWrite(pad ? "0x%08x" : "0x%x", at); break;
+        case HexBase.dec: sink.formattedWrite("%d", at);                    break;
+        case HexBase.oct: sink.formattedWrite(pad ? "0%08o" : "0%o", at);   break;
+        }
+    }
+}
+
+unittest
+{
+    char[32] buf = void;
+    assert(sformat(buf, "%s", Offset(0x1f, HexBase.hex, true)) == "0x0000001f");
+    assert(sformat(buf, "%s", Offset(0x1f, HexBase.hex)) == "0x1f");
+    assert(sformat(buf, "%s", Offset(31, HexBase.dec, true)) == "31");
+    assert(sformat(buf, "%s", Offset(31, HexBase.oct)) == "037");
+    assert(sformat(buf, "%s", Offset(31, HexBase.oct, true)) == "000000037");
+    assert(address_parse("037", 0, 64).pos == 31); // round-trips through Go to
+}
+
+/// `at` in the focused view's offset base, see Offset. `pad` for list rows.
+Offset ui_offset(long at, bool pad = false)
+{
+    return Offset(at, focusedView.hex.offsetBase, pad);
 }
 
 /// Panel text lane hook; bound per frame in ui_pane to the document.
@@ -3427,6 +3479,10 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             if (id >= 0 && id < charsets.length)
                 ui_charset_set(charsets[id]);
             break;
+        case PromptKind.address:
+            if (id >= 0 && id <= HexBase.max)
+                ui_address_set(cast(HexBase) id);
+            break;
         case PromptKind.openDevice:
             ui_device_commit(id);
             return; // opened tab has focus
@@ -3607,7 +3663,7 @@ void ui_find_step(ref View v, bool backward, long from)
             return;
         }
         ui_select_range(*w, cast(size_t) at, length);
-        ui_status("found at %#x", at);
+        ui_status("found at %s", ui_offset(at));
     });
 }
 
@@ -3775,10 +3831,10 @@ public void ui_mark_toggle()
 
     bool set = bookmark_toggle(focusedDoc.marks, at, len);
     if (len > 1)
-        ui_status(set ? "bookmarked %#x, %d byte(s)" : "cleared %#x, %d byte(s)",
-            at, len);
+        ui_status(set ? "bookmarked %s, %d byte(s)" : "cleared %s, %d byte(s)",
+            ui_offset(at), len);
     else
-        ui_status(set ? "bookmark set at %#x" : "bookmark cleared at %#x", at);
+        ui_status(set ? "bookmark set at %s" : "bookmark cleared at %s", ui_offset(at));
 }
 
 /// Name the bookmark at the caret, creating one over the selection if needed.
@@ -3796,7 +3852,7 @@ public void ui_mark_name()
     ptrdiff_t index = bookmark_find(focusedDoc.marks, at);
     if (index < 0)
     {
-        ui_status("nothing to name at %#x", at);
+        ui_status("nothing to name at %s", ui_offset(at));
         return;
     }
 
@@ -3813,7 +3869,7 @@ public void ui_columns_prompt()
     if (ui_on_settings())
         return;
     settingPreview = SettingPreview(&focusedView(), &focusedDoc(), focusedView.hex.columns,
-        focusedView.hex.autoColumns, focusedDoc.charset, true);
+        focusedView.hex.autoColumns, focusedDoc.charset, focusedView.hex.offsetBase, true);
     promptKind = PromptKind.columns;
     omni_prompt(omni, "count, or auto to fit the pane");
     omni_select(omni, ui_columns_index(ui_columns()));
@@ -3825,11 +3881,23 @@ public void ui_charset_prompt()
     if (ui_on_settings())
         return;
     settingPreview = SettingPreview(&focusedView(), &focusedDoc(), focusedView.hex.columns,
-        focusedView.hex.autoColumns, focusedDoc.charset, true);
+        focusedView.hex.autoColumns, focusedDoc.charset, focusedView.hex.offsetBase, true);
     promptKind = PromptKind.charset;
     omni_prompt(omni, "ascii, cp437, ebcdic037, macroman, latin1, win1252");
     // Rows follow ddhx's list order.
     omni_select(omni, ui_charset_index(focusedDoc.charset));
+}
+
+/// Prompt for the offset base. Closed list, ddhx's names.
+public void ui_address_prompt()
+{
+    if (ui_on_settings())
+        return;
+    settingPreview = SettingPreview(&focusedView(), &focusedDoc(), focusedView.hex.columns,
+        focusedView.hex.autoColumns, focusedDoc.charset, focusedView.hex.offsetBase, true);
+    promptKind = PromptKind.address;
+    omni_prompt(omni, "hex, dec, oct");
+    omni_select(omni, focusedView.hex.offsetBase);
 }
 
 /// Prompt for a disk or a typed path; for devices the native dialog doesn't
@@ -4017,6 +4085,42 @@ void ui_charset_rows(scope void delegate(string, string, int, bool, bool, string
     }
 }
 
+/// Offset base prompt rows, in HexBase order.
+void ui_address_rows(scope void delegate(string, string, int, bool, bool, string) put)
+{
+    HexBase current = settingPreview.active ? settingPreview.offsetBase : focusedView.hex.offsetBase;
+    import std.traits : EnumMembers;
+    foreach (HexBase base; EnumMembers!HexBase)
+    {
+        string detail = ui_address_name(base);
+        if (base == current)
+            detail = ui_row_text(detail ~ "  -  current");
+        put(ui_address_label(base), detail, base, false, false, null);
+    }
+}
+
+/// Short name of `base`, as in ddhx's `address`. A literal, so NUL-terminated.
+string ui_address_label(HexBase base)
+{
+    final switch (base)
+    {
+    case HexBase.hex: return "hex";
+    case HexBase.dec: return "dec";
+    case HexBase.oct: return "oct";
+    }
+}
+
+/// Full name of `base`.
+string ui_address_name(HexBase base)
+{
+    final switch (base)
+    {
+    case HexBase.hex: return "Hexadecimal";
+    case HexBase.dec: return "Decimal";
+    case HexBase.oct: return "Octal";
+    }
+}
+
 /// Settings before browsing, restored on cancel. Like Preview, for settings
 /// that preview on the grid.
 struct SettingPreview
@@ -4026,6 +4130,7 @@ struct SettingPreview
     int columns;
     bool autoColumns;
     immutable(Charset)* charset;
+    HexBase offsetBase;
     bool active;
 }
 /// Ditto.
@@ -4059,11 +4164,16 @@ void ui_setting_preview(OmniMode mode)
 
     if (promptKind == PromptKind.columns)
         cast(void) ui_columns_set(id);
+    else if (promptKind == PromptKind.address)
+    {
+        if (id <= HexBase.max)
+            ui_address_set(cast(HexBase) id);
+    }
     else if (id < charsets.length)
         ui_charset_set(charsets[id]);
 }
 
-/// Revert both settings to their opening values, keeping the browse.
+/// Revert the settings to their opening values, keeping the browse.
 void ui_setting_rewind()
 {
     if (settingPreview.active == false)
@@ -4073,6 +4183,7 @@ void ui_setting_rewind()
     settingPreview.view.hex.columns = settingPreview.columns;
     settingPreview.view.hex.autoColumns = settingPreview.autoColumns;
     settingPreview.doc.charset = settingPreview.charset;
+    settingPreview.view.hex.offsetBase = settingPreview.offsetBase;
 }
 
 /// Ditto, ending the browse.
@@ -4111,7 +4222,7 @@ void ui_mark_name_preview(out string label, out string detail)
 
     const(Bookmark) mark = d.marks[index];
     char[96] buf = void;
-    label = ui_row_text(sformat(buf, "Name 0x%08x, %d byte(s)", mark.at, mark.length));
+    label = ui_row_text(sformat(buf, "Name %s, %d byte(s)", ui_offset(mark.at, true), mark.length));
 
     const(char)[] typed = omni_query(omni);
     if (typed.length == 0)
@@ -4130,13 +4241,13 @@ void ui_mark_name_commit(const(char)[] typed)
     string name = ui_mark_name_clean(typed);
     if (bookmark_rename(d.marks, markPrompt.at, name) == false)
     {
-        ui_status("the bookmark at %#x is gone", markPrompt.at);
+        ui_status("the bookmark at %s is gone", ui_offset(markPrompt.at));
         return;
     }
     if (name.length)
-        ui_status(`bookmark at %#x named "%s"`, markPrompt.at, ui_clip(name, 48));
+        ui_status(`bookmark at %s named "%s"`, ui_offset(markPrompt.at), ui_clip(name, 48));
     else
-        ui_status("bookmark at %#x unnamed", markPrompt.at);
+        ui_status("bookmark at %s unnamed", ui_offset(markPrompt.at));
 }
 
 /// Name cleanup: trim, and drop tabs and newlines (names are single-line).
@@ -4239,17 +4350,17 @@ void ui_write_preview(out string label, out string detail)
     if (error)
     {
         if (w.selected)
-            label = ui_row_text(sformat(buf, "%s selection 0x%08x, %d byte(s)", verb, w.low,
+            label = ui_row_text(sformat(buf, "%s selection %s, %d byte(s)", verb, ui_offset(w.low, true),
                 w.high - w.low + 1));
         else if (w.ranged)
             label = verb;
         else
-            label = ui_row_text(sformat(buf, "%s at 0x%08x", verb, w.low));
+            label = ui_row_text(sformat(buf, "%s at %s", verb, ui_offset(w.low, true)));
         detail = ui_row_text(error);
         return;
     }
 
-    label = ui_row_text(sformat(buf, "%s %d byte(s) at 0x%08x", verb, req.length, req.start));
+    label = ui_row_text(sformat(buf, "%s %d byte(s) at %s", verb, req.length, ui_offset(req.start, true)));
 
     // Leading pattern bytes, like bookmark rows.
     static immutable string digits = "0123456789abcdef";
@@ -4489,6 +4600,7 @@ void ui_omni_run(int id)
     case CMD_MARK_NAME: ui_mark_name();              return;
     case CMD_COLUMNS:   ui_columns_prompt();         return;
     case CMD_CHARSET:   ui_charset_prompt();         return;
+    case CMD_ADDRESS:   ui_address_prompt();         return;
     case CMD_OPEN_DEVICE: ui_open_device_prompt();   return;
     case CMD_REPLACE:       ui_write_prompt(false, false); return;
     case CMD_INSERT:        ui_write_prompt(true, false);  return;
@@ -4626,9 +4738,15 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             const(char)[] selected = selLen > 1 ?
                 sformat(selbuf, "  (%u selected)", selLen) : "";
 
+            // Same base as the offset column.
+            static immutable string[3] OFFSET_SPECS = [ "%08x", "%08d", "%08o" ];
+            char[24] offbuf = void;
+            const(char)[] offset = sformat(offbuf, OFFSET_SPECS[focusedView.hex.offsetBase],
+                focusedView.hex.cursor);
+
             char[256] statusbuf = void;
-            char[] status = sformat(statusbuf, "offset %08x  %s  %s%s%s",
-                focusedView.hex.cursor, focusedView.hex.insertMode ? "INS" : "OVR",
+            char[] status = sformat(statusbuf, "offset %s  %s  %s%s%s",
+                offset, focusedView.hex.insertMode ? "INS" : "OVR",
                 focusedDoc.endian == Endian.bigEndian ? "BE" : "LE", selected, marked);
             mu_draw_text(ctx, ctx.style.font, cast(string) status,
                 mu_Vec2(sr.x + 4, ty), mu_Color(170, 170, 185, 255));
@@ -5344,6 +5462,8 @@ void ui_menubar(mu_Context* ctx)
             ui_columns_prompt();
         if (mu_menu_item_ex(ctx, "Character Set...", focusedDoc.charset.id.ptr, 0, 0))
             ui_charset_prompt();
+        if (mu_menu_item_ex(ctx, "Offset Format...", ui_address_label(focusedView.hex.offsetBase).ptr, 0, 0))
+            ui_address_prompt();
         mu_menu_separator(ctx);
         // No checkmarks in ddui; state goes in the shortcut column.
         if (mu_menu_item_ex(ctx, "Minimap", prefs.minimap ? "On" : "Off", 0, 0))

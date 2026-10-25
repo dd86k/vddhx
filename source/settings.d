@@ -9,6 +9,7 @@ import std.system : Endian;
 import ddui;
 import ddhx.charset : Charset, charsets;
 import preferences;
+import hexview : HexBase;
 
 private enum int CATEGORY_W = 120;
 private enum int LABEL_W = 120;
@@ -148,12 +149,20 @@ bool settings_writemode(mu_Context* ctx, ref int index, WriteMode current)
     return (mu_dropdown(ctx, &index, names.ptr, cast(int) names.length) & MU_RES_CHANGE) != 0;
 }
 
+/// Offset base dropdown, true on change.
+bool settings_address(mu_Context* ctx, ref int index, HexBase current)
+{
+    static immutable const(char)*[3] names = [ "Hexadecimal", "Decimal", "Octal" ];
+    index = current;
+    return (mu_dropdown(ctx, &index, names.ptr, cast(int) names.length) & MU_RES_CHANGE) != 0;
+}
+
 
 void settings_defaults(mu_Context* ctx)
 {
     // Separate statics: dropdowns are identified by their index's address.
     __gshared ColumnsBox columns;
-    __gshared int charset, endian, writemode;
+    __gshared int charset, endian, writemode, address;
 
     settings_note(ctx, "What new tabs start with.");
 
@@ -185,6 +194,13 @@ void settings_defaults(mu_Context* ctx)
     if (settings_writemode(ctx, writemode, prefs.writemode))
     {
         prefs.writemode = cast(WriteMode) writemode;
+        changed = true;
+    }
+
+    settings_label(ctx, "Offsets");
+    if (settings_address(ctx, address, prefs.address))
+    {
+        prefs.address = cast(HexBase) address;
         changed = true;
     }
 
