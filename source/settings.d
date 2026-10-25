@@ -16,6 +16,7 @@ private enum int CATEGORY_W = 120;
 private enum int LABEL_W = 120;
 private enum int FIELD_W = 260;
 private enum int BROWSE_W = 80;
+private enum int CLEAR_W = 60;
 
 private enum Category { defaults, appearance }
 private static immutable string[] CATEGORY_NAMES = [ "Defaults", "Appearance" ];
@@ -126,13 +127,13 @@ struct FontBox
     bool editing;
 }
 
-/// Font row for the UI or hex panel (`mono`): text box and Browse button.
+/// Font row for the UI or hex panel (`mono`): text box, Browse, Clear.
 void settings_font(mu_Context* ctx, ref FontBox box, string label, bool mono)
 {
     import core.stdc.string : strlen;
 
-    static immutable int[3] row = [ LABEL_W, FIELD_W, BROWSE_W ];
-    mu_layout_row(ctx, 3, row.ptr, 0);
+    static immutable int[4] row = [ LABEL_W, FIELD_W, BROWSE_W, CLEAR_W ];
+    mu_layout_row(ctx, 4, row.ptr, 0);
     mu_label(ctx, label);
 
     string* spec = mono ? &prefs.monofont : &prefs.font;
@@ -158,6 +159,13 @@ void settings_font(mu_Context* ctx, ref FontBox box, string label, bool mono)
     mu_push_id(ctx, &box, box.sizeof);
     if (mu_button(ctx, "Browse..."))
         ui_font_dialog(mono);
+    // Drop a pending edit too, or the blur commits it next frame.
+    if (mu_button(ctx, "Clear"))
+    {
+        box.editing = false;
+        *spec = null;
+        ui_fonts(true);
+    }
     mu_pop_id(ctx);
 }
 
