@@ -172,6 +172,11 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
                 ui_close_current_tab();
                 break;
             }
+            if (event.key.key == SDLK_L)
+            {
+                ui_refresh();
+                break;
+            }
             if (event.key.key == SDLK_TAB)
             {
                 ui_cycle_tab(event.key.mod & SDL_KMOD_SHIFT ? -1 : 1);

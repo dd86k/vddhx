@@ -2063,6 +2063,25 @@ void ui_swap_source(Document* doc, IDocument src)
         old.close();
 }
 
+/// Full redraw requested by ui_refresh, done in ui_frame.
+__gshared bool redrawWanted;
+
+/// Reread the shown bytes through the held handles and redraw everything, like
+/// ddhx's refresh (Ctrl+L). Edits and undo stay.
+/// NOTE: Misses size changes and files replaced on disk. A reload command would
+///       need a new handle and a fresh editor.
+public void ui_refresh()
+{
+    redrawWanted = true;
+    foreach (Document* d; docs)
+    {
+        if (d.editor is null)
+            continue;
+        ++d.revision;
+        structureEdited(d, 0);
+    }
+}
+
 /// Save the focused document. With a path: write, return success. Without:
 /// open Save As and return false (written later).
 public bool ui_save()
@@ -2523,7 +2542,7 @@ enum string OPEN_DEVICE_LABEL = DISKS_LISTED ? "Open Disk..." : "Open Path...";
 enum
 {
     CMD_NEW_TAB, CMD_OPEN, CMD_OPEN_DEVICE, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS,
-    CMD_CLOSE_TAB, CMD_READONLY,
+    CMD_CLOSE_TAB, CMD_READONLY, CMD_REFRESH,
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE,
     CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_GOTO,
     CMD_FIND, CMD_FIND_BACK, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_MARK_ALL, CMD_INSPECT, CMD_STRUCTURE,
@@ -2547,6 +2566,7 @@ immutable Entry[] COMMANDS = [
     Entry("Save As...",       "Ctrl+Shift+S", CMD_SAVE_AS,      "write export copy to"),
     Entry("Close Tab",        "Ctrl+W",       CMD_CLOSE_TAB,    "shut document"),
     Entry("Toggle Read-Only", "",             CMD_READONLY,     "readonly lock unlock writable allow editing restricted protect elevate admin root"),
+    Entry("Refresh",          "Ctrl+L",       CMD_REFRESH,      "reread redraw repaint disk changed outside"),
     Entry("Undo",             "Ctrl+Z",       CMD_UNDO,         "back revert history step"),
     Entry("Redo",             "Ctrl+Y",       CMD_REDO,         "forward again history step"),
     Entry("Cut",              "Ctrl+X",       CMD_CUT,          "clipboard remove delete"),
@@ -2614,44 +2634,45 @@ immutable Entry[] PREFIXES = [
 
 /// '?' sheet: all shortcuts (omnibar, window, caret and bytes). Display only.
 immutable Entry[] SHORTCUTS = [
-    Entry("Omnibar",                      "Ctrl+E"),
-    Entry("Omnibar, on commands",         "Ctrl+Shift+P"),
-    Entry("Omnibar, on an offset",        "Ctrl+G"),
-    Entry("Take a row / bring it here",   "Enter / Shift+Enter"),
-    Entry("Close the omnibar",            "Esc"),
-    Entry("New tab",                      "Ctrl+T"),
-    Entry("Open file",                    "Ctrl+O"),
-    Entry("Save",                         "Ctrl+S"),
-    Entry("Save as",                      "Ctrl+Shift+S"),
-    Entry("Close tab",                    "Ctrl+W"),
-    Entry("Next / previous tab",          "Ctrl+Tab / Ctrl+Shift+Tab"),
-    Entry("Split the pane",               "Ctrl+\\"),
-    Entry("Go to pane 1, 2, 3...",        "Ctrl+1 .. Ctrl+9"),
-    Entry("Go to tab 1, 2, 3...",         "Alt+1 .. Alt+9"),
-    Entry("Quit",                         "Ctrl+Q"),
-    Entry("Find",                         "Ctrl+F"),
-    Entry("Find backward",                "Ctrl+Shift+F"),
+    Entry("Omnibar",                        "Ctrl+E"),
+    Entry("Omnibar, on commands",           "Ctrl+Shift+P"),
+    Entry("Omnibar, on an offset",          "Ctrl+G"),
+    Entry("Take a row / bring it here",     "Enter / Shift+Enter"),
+    Entry("Close the omnibar",              "Esc"),
+    Entry("New tab",                        "Ctrl+T"),
+    Entry("Open file",                      "Ctrl+O"),
+    Entry("Save",                           "Ctrl+S"),
+    Entry("Save as",                        "Ctrl+Shift+S"),
+    Entry("Close tab",                      "Ctrl+W"),
+    Entry("Redraw screen",                  "Ctrl+L"),
+    Entry("Next / previous tab",            "Ctrl+Tab / Ctrl+Shift+Tab"),
+    Entry("Split the pane",                 "Ctrl+\\"),
+    Entry("Go to pane 1, 2, 3...",          "Ctrl+1 .. Ctrl+9"),
+    Entry("Go to tab 1, 2, 3...",           "Alt+1 .. Alt+9"),
+    Entry("Quit",                           "Ctrl+Q"),
+    Entry("Find",                           "Ctrl+F"),
+    Entry("Find backward",                  "Ctrl+Shift+F"),
     Entry("Find the other way, in the box", "Shift+Enter"),
-    Entry("Find next / previous",         "Ctrl+N / Ctrl+Shift+N"),
-    Entry("Inspect bytes at the caret",   "Alt+I"),
-    Entry("Text size bigger / smaller",   "Ctrl+= / Ctrl+-"),
-    Entry("Text size back to the setting", "Ctrl+0"),
-    Entry("Toggle bookmark",              "Ctrl+B"),
+    Entry("Find next / previous",           "Ctrl+N / Ctrl+Shift+N"),
+    Entry("Inspect bytes at the caret",     "Alt+I"),
+    Entry("Text size bigger / smaller",     "Ctrl+= / Ctrl+-"),
+    Entry("Text size back to the setting",  "Ctrl+0"),
+    Entry("Toggle bookmark",                "Ctrl+B"),
     Entry("Name the bookmark at the caret", "Ctrl+Shift+B"),
-    Entry("Next / previous bookmark",     "] / ["),
-    Entry("Cut / copy / paste bytes",     "Ctrl+X / C / V"),
+    Entry("Next / previous bookmark",       "] / ["),
+    Entry("Cut / copy / paste bytes",       "Ctrl+X / C / V"),
     Entry("Cut / copy the selection as text", "Ctrl+Shift+X / Ctrl+Shift+C"),
-    Entry("Undo / redo",                  "Ctrl+Z / Ctrl+Y"),
-    Entry("Move the caret",               "Arrows"),
-    Entry("Skip the run under the caret", "Ctrl+Left / Ctrl+Right"),
-    Entry("Select that run instead",      "Ctrl+Shift+Left / Ctrl+Shift+Right"),
-    Entry("Extend the selection",         "Shift+Arrows"),
-    Entry("Row start / row end",          "Home / End"),
-    Entry("File start / file end",        "Ctrl+Home / Ctrl+End"),
-    Entry("Page up / page down",          "PgUp / PgDn"),
-    Entry("Overwrite or insert",          "Insert"),
-    Entry("Delete a byte, back / forward", "Backspace / Delete"),
-    Entry("Type a byte",                  "0-9 a-f"),
+    Entry("Undo / redo",                    "Ctrl+Z / Ctrl+Y"),
+    Entry("Move the caret",                 "Arrows"),
+    Entry("Skip the run under the caret",   "Ctrl+Left / Ctrl+Right"),
+    Entry("Select that run instead",        "Ctrl+Shift+Left / Ctrl+Shift+Right"),
+    Entry("Extend the selection",           "Shift+Arrows"),
+    Entry("Row start / row end",            "Home / End"),
+    Entry("File start / file end",          "Ctrl+Home / Ctrl+End"),
+    Entry("Page up / page down",            "PgUp / PgDn"),
+    Entry("Overwrite or insert",            "Insert"),
+    Entry("Delete a byte, back / forward",  "Backspace / Delete"),
+    Entry("Type a byte",                    "0-9 a-f"),
 ];
 
 /// Whether the omnibar has the keyboard; main checks before routing keys.
@@ -4690,6 +4711,7 @@ void ui_omni_run(int id)
     case CMD_NEW_TAB:   ui_new_tab();          break;
     case CMD_OPEN:      ui_open_dialog();      break;
     case CMD_READONLY:  ui_toggle_readonly();  break;
+    case CMD_REFRESH:   ui_refresh();          break;
     case CMD_COMPARE:   ui_compare_dialog();   break;
     case CMD_COMPARE_STOP: ui_compare_stop();  break;
     case CMD_SAVE:      cast(void)ui_save();             break;
@@ -4768,6 +4790,11 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 {
     winW = width;
     winH = height;
+    if (redrawWanted)
+    {
+        redrawWanted = false;
+        mu_invalidate(ctx);
+    }
 
     // Menubar flush with the window edges: zero padding across
     // mu_begin_window_ex (it fixes the body inset), restore after.
@@ -5524,6 +5551,7 @@ void ui_menubar(mu_Context* ctx)
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Save",       "Ctrl+S",       0, 0)) cast(void)ui_save();
         if (mu_menu_item_ex(ctx, "Save As...", "Ctrl+Shift+S", 0, 0)) ui_save_as();
+        if (mu_menu_item_ex(ctx, "Refresh",    "Ctrl+L",       0, 0)) ui_refresh();
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Close Tab",  "Ctrl+W",       0, 0)) ui_close_current_tab();
         // Via SDL's queue; main owns the loop flag.
@@ -5669,5 +5697,12 @@ version (Screenshots)
         p.path   = focusedDoc.path;
         p.edited = focusedDoc.editor.edited();
         return p;
+    }
+
+    /// Byte at `at` as the focused view last drew it, or -1 if outside its cache.
+    public int ui_peek(size_t at)
+    {
+        const(ubyte)[] b = hex_cached(focusedView.hex, at, 1);
+        return b.length ? b[0] : -1;
     }
 }

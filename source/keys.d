@@ -47,6 +47,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     keys_navigate();
     keys_marks_file(files);
     keys_write(files);
+    keys_refresh(files);
     uiPickAuto = null;
 
     keys_quit();
@@ -549,4 +550,26 @@ void keys_write(ref const(Files) f)
     frame();
     expect(exists(f.fresh) && cast(ubyte[]) read(f.fresh) == [ cast(ubyte) 0x12 ], "Ctrl+S on a scratch buffer saves as");
     expect(ui_probe().path == f.fresh, "...and the tab adopts the path");
+}
+
+void keys_refresh(ref const(Files) f)
+{
+    import std.stdio : File;
+
+    ui_open(f.drop);
+    frame();
+    press(SDLK_HOME, CTRL);
+    type("a");
+    type("b");
+    expect(ui_probe().edited, "refresh: starts edited");
+
+    // Changed in place past the edit, so the held handle sees it.
+    {
+        File fout = File(f.drop, "r+b");
+        fout.seek(1);
+        fout.rawWrite([ cast(ubyte) 0x5a ]);
+    }
+    press(SDLK_L, CTRL);
+    expect(ui_peek(1) == 0x5a, "Ctrl+L rereads bytes changed outside");
+    expect(ui_peek(0) == 0xab && ui_probe().edited, "...keeping the edits");
 }
