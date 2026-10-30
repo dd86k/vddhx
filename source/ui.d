@@ -2526,7 +2526,7 @@ enum
     CMD_CLOSE_TAB, CMD_READONLY,
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE,
     CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_GOTO,
-    CMD_FIND, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_MARK_ALL, CMD_INSPECT, CMD_STRUCTURE,
+    CMD_FIND, CMD_FIND_BACK, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_MARK_ALL, CMD_INSPECT, CMD_STRUCTURE,
     CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_MARK_LOAD, CMD_MARK_SAVE,
@@ -2560,6 +2560,7 @@ immutable Entry[] COMMANDS = [
     Entry("Insert Range...",  "",             CMD_INSERT_RANGE, "add splice pattern repeat span"),
     Entry("Go to Offset...",  "Ctrl+G",       CMD_GOTO,         "goto jump seek address position"),
     Entry("Find...",          "Ctrl+F",       CMD_FIND,         "search grep pattern bytes string"),
+    Entry("Find Backward...", "Ctrl+Shift+F", CMD_FIND_BACK,    "search grep pattern back backward reverse"),
     Entry("Find Next",        "Ctrl+N",       CMD_FIND_NEXT,    "search again forward"),
     Entry("Find Previous",    "Ctrl+Shift+N", CMD_FIND_PREV,    "search back backward"),
     Entry("Bookmark All Matches...","",       CMD_MARK_ALL,     "find search mark every each highlight count occurrences"),
@@ -2629,6 +2630,8 @@ immutable Entry[] SHORTCUTS = [
     Entry("Go to tab 1, 2, 3...",         "Alt+1 .. Alt+9"),
     Entry("Quit",                         "Ctrl+Q"),
     Entry("Find",                         "Ctrl+F"),
+    Entry("Find backward",                "Ctrl+Shift+F"),
+    Entry("Find the other way, in the box", "Shift+Enter"),
     Entry("Find next / previous",         "Ctrl+N / Ctrl+Shift+N"),
     Entry("Inspect bytes at the caret",   "Alt+I"),
     Entry("Text size bigger / smaller",   "Ctrl+= / Ctrl+-"),
@@ -2661,7 +2664,7 @@ public bool ui_omni_active()
 /// Ctrl+Shift+P.
 public void ui_omni_toggle(char prefix = 0)
 {
-    findMarks = false;
+    findGoal = FindGoal.next;
     omni_toggle(omni, prefix);
     if (omni_shown(omni) == false)
         focusedView.hex.takeFocus = true; // typing returns to the bytes
@@ -2671,7 +2674,7 @@ public void ui_omni_toggle(char prefix = 0)
 /// second click doesn't close it.
 public void ui_omni_open(char prefix)
 {
-    findMarks = false;
+    findGoal = FindGoal.next;
     omni_show(omni, prefix);
 }
 
@@ -3098,7 +3101,7 @@ bool ui_find_preview(out string label, out string detail)
     size_t least = search_least(needle);
     char[64] count = void;
     label  = ui_row_text(buf[0 .. at]);
-    string where = findMarks ? "bookmarks every match" : "from the caret";
+    string where = FIND_WHERE[findGoal];
     detail = ui_row_text(sformat(count, least == needle.length
         ? "%u byte(s), %s" : "%u byte(s) or more, %s", least, where));
     return true;
@@ -3460,8 +3463,8 @@ bool ui_omni_complete(OmniMode mode, int id)
 }
 
 /// Act on the taken row, in the mode its list was built for (a prefix typed
-/// this frame only takes effect next frame). `transfer`: Shift, "bring here";
-/// only the switcher distinguishes it.
+/// this frame only takes effect next frame). `transfer`: Shift, "bring here" in
+/// the switcher, the other direction in find.
 void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
 {
     final switch (mode)
@@ -3495,18 +3498,27 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         // Prefix rows complete, like Tab.
         if (ui_omni_complete(mode, id))
             break;
-        // Remember the pattern, search from past the caret so repeats advance.
+        // Remember the pattern for Find Next. Search starts past the caret so repeats
+        // advance.
         Needle needle;
         if (ui_find_needle(needle))
         {
             lastNeedle = needle;
             haveNeedle = true;
-            if (findMarks)
-                ui_mark_all();
-            else
+            final switch (ui_find_goal(transfer))
+            {
+            case FindGoal.next:
                 ui_find_step(focusedView, false, cast(long) focusedView.hex.cursor + 1);
+                break;
+            case FindGoal.back:
+                ui_find_step(focusedView, true, cast(long) hex_sel_low(focusedView.hex) - 1);
+                break;
+            case FindGoal.markAll:
+                ui_mark_all();
+                break;
+            }
         }
-        findMarks = false;
+        findGoal = FindGoal.next;
         focusedView.hex.takeFocus = true;
         break;
     case OmniMode.inspect:
@@ -3743,16 +3755,63 @@ void ui_find_step(ref View v, bool backward, long from)
 /// Most matches ui_mark_all bookmarks in one go.
 enum size_t MARK_ALL_MAX = 100_000;
 
-/// Find box whose Enter bookmarks every match. Cleared by any other opening.
-__gshared bool findMarks;
+/// What Enter in the find box does with the pattern.
+enum FindGoal
+{
+    next,    /// Find forward from the caret
+    back,    /// Find backward from the caret
+    markAll, /// Bookmark every match
+}
 
-/// Open the find box to bookmark every match of the typed pattern.
-public void ui_mark_all_prompt()
+/// Find box readout per goal. The tag says the direction, so this says how to flip it.
+immutable string[FindGoal.max + 1] FIND_WHERE = [
+    "Shift+Enter goes back",
+    "Shift+Enter goes forward",
+    "bookmarks every match",
+];
+
+/// Find box tag per goal, shown at the right end of the box.
+immutable string[FindGoal.max + 1] FIND_TAG = [ "forward", "backward", "bookmark all" ];
+
+/// Find box goal. Back to next on any other opening.
+__gshared FindGoal findGoal;
+
+/// Goal Enter takes, `shift` swapping next and back.
+FindGoal ui_find_goal(bool shift)
+{
+    if (shift == false || findGoal == FindGoal.markAll)
+        return findGoal;
+    return findGoal == FindGoal.next ? FindGoal.back : FindGoal.next;
+}
+
+/// Open the find box for `goal`.
+void ui_find_prompt(FindGoal goal)
 {
     if (ui_on_settings())
         return;
     omni_show(omni, OMNI_FIND);
-    findMarks = true;
+    findGoal = goal;
+}
+
+/// Open the find box to search backward from the caret.
+public void ui_find_back_prompt()
+{
+    ui_find_prompt(FindGoal.back);
+}
+
+/// Toggle the find box searching backward. Ctrl+Shift+F.
+public void ui_find_back_toggle()
+{
+    if (omni_shown(omni) && omni_mode(omni) == OmniMode.find && findGoal == FindGoal.back)
+        ui_omni_close();
+    else
+        ui_find_back_prompt();
+}
+
+/// Open the find box to bookmark every match of the typed pattern.
+public void ui_mark_all_prompt()
+{
+    ui_find_prompt(FindGoal.markAll);
 }
 
 /// Bookmark every match of the last pattern in the focused document. Marks
@@ -4669,6 +4728,7 @@ void ui_omni_run(int id)
     // Reopens the box in another mode next frame; don't give the panel focus.
     case CMD_GOTO:      ui_omni_open(OMNI_ADDRESS);  return;
     case CMD_FIND:      ui_omni_open(OMNI_FIND);     return;
+    case CMD_FIND_BACK: ui_find_back_prompt();       return;
     case CMD_MARK_ALL:  ui_mark_all_prompt();        return;
     case CMD_INSPECT:   ui_omni_open(OMNI_INSPECT);  return;
     case CMD_MARK_LIST: ui_omni_open(OMNI_BOOKMARK); return;
@@ -4851,6 +4911,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     OmniMode mode = omni_mode(omni);
     int chosen;
     const(OmniItem)[] rows = ui_omni_active() ? ui_omni_items() : null;
+    omni_tag(omni, mode == OmniMode.find ? FIND_TAG[findGoal] : null);
     final switch (omni_frame(ctx, omni, rows, width, height, chosen))
     {
     case OmniAction.none:     ui_struct_preview(mode);
@@ -5500,6 +5561,7 @@ void ui_menubar(mu_Context* ctx)
     {
         ctx.style.padding = itemPadding;
         if (mu_menu_item_ex(ctx, "Find...",       "Ctrl+F",       0, 0)) ui_omni_open(OMNI_FIND);
+        if (mu_menu_item_ex(ctx, "Find Backward...", "Ctrl+Shift+F", 0, 0)) ui_find_back_prompt();
         if (mu_menu_item_ex(ctx, "Find Next",     "Ctrl+N",       0, 0)) ui_find_repeat(false);
         if (mu_menu_item_ex(ctx, "Find Previous", "Ctrl+Shift+N", 0, 0)) ui_find_repeat(true);
         if (mu_menu_item_ex(ctx, "Bookmark All Matches...", "", 0, 0)) ui_mark_all_prompt();

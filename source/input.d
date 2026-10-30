@@ -95,7 +95,10 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
             }
             if (event.key.key == SDLK_F)
             {
-                ui_omni_toggle(OMNI_FIND);
+                if (event.key.mod & SDL_KMOD_SHIFT)
+                    ui_find_back_toggle();
+                else
+                    ui_omni_toggle(OMNI_FIND);
                 break;
             }
             // Text size, any time. Plus too: some layouts have it unshifted.

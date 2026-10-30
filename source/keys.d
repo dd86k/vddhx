@@ -443,11 +443,38 @@ void keys_navigate()
     press(SDLK_N, CTRL | SHIFT);
     expect(low() == NEEDLE_B, "Ctrl+Shift+N goes back, wrapping round the top");
 
+    press(SDLK_HOME, CTRL);
+    press(SDLK_F, CTRL | SHIFT);
+    Probe p = ui_probe();
+    expect(p.omni && p.mode == OmniMode.find, "Ctrl+Shift+F raises find");
+    type("0xcafebabe");
+    press(SDLK_RETURN);
+    expect(ui_probe().omni == false && low() == NEEDLE_B, "...searching back, wrapping round the top");
+    press(SDLK_F, CTRL | SHIFT);
+    type("0xcafebabe");
+    press(SDLK_RETURN);
+    expect(low() == NEEDLE_A, "...and back again from the match");
+    press(SDLK_N, CTRL);
+    expect(low() == NEEDLE_B, "Ctrl+N still goes forward after");
+    press(SDLK_F, CTRL | SHIFT);
+    press(SDLK_F, CTRL | SHIFT);
+    expect(ui_probe().omni == false, "Ctrl+Shift+F twice closes the box");
+
+    // Caret on NEEDLE_B's match.
+    press(SDLK_F, CTRL);
+    type("0xcafebabe");
+    press(SDLK_RETURN, SHIFT);
+    expect(ui_probe().omni == false && low() == NEEDLE_A, "Shift+Enter in the find box goes back");
+    press(SDLK_F, CTRL | SHIFT);
+    type("0xcafebabe");
+    press(SDLK_RETURN, SHIFT);
+    expect(low() == NEEDLE_B, "...and forward from a backward one");
+
     size_t marks = ui_probe().marks;
     press(SDLK_P, CTRL | SHIFT);
     type("Bookmark All Matches");
     press(SDLK_RETURN);
-    Probe p = ui_probe();
+    p = ui_probe();
     expect(p.omni && p.mode == OmniMode.find, "Bookmark All Matches... asks for a pattern");
     type("0xcafebabe");
     press(SDLK_RETURN);

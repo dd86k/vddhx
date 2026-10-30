@@ -802,6 +802,15 @@ int screenshot_run(string[] args)
     frame();
     shot("omni-find-hit.bmp"); // match selected, scrolled to, reported
 
+    // Backward box: the tag says so.
+    ui_find_back_prompt();
+    frame();
+    mu_input_text(&ctx, "0xcafebabe");
+    frame(); frame();
+    shot("omni-find-back.bmp");
+    ui_omni_close();
+    frame();
+
     // No match is reported.
     ui_omni_toggle(OMNI_FIND);
     frame();

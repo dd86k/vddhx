@@ -108,6 +108,8 @@ struct Omnibar
     bool prompting;
     // Placeholder for an empty prompt; empty for none.
     string hint;
+    // Dimmed word at the box's right end, set per frame by omni_tag. Empty for none.
+    string tag;
     // Take focus on the frame it opens.
     bool focusWanted;
     // Text was written behind ddui; move its caret to the end.
@@ -139,6 +141,7 @@ void omni_show(ref Omnibar o, char prefix = 0)
 {
     o.shown = true;
     o.prompting = false;
+    o.tag = null;
     o.focusWanted = true;
     o.recaret = true;
     o.selected = 0;
@@ -163,6 +166,13 @@ void omni_prompt(ref Omnibar o, string hint = null, const(char)[] seed = null)
     size_t n = seed.length < o.text.length ? seed.length : o.text.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     o.text[0 .. n] = seed[0 .. n];
     o.text[n] = 0;
+}
+
+/// Show `tag` at the right end of the query box (e.g. the find direction), hidden
+/// when the query runs into it. Null for none.
+void omni_tag(ref Omnibar o, string tag)
+{
+    o.tag = tag;
 }
 
 /// Start the highlight on `index` (for lists whose current value is a row).
@@ -339,6 +349,14 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     if (o.text[0] == 0 && hint.length)
         mu_draw_text(ctx, font, hint,
             mu_Vec2(box.x + pad + HINT_INSET, box.y + (box.h - th) / 2), OMNI_HINT);
+    if (o.tag.length)
+    {
+        int tw = ctx.text_width(font, o.tag.ptr, cast(int) o.tag.length);
+        int qw = ctx.text_width(font, o.text.ptr, cast(int) omni_textlen(o));
+        if (pad + qw + ROW_GAP + tw + pad <= box.w)
+            mu_draw_text(ctx, font, o.tag,
+                mu_Vec2(box.x + box.w - pad - tw, box.y + (box.h - th) / 2), OMNI_DIM);
+    }
 
     // Clamp the selection to a shrunken list, then step. Arrows wrap.
     if (o.selected >= count)
