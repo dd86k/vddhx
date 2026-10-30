@@ -25,12 +25,14 @@ Rules:
 - **Settings**: Text size (`fontsize`). Ctrl+= and Ctrl+- zoom for the session,
   Ctrl+0 goes back to the setting.
 - **Settings**: UI and hex fonts (`font`, `monofont`), by file or font name.
-- Built-in font, used when the system has none.
+- Built-in fonts, used when the system has none.
 - **Find**: "Find Backward..." (Ctrl+Shift+F in omnibar), like ddhx's
   `find-back`. Add direction label.
 - **Find**: Shift+Enter in the find box searches the other way.
 - **File**: "Refresh" (Ctrl+L), like ddhx's `refresh`.
   Re-read document and redraw screen.
+- **Compare**: "Next Difference" (`}`) and "Previous Difference" (`{`) keys.
+  Like ddhx's `diff-next` and `diff-prev` commands.
 
 ### Changed
 

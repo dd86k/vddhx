@@ -48,6 +48,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     keys_marks_file(files);
     keys_write(files);
     keys_refresh(files);
+    keys_diff(files);
     uiPickAuto = null;
 
     keys_quit();
@@ -122,6 +123,14 @@ void type(string text)
     event.text.text = text.toStringz;
     input_event(ctx, event);
     frame(); frame();
+}
+
+/// Go to `where` through Ctrl+G.
+void goto_(string where)
+{
+    press(SDLK_G, CTRL);
+    type(where);
+    press(SDLK_RETURN);
 }
 
 enum SDL_Keymod CTRL  = SDL_KMOD_LCTRL;
@@ -338,12 +347,14 @@ void keys_quit()
 /// `saved`, `marks`: don't exist yet.
 struct Files
 {
-    string nav, drop, edit, saved, fresh, marks;
+    string nav, drop, edit, saved, fresh, marks, diff;
 }
 
 enum size_t NAV_SIZE = 0x1000;
 enum size_t NEEDLE_A = 0x100;
 enum size_t NEEDLE_B = 0x300;
+enum size_t DIFF_A = 0x10;
+enum size_t DIFF_B = 0x200;
 
 Files keys_files()
 {
@@ -364,9 +375,15 @@ Files keys_files()
     f.saved = buildPath(dir, "saved.bin");
     f.fresh = buildPath(dir, "fresh.bin");
     f.marks = buildPath(dir, "marks.txt");
+    f.diff  = buildPath(dir, "diff.bin");
     write(f.nav, bytes);
     write(f.drop, bytes);
     write(f.edit, bytes);
+    // Runs at DIFF_A and DIFF_B, then a tail.
+    ubyte[] other = bytes ~ new ubyte[0x10];
+    other[DIFF_A .. DIFF_A + 4] = 0xee;
+    other[DIFF_B] = 0xee;
+    write(f.diff, other);
     foreach (string gone; [ f.saved, f.fresh, f.marks ])
         if (exists(gone))
             remove(gone);
@@ -400,13 +417,6 @@ void keys_open(ref const(Files) f)
 
 void keys_navigate()
 {
-    void goto_(string where)
-    {
-        press(SDLK_G, CTRL);
-        type(where);
-        press(SDLK_RETURN);
-    }
-
     goto_("0x40");
     expect(ui_probe().cursor == 0x40, "Ctrl+G goes to an offset");
     goto_("+0x10");
@@ -572,4 +582,38 @@ void keys_refresh(ref const(Files) f)
     press(SDLK_L, CTRL);
     expect(ui_peek(1) == 0x5a, "Ctrl+L rereads bytes changed outside");
     expect(ui_peek(0) == 0xab && ui_probe().edited, "...keeping the edits");
+}
+
+void keys_diff(ref const(Files) f)
+{
+    ui_open(f.nav);
+    frame();
+    press(SDLK_HOME, CTRL);
+    type("}");
+    expect(ui_probe().cursor == 0, "} needs a comparison");
+
+    ui_compare_with(f.diff); // focuses the new pane
+    frame(); frame();
+    press(SDLK_HOME, CTRL);
+    type("}");
+    expect(ui_probe().cursor == DIFF_A, "} goes to the first difference");
+    type("}");
+    expect(ui_probe().cursor == DIFF_B, "...then the next");
+    type("}");
+    expect(ui_probe().cursor == NAV_SIZE, "...then the tail past the shorter file");
+    type("}");
+    expect(ui_probe().cursor == NAV_SIZE, "...and stays at the last");
+    goto_("0x12");
+    type("{");
+    expect(ui_probe().cursor == DIFF_A, "{ from inside a run goes to its start");
+    type("{");
+    expect(ui_probe().cursor == DIFF_A, "...and stays at the first");
+
+    press(SDLK_1, CTRL);
+    press(SDLK_END, CTRL);
+    type("{");
+    expect(ui_probe().cursor == DIFF_B, "{ works from the other side too");
+
+    press(SDLK_2, CTRL);
+    press(SDLK_W, CTRL); // ends the diff
 }

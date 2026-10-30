@@ -95,6 +95,9 @@ struct Document
     BackgroundWorker job;
     /// View that started the job; locked until done.
     View* jobView;
+    /// Other document the job reads (a diff's peer), or null. Edits to it are
+    /// refused too.
+    Document* jobPeer;
 
     /// Text lane charset. Find patterns specify their own encoding.
     immutable(Charset)* charset = &ASCII;
@@ -629,6 +632,7 @@ void ui_close_tab_in(Pane* p, size_t index)
     {
         d.job.abandon();
         d.jobView = null;
+        d.jobPeer = null;
     }
 
     // The only route where a view leaves to nowhere.
@@ -671,6 +675,14 @@ void ui_drop_document(Document* d)
 {
     if (d.job)
         d.job.abandon(); // before the editor goes
+    foreach (Document* other; docs)
+    {
+        if (other.jobPeer !is d || other is d)
+            continue;
+        other.job.abandon(); // reads this editor too
+        other.jobView = null;
+        other.jobPeer = null;
+    }
     if (d.editor)
     {
         IDocument[] held = (cast(PieceV4DocumentEditor) d.editor).documents();
@@ -1639,6 +1651,39 @@ public void ui_compare_stop()
     diff_unlink(v);
 }
 
+/// ddhx diff-next/diff-prev: move the caret to the start of the next (or
+/// previous) run of bytes differing from the peer. Either side of a diff works.
+public void ui_diff_step(bool backward)
+{
+    if (ui_on_settings())
+        return;
+    View* v = &focusedView();
+    View* peer = diff_peer(v);
+    if (peer is null)
+    {
+        ui_status("not comparing");
+        return;
+    }
+    IDocumentEditor mine = v.doc.editor, theirs = peer.doc.editor;
+    if (mine is null || theirs is null || ui_refuse_busy(v.doc) || ui_refuse_busy(peer.doc))
+        return;
+
+    long from = cast(long) v.hex.cursor;
+    long size = mine.size(), peerSize = theirs.size();
+    long at = -1;
+    ui_job(v, (ref SearchContext ctx) {
+        at = search_diff(from, size, peerSize, backward, &hexRead, cast(void*) theirs, ctx);
+    }, (View* w) {
+        if (at < 0)
+        {
+            ui_status("no more differences");
+            return;
+        }
+        hex_set_caret(w.hex, cast(size_t) at);
+        ui_status("difference at %s", ui_offset(at));
+    }, peer.doc);
+}
+
 /// Pane holding `v`, or null (closed while a dialog was open). Validates a
 /// View* kept across frames.
 Pane* ui_view_pane(const(View)* v)
@@ -2541,7 +2586,8 @@ enum string OPEN_DEVICE_LABEL = DISKS_LISTED ? "Open Disk..." : "Open Path...";
 /// ddhx exposes them.
 enum
 {
-    CMD_NEW_TAB, CMD_OPEN, CMD_OPEN_DEVICE, CMD_COMPARE, CMD_COMPARE_STOP, CMD_SAVE, CMD_SAVE_AS,
+    CMD_NEW_TAB, CMD_OPEN, CMD_OPEN_DEVICE, CMD_COMPARE, CMD_COMPARE_STOP, CMD_DIFF_NEXT, CMD_DIFF_PREV,
+    CMD_SAVE, CMD_SAVE_AS,
     CMD_CLOSE_TAB, CMD_READONLY, CMD_REFRESH,
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE,
     CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_GOTO,
@@ -2562,6 +2608,8 @@ immutable Entry[] COMMANDS = [
     Entry(OPEN_DEVICE_LABEL,  "",             CMD_OPEN_DEVICE,  "disk drive device volume partition physical raw block path type"),
     Entry("Compare With...",  "",             CMD_COMPARE,      "diff difference against versus changes"),
     Entry("Stop Comparing",   "",             CMD_COMPARE_STOP, "undiff end diff close comparison"),
+    Entry("Next Difference",  "}",            CMD_DIFF_NEXT,    "diff compare change hunk forward"),
+    Entry("Previous Difference","{",          CMD_DIFF_PREV,    "diff compare change hunk back backward"),
     Entry("Save",             "Ctrl+S",       CMD_SAVE,         "write store commit"),
     Entry("Save As...",       "Ctrl+Shift+S", CMD_SAVE_AS,      "write export copy to"),
     Entry("Close Tab",        "Ctrl+W",       CMD_CLOSE_TAB,    "shut document"),
@@ -3654,7 +3702,12 @@ __gshared Endian findEndian;
 /// Whether a job is walking `d` (edits refused).
 bool ui_busy(const(Document)* d)
 {
-    return d.job && d.job.busy;
+    if (d.job && d.job.busy)
+        return true;
+    foreach (const(Document)* other; docs)
+        if (other.jobPeer is d && other.job && other.job.busy)
+            return true;
+    return false;
 }
 
 /// Whether `v` is waiting on its document's job.
@@ -3693,9 +3746,10 @@ int ui_job_progress(const(View)* v)
 }
 
 /// Run `walk` on `v`'s document on a worker, then `land(v)` on the UI thread.
-/// `v` is locked and edits refused until then. Cancelled, failed or orphaned
-/// walks don't land.
-void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*) land)
+/// `v` is locked and edits refused until then, on `peer` too if the walk reads
+/// it. Cancelled, failed or orphaned walks don't land.
+void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*) land,
+    Document* peer = null)
 {
     Document* d = v.doc;
     if (d.job is null)
@@ -3709,6 +3763,7 @@ void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*)
     job.doWork   = (BackgroundWorker) { walk(*ctx); };
     job.workDone = (bool cancelled, Exception error) {
         d.jobView = null;
+        d.jobPeer = null;
         if (error)
         {
             logError("search failed: %s", error.msg);
@@ -3720,6 +3775,7 @@ void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*)
             land(v);
     };
     d.jobView  = v;
+    d.jobPeer  = peer !is d ? peer : null;
     job.run();
 }
 
@@ -4714,6 +4770,8 @@ void ui_omni_run(int id)
     case CMD_REFRESH:   ui_refresh();          break;
     case CMD_COMPARE:   ui_compare_dialog();   break;
     case CMD_COMPARE_STOP: ui_compare_stop();  break;
+    case CMD_DIFF_NEXT: ui_diff_step(false);   break;
+    case CMD_DIFF_PREV: ui_diff_step(true);    break;
     case CMD_SAVE:      cast(void)ui_save();             break;
     case CMD_SAVE_AS:   ui_save_as();          break;
     case CMD_CLOSE_TAB: ui_close_current_tab(); break;
@@ -5548,6 +5606,8 @@ void ui_menubar(mu_Context* ctx)
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Compare With...", "",        0, 0)) ui_compare_dialog();
         if (mu_menu_item_ex(ctx, "Stop Comparing",  "",        0, 0)) ui_compare_stop();
+        if (mu_menu_item_ex(ctx, "Next Difference", "}",       0, 0)) ui_diff_step(false);
+        if (mu_menu_item_ex(ctx, "Previous Difference", "{",   0, 0)) ui_diff_step(true);
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Save",       "Ctrl+S",       0, 0)) cast(void)ui_save();
         if (mu_menu_item_ex(ctx, "Save As...", "Ctrl+Shift+S", 0, 0)) ui_save_as();

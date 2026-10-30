@@ -32,9 +32,9 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
             mu_input_scroll(ctx, cast(int)(event.wheel.x * 30), cast(int)(event.wheel.y * -30));
         break;
     case SDL_EVENT_TEXT_INPUT:
-        // Brackets step bookmarks, like ddhx. Bound to the typed character, not the
-        // keycode: on many layouts they're behind AltGr (e.g. fr-ca). The omnibar
-        // keeps its brackets.
+        // Brackets step bookmarks, braces differences, like ddhx. Bound to the
+        // typed character, not the keycode: on many layouts they're behind AltGr
+        // (e.g. fr-ca). The omnibar keeps its brackets.
         if (ui_omni_active() == false && event.text.text && event.text.text[0] && event.text.text[1] == 0)
         {
             if (event.text.text[0] == ']')
@@ -45,6 +45,16 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
             if (event.text.text[0] == '[')
             {
                 ui_mark_step(-1);
+                break;
+            }
+            if (event.text.text[0] == '}')
+            {
+                ui_diff_step(false);
+                break;
+            }
+            if (event.text.text[0] == '{')
+            {
+                ui_diff_step(true);
                 break;
             }
         }

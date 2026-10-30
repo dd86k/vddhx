@@ -373,6 +373,98 @@ long search_skip(long from, long len, long size, bool backward,
     return from + ((size - len - from) / len) * len;
 }
 
+/// ddhx diff-next/diff-prev: start of the next run of bytes differing between
+/// two documents compared offset for offset, `size` bytes read through `ctx`
+/// and `peerSize` through `peerRead`. Bytes past the shorter end differ.
+///
+/// Only a run's first byte is a stop, so a modified region takes one jump.
+/// Backward from inside a run lands on its own start.
+/// Returns: Run start after (or before) `from`, or -1 if none.
+long search_diff(long from, long size, long peerSize, bool backward,
+    SearchReadFn peerRead, void* peerUser, ref SearchContext ctx)
+{
+    if (ctx.read is null || peerRead is null || from < 0)
+        return -1;
+
+    long common = size < peerSize ? size : peerSize;
+    long limit  = size < peerSize ? peerSize : size;
+    size_t cap = ctx.window.length < ctx.runWindow.length
+        ? ctx.window.length : ctx.runWindow.length;
+    ctx.done = 0;
+
+    if (backward)
+    {
+        long end = from < limit ? from : limit; // one past the highest candidate
+        if (end <= 0)
+            return -1;
+
+        // Whether the byte above the one being checked differs, once there is one.
+        bool have, next;
+        if (end > common) // from common up, every byte differs: one run
+        {
+            if (common == 0)
+                return 0;
+            have = next = true;
+            end = common;
+        }
+
+        ctx.total = end;
+        while (end > 0)
+        {
+            if (search_halted(ctx))
+                return -1;
+            long take = end > cast(long) cap ? cast(long) cap : end;
+            long pos = end - take;
+            size_t n = cast(size_t) take;
+            ubyte[] mine   = ctx.read(pos, ctx.window[0 .. n], ctx.user);
+            ubyte[] theirs = peerRead(pos, ctx.runWindow[0 .. n], peerUser);
+            if (mine.length < n || theirs.length < n)
+                return -1; // changed underneath
+            search_advance(ctx, take);
+            foreach_reverse (size_t i; 0 .. n)
+            {
+                bool differs = mine[i] != theirs[i];
+                if (have && next && differs == false)
+                    return pos + cast(long) i + 1;
+                next = differs;
+                have = true;
+            }
+            end = pos;
+        }
+        return next ? 0 : -1;
+    }
+
+    // Every byte from common on differs, so no run starts past it.
+    if (from >= common)
+        return -1;
+
+    bool prev; // whether the byte before the one being checked differs
+    long pos = from;
+    ctx.total = common - from;
+    while (pos < common)
+    {
+        if (search_halted(ctx))
+            return -1;
+        long room = common - pos;
+        size_t n = room > cast(long) cap ? cap : cast(size_t) room;
+        ubyte[] mine   = ctx.read(pos, ctx.window[0 .. n], ctx.user);
+        ubyte[] theirs = peerRead(pos, ctx.runWindow[0 .. n], peerUser);
+        if (mine.length < n || theirs.length < n)
+            return -1;
+        search_advance(ctx, cast(long) n);
+        foreach (size_t i; 0 .. n)
+        {
+            bool differs = mine[i] != theirs[i];
+            if (differs && prev == false && pos + cast(long) i > from)
+                return pos + cast(long) i;
+            prev = differs;
+        }
+        pos += cast(long) n;
+    }
+    // The tail only one side has.
+    return common < limit && prev == false ? common : -1;
+}
+
 private:
 
 bool search_halted(ref SearchContext ctx)
@@ -1098,4 +1190,84 @@ unittest
     assert(all("0xde * 0xef") == [ [ 0, 4 ], [ 6, 4 ] ]);
     assert(all("* 0xef") == [ [ 0, 4 ], [ 4, 6 ] ]);
     assert(all("0x99").length == 0);
+}
+
+unittest
+{
+    // Reads the slice `user` points at.
+    static ubyte[] reader(long pos, ubyte[] buf, void* user)
+    {
+        const(ubyte)[] data = *cast(const(ubyte)[]*) user;
+        if (pos >= data.length)
+            return null;
+        size_t n = data.length - cast(size_t) pos;
+        if (n > buf.length) n = buf.length;
+        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
+        return buf[0 .. n];
+    }
+    long diff(const(ubyte)[] mine, const(ubyte)[] theirs, long from, bool backward)
+    {
+        SearchContext* ctx = search_context(&reader, cast(void*) &mine);
+        return search_diff(from, mine.length, theirs.length, backward,
+            &reader, cast(void*) &theirs, *ctx);
+    }
+    import std.string : representation;
+    alias B = representation;
+
+    // Runs start at 2 and 6. Inside a run, forward goes to the next one and
+    // backward to its own start.
+    assert(diff(B("AAAAAAAAAA"), B("AAXXAAXXAA"), 0, false) == 2);
+    assert(diff(B("AAAAAAAAAA"), B("AAXXAAXXAA"), 2, false) == 6);
+    assert(diff(B("AAAAAAAAAA"), B("AAXXAAXXAA"), 3, false) == 6);
+    assert(diff(B("AAAAAAAAAA"), B("AAXXAAXXAA"), 6, false) == -1);
+    assert(diff(B("AAAAAAAAAA"), B("AAXXAAXXAA"), 9, true) == 6);
+    assert(diff(B("AAAAAAAAAA"), B("AAXXAAXXAA"), 7, true) == 6);
+    assert(diff(B("AAAAAAAAAA"), B("AAXXAAXXAA"), 6, true) == 2);
+    assert(diff(B("AAAAAAAAAA"), B("AAXXAAXXAA"), 2, true) == -1);
+
+    // A run at zero.
+    assert(diff(B("AAAA"), B("XAAA"), 3, true) == 0);
+    assert(diff(B("AAAA"), B("XAAA"), 0, false) == -1);
+
+    // Past the shorter end differs, whichever side is shorter. The append slot
+    // and beyond go back to the tail's start.
+    assert(diff(B("AAAA"), B("AA"), 0, false) == 2);
+    assert(diff(B("AA"), B("AAAA"), 0, false) == 2);
+    assert(diff(B("AA"), B("AAAA"), 2, false) == -1);
+    assert(diff(B("AAAA"), B("AA"), 4, true) == 2);
+    assert(diff(B("AA"), B("AAAA"), 2, true) == -1);
+    assert(diff(B("AA"), B("AAAA"), 3, true) == 2);
+    assert(diff(B("AX"), B("AAAA"), 0, false) == 1, "tail joins the run before it");
+    assert(diff(B("AX"), B("AAAA"), 3, true) == 1);
+    assert(diff(B(""), B("AA"), 1, true) == 0);
+
+    // Identical: nothing to go to.
+    assert(diff(B("hello"), B("hello"), 0, false) == -1);
+    assert(diff(B("hello"), B("hello"), 4, true) == -1);
+}
+
+unittest
+{
+    // A run across a window boundary is one run.
+    enum size_t SIZE = SEARCH_WINDOW * 2;
+    enum size_t RUN = SEARCH_WINDOW - 2;
+    static __gshared ubyte[SIZE] mine, theirs;
+    theirs[RUN .. SEARCH_WINDOW + 2] = 0xff;
+    static ubyte[] reader(long pos, ubyte[] buf, void* user)
+    {
+        ubyte[] data = (cast(ubyte[SIZE]*) user)[0][];
+        size_t n = buf.length;
+        if (pos + n > data.length) n = data.length - cast(size_t) pos;
+        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
+        return buf[0 .. n];
+    }
+    long diff(long from, bool backward)
+    {
+        SearchContext* ctx = search_context(&reader, &mine);
+        return search_diff(from, SIZE, SIZE, backward, &reader, &theirs, *ctx);
+    }
+    assert(diff(0, false) == RUN);
+    assert(diff(RUN, false) == -1);
+    assert(diff(SIZE - 1, true) == RUN);
+    assert(diff(SEARCH_WINDOW + 1, true) == RUN);
 }
