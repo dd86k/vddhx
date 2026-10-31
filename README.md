@@ -3,7 +3,7 @@
 A graphical port of the [ddhx](https://github.com/dd86k/ddhx) hex editor on
 SDL3 and [ddui](https://github.com/dd86k/ddui), while using the same robust document core as ddhx.
 
-Tabs and splits, byte-class colouring, a minimap, ddhx's find and goto syntax,
+Tabs and splits, byte-class coloring, a minimap, ddhx's find and goto syntax,
 bookmarks, byte-for-byte compare, and an omnibar over the lot.
 
 ![vddhx: two panes and the omnibar](assets/screenshot.png)
@@ -73,6 +73,17 @@ bind h left
 bind ctrl+k find-next
 unbind ctrl+b
 ```
+
+Colors use ddhx's `color SCHEME FG:BG` lines, also editable in Settings > Colors.
+Values are ddhx's names (`red`, `brightblue`...) or `#rrggbb`:
+```
+color zero gray
+color bookmark black:#d0a020
+color selection :#304060
+```
+Schemes are ddhx's (`normal`, `zero`, `cursor`, `mirror`, `selection`, `bookmark`,
+`diff-changed`, `diff-missing`) plus the byte classes `whitespace`, `control` and
+`unmapped`. `normal` is printable bytes.
 
 Each session logs to `vddhx.log`, the previous session's kept as `vddhx.log.old`:
 - Linux and macOS: `$XDG_STATE_HOME/vddhx/` (`~/.local/state/vddhx/`)

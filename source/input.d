@@ -267,7 +267,7 @@ private bool modifierKey(SDL_KeyCode key)
 /// SDL3 keycode to omnibar key (0 if unmapped).
 ///
 /// Separate from muiKey: its HEX_KEY_* bits collide with ddui's editing keys
-/// (HEX_KEY_HOME == MU_KEY_DELETE). ddui only honours copy/cut/paste/select-all
+/// (HEX_KEY_HOME == MU_KEY_DELETE). ddui only honors copy/cut/paste/select-all
 /// while Ctrl is held.
 private int omniKey(SDL_KeyCode key)
 {

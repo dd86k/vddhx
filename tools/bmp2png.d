@@ -49,7 +49,7 @@ struct Channel
     ubyte extract(uint px) const
     {
         if (max == 0)
-            return 255; // absent channel: opaque alpha, or a colour that is all of it
+            return 255; // absent channel: opaque alpha, or a color that is all of it
         const uint v = (px >> shift) & max;
         return cast(ubyte)((v * 255 + max / 2) / max);
     }

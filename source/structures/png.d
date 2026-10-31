@@ -96,7 +96,7 @@ final class PngStructure : IStructure
         b.field(StructureRole.scalar, "width", 4);
         b.field(StructureRole.scalar, "height", 4);
         b.field(StructureRole.scalar, "bit depth", 1);
-        b.field(StructureRole.flags, "colour type", 1);
+        b.field(StructureRole.flags, "color type", 1);
         b.field(StructureRole.flags, "compression", 1);
         b.field(StructureRole.flags, "filter", 1);
         b.field(StructureRole.flags, "interlace", 1);
@@ -138,7 +138,7 @@ version (unittest)
     // Signature, IHDR, one IDAT, IEND. Offsets used by the tests:
     //   0  signature (8)
     //   8  IHDR chunk (25): 8 length, 12 type, 16 width, 20 height, 24 depth,
-    //      25 colour, 26 compression, 27 filter, 28 interlace, 29 crc
+    //      25 color, 26 compression, 27 filter, 28 interlace, 29 crc
     //   33 IDAT chunk (16): 33 length, 37 type, 41 data, 45 crc
     //   49 IEND chunk (12): 49 length, 53 type, 57 crc
     private ubyte[] pngFile()

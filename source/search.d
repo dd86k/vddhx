@@ -68,7 +68,7 @@ struct SearchContext
 {
     SearchReadFn read;
     void* user;
-    /// Checked per window. Results of a cancelled walk are meaningless.
+    /// Checked per window. Results of a canceled walk are meaningless.
     shared(bool)* cancel;
     /// Called per window with 0-100.
     void delegate(int percent) progress;

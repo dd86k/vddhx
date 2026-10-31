@@ -59,12 +59,12 @@ uint hex_radix(HexBase base)
     }
 }
 
-/// Glyph colour for the byte at `offset`. `value` saves a buffer read;
+/// Glyph color for the byte at `offset`. `value` saves a buffer read;
 /// `user` is HexView.colorUser.
 alias HexColorFn = mu_Color function(size_t offset, ubyte value, void* user);
 
 /// Background for the byte at `offset` (`user`: HexView.backUser), alpha 0 for
-/// none. Same-colour runs draw as one band.
+/// none. Same-color runs draw as one band.
 ///
 /// Separate from HexColorFn: foreground is what a byte is, background is what
 /// was done to it (marked, found).
@@ -87,14 +87,14 @@ struct HexSpan
     /// same start share one border.
     long start;
     long length;    /// In bytes.
-    mu_Color edge;  /// Border colour.
+    mu_Color edge;  /// Border color.
 }
 
 /// Structure hook: span covering `pos` at `level`, counted from the outermost
 /// (0: top-level record), or false. `user` is HexView.spanUser.
 ///
 /// Counted from the top so all bytes of a record share a border regardless of
-/// depth. Returns an extent, not a colour: adjacent same-kind fields are still
+/// depth. Returns an extent, not a color: adjacent same-kind fields are still
 /// separate boxes; cells join only when their spans start at the same place.
 /// Offset-only, so rows above and below can be queried to merge multi-row
 /// spans.
@@ -137,8 +137,11 @@ private enum
                                 // NOTE: 2 leaves a visible gap where lines overlap
 }
 
-/// Selection wash, grid and minimap. Highest priority: see hex_draw_row.
+/// Default selection wash, grid and minimap. Highest priority: see hex_draw_row.
 enum mu_Color HEX_SEL_WASH = mu_Color(48, 84, 140, 255);
+
+/// Default caret outline.
+enum mu_Color HEX_CARET = mu_Color(120, 170, 235, 255);
 
 /// Max row width, drawn or auto-fitted.
 enum int HEX_COLUMNS_MAX = 256;
@@ -179,14 +182,21 @@ struct HexView
     /// Queued move keeps the anchor.
     bool moveExtend;
 
-    /// Optional per-byte colour scheme. Null falls back to hex_classify.
+    /// Selection wash. Read per frame.
+    mu_Color selColor = HEX_SEL_WASH;
+    /// Caret outline in the hex lane. Read per frame.
+    mu_Color caretColor = HEX_CARET;
+    /// Caret outline in the text lane. Read per frame.
+    mu_Color mirrorColor = HEX_CARET;
+
+    /// Optional per-byte color scheme. Null falls back to hex_classify.
     HexColorFn colorFn;
     /// Opaque pointer forwarded to colorFn.
     void* colorUser;
 
     /// Optional per-byte background wash, drawn under the glyphs. See HexBackFn.
     HexBackFn backFn;
-    /// Minimap form of backFn; null leaves the ribbon class-coloured.
+    /// Minimap form of backFn; null leaves the ribbon class-colored.
     HexBackSpanFn backSpanFn;
     /// Opaque pointer forwarded to both background hooks.
     void* backUser;
@@ -289,7 +299,7 @@ struct HexView
     uint windowRev;      // *revision at fill
     void* windowUser;    // readUser at fill
 
-    // Minimap cell colours (dominant class per segment). Rebuilt only on size or
+    // Minimap cell colors (dominant class per segment). Rebuilt only on size or
     // cell count change.
     mu_Color[] mapCells;
     size_t mapForSize;   // size at build
@@ -529,7 +539,7 @@ void hex_set_top(ref HexView v, long row)
     v.topRow = row;
 }
 
-/// Centre `pos`'s row in the part of the panel below window y `coversTo` (a
+/// Center `pos`'s row in the part of the panel below window y `coversTo` (a
 /// floating box over the grid). hex_set_caret scrolls minimally, which can land
 /// under the box.
 void hex_center(ref HexView v, size_t pos, int coversTo = 0)
@@ -601,7 +611,7 @@ unittest
     assert(hex_sel_high(v) == 7);
 }
 
-/// Default colours by ASCII class: dim zeros, bright printable, controls
+/// Default colors by ASCII class: dim zeros, bright printable, controls
 /// distinct from non-ASCII. Other encodings supply their own colorFn.
 mu_Color hex_classify(size_t offset, ubyte value, void* user)
 {
@@ -661,8 +671,8 @@ int hex_view(mu_Context* ctx, const(char)* name, ref HexView v, mu_Font font,
     HexLayout lay = hex_layout(offsetDigits, cols, charW);
 
     // Header above the scroll area. Filled now, before the panel (whose border
-    // overlaps by a pixel), labelled after it since input can scroll sideways this
-    // frame. Uses the panel canvas colour; a transparent fill shows the window.
+    // overlaps by a pixel), labeled after it since input can scroll sideways this
+    // frame. Uses the panel canvas color; a transparent fill shows the window.
     int head = -1;
     mu_layout_row(ctx, 1, &head, rowH);
     mu_Rect headRect = mu_layout_next(ctx);
@@ -1679,7 +1689,7 @@ void hex_minimap(mu_Context* ctx, ref HexView v, mu_Rect strip,
         mu_draw_box(ctx, view, mu_Color(190, 215, 255, 255));  // region border
     }
 
-    // Click or drag to centre the view there.
+    // Click or drag to center the view there.
     mu_Id id = mu_get_id(ctx, "!hexminimap".ptr, 11);
     mu_update_control(ctx, id, strip, 0);
     if (ctx.focus == id && (ctx.mouse_down & MU_MOUSE_LEFT) && maxTop > 0)
@@ -1704,7 +1714,7 @@ mu_Color hex_map_wash(ref const(HexView) v, long index, int cells, long total)
     size_t selLow  = hex_sel_low(v);
     size_t selHigh = hex_sel_high(v);
     if (v.active && selLow != selHigh && cast(long) selHigh >= start && cast(long) selLow < end)
-        return hex_wash_lift(HEX_SEL_WASH);
+        return hex_wash_lift(v.selColor);
 
     if (v.backSpanFn is null)
         return mu_Color(0, 0, 0, 0);
@@ -1755,7 +1765,7 @@ void hex_plainbar(mu_Context* ctx, ref HexView v, mu_Rect strip,
     mu_draw_rect(ctx, mu_Rect(strip.x, ty, strip.w, thumbH),
         mu_Color(90, 110, 150, 255));
 
-    // Click or drag: thumb centre follows the pointer.
+    // Click or drag: thumb center follows the pointer.
     mu_Id id = mu_get_id(ctx, "!hexscroll".ptr, 10);
     mu_update_control(ctx, id, strip, 0);
     if (ctx.focus == id && (ctx.mouse_down & MU_MOUSE_LEFT) && maxTop > 0 && travel > 0)
@@ -1766,8 +1776,8 @@ void hex_plainbar(mu_Context* ctx, ref HexView v, mu_Rect strip,
     }
 }
 
-// Rebuild minimap colours: sample each segment with a fixed budget, keep the
-// dominant colour. Cost is `cells` small reads regardless of file size.
+// Rebuild minimap colors: sample each segment with a fixed budget, keep the
+// dominant color. Cost is `cells` small reads regardless of file size.
 void hex_build_minimap(ref HexView v, int cells)
 {
     size_t total = hex_total(v);
@@ -1790,7 +1800,7 @@ void hex_build_minimap(ref HexView v, int cells)
     {
         long start = c * len / cells;
         long end   = (c + 1) * len / cells;
-        // More cells than bytes: empty spans use the byte at `start`, else uncoloured
+        // More cells than bytes: empty spans use the byte at `start`, else uncolored
         // cells stripe the ribbon.
         long span = end > start ? end - start : 1;
         size_t take = span < MINIMAP_PROBE ? cast(size_t) span : MINIMAP_PROBE;
@@ -1807,7 +1817,7 @@ unittest
     v.data = cast(const(ubyte)[]) "0123456789abcdef\x00\x01";
     hex_build_minimap(v, CELLS);
 
-    // All cells coloured despite 10x more cells than bytes.
+    // All cells colored despite 10x more cells than bytes.
     assert(v.mapCells.length == CELLS);
     foreach (mu_Color c; v.mapCells)
         assert(c.a != 0);
@@ -1833,7 +1843,7 @@ ubyte[] hex_probe(ref HexView v, long pos, ubyte[] buf)
     return buf[0 .. n];
 }
 
-// Dominant colour of a sample, via the panel's scheme so ribbon and grid
+// Dominant color of a sample, via the panel's scheme so ribbon and grid
 // match. Class only; washes are added by hex_map_wash.
 mu_Color hex_dominant(ref const(HexView) v, const(ubyte)[] chunk, long baseOff)
 {
@@ -1843,7 +1853,7 @@ mu_Color hex_dominant(ref const(HexView) v, const(ubyte)[] chunk, long baseOff)
     HexColorFn colorFn = v.colorFn ? v.colorFn : &hex_classify;
     void* user = cast(void*) v.colorUser;
 
-    // Few colours from hex_classify; extras past the cap don't vote.
+    // Few colors from hex_classify; extras past the cap don't vote.
     mu_Color[8] pal = void;
     int[8] hits;
     int n;
@@ -1902,7 +1912,7 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
         hex_draw_offset(ctx, v, lay, body.x, endX, body.y, 0, font);
         mu_push_clip_rect(ctx, lanes);
         if (v.active)
-            hex_draw_caret(ctx, lay, originX, body.y, 0, charW, rowH, hex_caret_nib(v));
+            hex_draw_caret(ctx, v, lay, originX, body.y, 0, charW, rowH, hex_caret_nib(v));
         mu_pop_clip_rect(ctx);
         return;
     }
@@ -1936,7 +1946,7 @@ void hex_paint(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
         if (row >= firstRow && row <= lastRow + 1)
         {
             int y = body.y + cast(int)((row - topRow) * rowH);
-            hex_draw_caret(ctx, lay, originX, y, col, charW, rowH, hex_caret_nib(v));
+            hex_draw_caret(ctx, v, lay, originX, y, col, charW, rowH, hex_caret_nib(v));
         }
     }
     mu_pop_clip_rect(ctx);
@@ -1971,19 +1981,19 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     {
         int lo = selLow  > rowStart ? cast(int)(selLow - rowStart) : 0;
         int hi = selHigh < rowStart + count ? cast(int)(selHigh - rowStart) : count - 1;
-        hex_draw_band(ctx, lay, originX, y, lo, hi, charW, rowH, HEX_SEL_WASH);
+        hex_draw_band(ctx, lay, originX, y, lo, hi, charW, rowH, v.selColor);
     }
 
     if (backFn)
         hex_wash_outline(ctx, v, lay, backFn, originX, y, rowStart, count, cols, charW, rowH);
 
     // Structure borders under the glyphs, outermost first: borders mark records,
-    // colours mark fields.
+    // colors mark fields.
     if (v.spanFn)
         for (int level; level < v.spanDepth; ++level)
             hex_span_outline(ctx, v, lay, originX, y, rowStart, count, cols, charW, rowH, level);
 
-    // Hex pair and text glyph share the byte colour.
+    // Hex pair and text glyph share the byte color.
     char[2] cell = void;
     char[1] ch = void;
     for (int i; i < count; ++i)
@@ -2006,7 +2016,7 @@ void hex_draw_row(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) la
     }
 
     if (v.active && v.cursor >= rowStart && v.cursor < rowStart + count)
-        hex_draw_caret(ctx, lay, originX, y, cast(int)(v.cursor - rowStart), charW, rowH, hex_caret_nib(v));
+        hex_draw_caret(ctx, v, lay, originX, y, cast(int)(v.cursor - rowStart), charW, rowH, hex_caret_nib(v));
 }
 
 // Text lane characters for a byte; `scratch` holds single-char results.
@@ -2057,7 +2067,7 @@ int hex_caret_nib(ref const(HexView) v)
     return v.editLow ? 1 : 0;
 }
 
-// Fill washed cells, merging same-colour neighbours (gaps included) into one
+// Fill washed cells, merging same-color neighbours (gaps included) into one
 // rect.
 void hex_wash_fill(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     HexBackFn backFn, int originX, int y, size_t rowStart, int count, int charW,
@@ -2079,7 +2089,7 @@ void hex_wash_fill(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) l
     }
 }
 
-// Outline washed cells with a lifted wash colour; survives the selection fill
+// Outline washed cells with a lifted wash color; survives the selection fill
 // (see hex_draw_row). Edges are dropped between same-wash neighbours, so runs
 // outline as one region across rows. Rows above and below are queried via
 // backSpanFn (offset-only; hex_byte is invalid off-window). No backSpanFn, no
@@ -2134,8 +2144,8 @@ void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
 }
 
 // Outline structure spans on this row at level `up`, `weight` px thick, in
-// each span's edge colour. Like hex_wash_outline but joined by span start, not
-// colour (see HexSpanFn).
+// each span's edge color. Like hex_wash_outline but joined by span start, not
+// color (see HexSpanFn).
 // NOTE: One hook call per cell per side; if it gets slow, carry each row's
 // answers to the next as its top neighbours.
 void hex_span_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
@@ -2279,17 +2289,16 @@ void hex_draw_band(mu_Context* ctx, ref const(HexLayout) lay, int originX, int y
 
 // Caret outline in both lanes at column `col`. `nib`: -1 whole pair, 0 high,
 // 1 low. The text lane is one glyph.
-void hex_draw_caret(mu_Context* ctx, ref const(HexLayout) lay, int originX, int y,
-    int col, int charW, int rowH, int nib)
+void hex_draw_caret(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
+    int originX, int y, int col, int charW, int rowH, int nib)
 {
-    mu_Color curColor = mu_Color(120, 170, 235, 255);
     int hx = originX + hex_col_for(lay, col) * charW;
     if (nib < 0)
-        mu_draw_box(ctx, mu_Rect(hx - 1, y, 2 * charW + 2, rowH), curColor);
+        mu_draw_box(ctx, mu_Rect(hx - 1, y, 2 * charW + 2, rowH), v.caretColor);
     else
-        mu_draw_box(ctx, mu_Rect(hx + nib * charW - 1, y, charW + 2, rowH), curColor);
+        mu_draw_box(ctx, mu_Rect(hx + nib * charW - 1, y, charW + 2, rowH), v.caretColor);
     int ax = originX + (lay.asciiStart + col) * charW;
-    mu_draw_box(ctx, mu_Rect(ax - 1, y, charW + 2, rowH), curColor);
+    mu_draw_box(ctx, mu_Rect(ax - 1, y, charW + 2, rowH), v.mirrorColor);
 }
 
 // Avoids a C import for one call.

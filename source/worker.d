@@ -23,7 +23,7 @@ final class BackgroundWorker
     /// UI thread.
     void delegate(int percent) progressReported;
     /// UI thread, once per run unless abandoned. `error` is what doWork threw.
-    void delegate(bool cancelled, Exception error) workDone;
+    void delegate(bool canceled, Exception error) workDone;
 
     void run()
     {
@@ -43,7 +43,7 @@ final class BackgroundWorker
         thread.start();
     }
 
-    /// Request a stop; doWork must poll cancelled.
+    /// Request a stop; doWork must poll canceled.
     void cancel()
     {
         atomicStore(cancelFlag, true);
@@ -61,7 +61,7 @@ final class BackgroundWorker
     }
 
     /// Any thread.
-    bool cancelled()
+    bool canceled()
     {
         return atomicLoad(cancelFlag);
     }
@@ -141,7 +141,7 @@ void worker_pump()
             w.thread.join(false);
             w.running = false;
             if (w.workDone)
-                w.workDone(w.cancelled, w.error);
+                w.workDone(w.canceled, w.error);
             break;
         }
     }
@@ -180,14 +180,14 @@ unittest
     import core.time : msecs;
 
     int[] seen;
-    bool finished, wasCancelled;
+    bool finished, wasCanceled;
     BackgroundWorker w = new BackgroundWorker;
     w.doWork = (BackgroundWorker self) {
         foreach (int i; 0 .. 5)
             self.reportProgress(i < 3 ? 50 : 100); // repeats coalesced
     };
     w.progressReported = (int p) { seen ~= p; };
-    w.workDone = (bool c, Exception e) { finished = true; wasCancelled = c; };
+    w.workDone = (bool c, Exception e) { finished = true; wasCanceled = c; };
     w.run();
     while (w.busy)
     {
@@ -195,13 +195,13 @@ unittest
         worker_pump();
     }
     assert(seen == [ 50, 100 ]);
-    assert(finished && wasCancelled == false);
+    assert(finished && wasCanceled == false);
 
     // Abandon: thread is joined, its posts are dropped.
     finished = false;
     w.doWork = (BackgroundWorker self) {
         self.reportProgress(1);
-        while (self.cancelled == false) {}
+        while (self.canceled == false) {}
     };
     w.run();
     w.abandon();

@@ -55,7 +55,7 @@ loop:
   own list ends on the software one: a machine where every accelerated driver
   fails to create still gets a renderer rather than the startup box. A name is
   where that stops applying - SDL takes `SDL_RENDER_DRIVER` as the whole list and
-  fails outright - so a name it cannot honour is warned about and dropped.
+  fails outright - so a name it cannot honor is warned about and dropped.
 - **The software renderer still has vsync.** It presents by handing the window
   surface back to the platform, so it has none of its own, but the loop needs no
   delay of its own either: SDL forwards the request to the accelerated renderer
@@ -68,7 +68,7 @@ loop:
   popups behind the content they sit over.
 - **Drawing outside ddui.** ddui's only shape is a filled rect, so anything else
   (`elite.d`'s wireframe) reserves its rectangle in the layout and pushes a
-  command whose type is one past ddui's own. `render_commands` recognises it and
+  command whose type is one past ddui's own. `render_commands` recognizes it and
   calls back, which is what keeps such drawing in z-order and clipped like the
   rest. ddui reserves no user range for this; the type is a plain int and that
   loop is the only thing that reads it.
@@ -117,7 +117,7 @@ caret. Anything tempted into it should go to whichever surface owns that fact
 instead; the bar had already grown past the window's width once.
 
 Every level is held by pointer, never by value, because the hex panel's callbacks park a `Document*`
-and a `View*` for ddui to hand back on every read, colour and edit, and those
+and a `View*` for ddui to hand back on every read, color and edit, and those
 have to survive their neighbours closing. A pane is likewise named by its pointer
 everywhere, so splitting or closing elsewhere in the grid cannot silently turn a
 reference to one pane into a reference to another.
@@ -140,7 +140,7 @@ arrives as a function pointer plus a user pointer: `HexReadFn` for bytes,
 `HexInsertFn` / `HexRemoveFn` / `HexUndoFn` / `HexRedoFn` for editing. A panel
 with no write hooks is read-only; one with no read hook draws its `data` slice.
 That is what lets the panel be unit-tested against a plain array, and what makes
-the diff colouring a hook rather than a mode.
+the diff coloring a hook rather than a mode.
 
 Scrolling is tracked in **rows, not pixels**, so a multi-gigabyte file cannot
 overflow the offset, and rows are virtualised: only what is on screen is ever

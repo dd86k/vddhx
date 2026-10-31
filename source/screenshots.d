@@ -22,6 +22,7 @@ import hexview : HexBase, HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, 
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
 import preferences : prefs;
 import bindings : bind_capture;
+import theme : theme_color, theme_defaults;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
@@ -303,7 +304,7 @@ int screenshot_run(string[] args)
     frame();
     shot("rows.bmp");
 
-    // Scenario 0b (debug): PNG, for structure colours and borders. Closed after;
+    // Scenario 0b (debug): PNG, for structure colors and borders. Closed after;
     // later scenarios count tabs.
     ui_open("assets/icon/vddhx-256.png");
     frame();
@@ -345,7 +346,7 @@ int screenshot_run(string[] args)
     mu_input_mousemove(&ctx, 0, 0);
     frame();
 
-    // Walking the list moves the caret, centred in the area the box doesn't cover.
+    // Walking the list moves the caret, centered in the area the box doesn't cover.
     // Esc restores.
     mu_input_text(&ctx, "idat");
     frame(); frame();
@@ -417,6 +418,13 @@ int screenshot_run(string[] args)
     mu_input_keyup(&ctx, MU_KEY_SHIFT);
     frame();
     shot("clip-sel.bmp");
+    // Same, recolored through .vddhxrc color lines.
+    foreach (string[2] c; [ ["zero", "red"], ["normal", "yellow"], ["selection", ":#204020"],
+        ["cursor", "brightpurple"], ["mirror", "white"] ])
+        theme_color(c[0], c[1], true);
+    frame();
+    shot("colors.bmp");
+    theme_defaults();
     // Text lane copy; non-printables become dots.
     ui_copy_text();
     frame();
@@ -483,7 +491,7 @@ int screenshot_run(string[] args)
     click(settingsItem.x + 3, settingsItem.y + 3);
     frame(); frame();
     shot("settings.bmp");
-    foreach (string page; ["Appearance", "Keys", "Defaults"])
+    foreach (string page; ["Appearance", "Colors", "Keys", "Defaults"])
     {
         mu_Vec2 at = find(page.ptr); // literals are NUL-terminated
         click(at.x + 3, at.y + 3);
@@ -491,6 +499,7 @@ int screenshot_run(string[] args)
         switch (page)
         {
         case "Appearance": shot("settings-appearance.bmp"); break;
+        case "Colors":    shot("settings-colors.bmp"); break;
         case "Keys":
             shot("settings-keys.bmp");
             // First row waits for a key.
@@ -597,7 +606,7 @@ int screenshot_run(string[] args)
     shot("drop-landed.bmp");
 
     // Drag a tab out into another pane, with the target highlighted. Aimed at the
-    // leftmost pane's centre to join (outer thirds split, see split_zone).
+    // leftmost pane's center to join (outer thirds split, see split_zone).
     mu_Vec2 leaving = find("oth");
     int leavingY = leaving.y + 3;
     mu_input_mousemove(&ctx, leaving.x + 3, leavingY); frame(); frame();
@@ -1156,7 +1165,7 @@ int screenshot_run(string[] args)
     shot("omni-dismissed.bmp");
 
     // Scenario 17: diff, with fresh fixtures (diffB = diffA, some bytes changed,
-    // plus a tail). diffA draws normally; diffB carries the colouring (dim where
+    // plus a tail). diffA draws normally; diffB carries the coloring (dim where
     // equal, red where not).
     ui_open(fix.diffA);
     frame();

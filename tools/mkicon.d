@@ -5,7 +5,7 @@
 // the PNGs and BMPs are the same numbers rasterised here with 4x4 supersampling,
 // so every output comes from one source and no external converter is needed.
 ///
-// Colours are copied from hex_classify and ui.d
+// Colors are copied from hex_classify and ui.d
 module mkicon;
 
 import std.file : write, mkdirRecurse;
@@ -33,7 +33,7 @@ enum RGBA PLATE   = RGBA(18, 18, 22);
 enum RGBA ACCENT  = RGBA(230, 170, 60);
 
 // One byte class per cell, arranged for balance rather than transcribed from a
-// real dump: two runs of padding, a bookmarked byte at the centre to focus it.
+// real dump: two runs of padding, a bookmarked byte at the center to focus it.
 immutable RGBA[3][3] CELLS = [
     [HIGH,  PRINT,  CTRL],
     [PRINT, ACCENT, WS],
@@ -55,7 +55,7 @@ struct Geo
 enum Geo NORMAL = Geo(2, 60, 13, 11, 12, 3, 2.5);
 
 // At 16 the normal geometry puts 3-pixel cells behind 0.75-pixel gaps, which
-// average into a grey smear, and the plate's corner radius bites into the
+// average into a gray smear, and the plate's corner radius bites into the
 // corner cells. So the small sizes get their own proportions - full bleed, and
 // half the padding - chosen to land every edge on a whole pixel at 16.
 enum Geo SMALL = Geo(0, 64, 14, 4, 16, 4, 3);
@@ -63,7 +63,7 @@ enum Geo SMALL = Geo(0, 64, 14, 4, 16, 4, 3);
 Geo geometry(int size) { return size < 32 ? SMALL : NORMAL; }
 
 // Coverage test for one rounded rectangle, by clamping the point to the rect of
-// corner centres: inside the straight edges that lands on the point itself.
+// corner centers: inside the straight edges that lands on the point itself.
 bool in_round_rect(double px, double py, double x, double y, double w, double h, double r)
 {
     if (px < x || py < y || px > x + w || py > y + h)
@@ -74,7 +74,7 @@ bool in_round_rect(double px, double py, double x, double y, double w, double h,
     return dx * dx + dy * dy <= r * r;
 }
 
-// The colour at one point in design space, or alpha 0 outside the plate.
+// The color at one point in design space, or alpha 0 outside the plate.
 RGBA sample(const ref Geo g, double x, double y)
 {
     if (in_round_rect(x, y, g.plateInset, g.plateInset, g.plateSize, g.plateSize, g.plateR) == false)
@@ -126,7 +126,7 @@ Image render(int size)
                 }
 
             enum uint total = SUPERSAMPLE * SUPERSAMPLE;
-            // Straight alpha, so the colour is the average of the samples that
+            // Straight alpha, so the color is the average of the samples that
             // landed on the mark rather than of all of them.
             img.px[y * size + x] = hits == 0 ? RGBA(0, 0, 0, 0)
                 : RGBA(cast(ubyte)(r / hits), cast(ubyte)(g / hits), cast(ubyte)(b / hits),

@@ -1,5 +1,5 @@
 /// Structure overlay: parsers register named spans (fields, records, chunks)
-/// that the grid borders, the theme colours, and the status bar names.
+/// that the grid borders, the theme colors, and the status bar names.
 ///
 /// Parsing is incremental: the cache only drives a parser up to the offset
 /// asked for. Spans nest but never straddle, so they're a sorted array with
@@ -16,7 +16,7 @@ import std.system : Endian;
 
 import ddhx.charset : Charset, ASCII;
 
-/// Span or byte role. The theme maps each to a colour.
+/// Span or byte role. The theme maps each to a color.
 enum StructureRole
 {
     // Unclaimed: containers, or bytes no span covers. Never a classifier answer.
@@ -46,10 +46,10 @@ enum StructureRole
 /// Role of a byte no structure claims, one of the classifier buckets.
 ///
 /// Charset-bound: buckets follow the text lane's encoding (EBCDIC 0xC1 is 'A',
-/// printable). Colours per role never change by charset.
+/// printable). Colors per role never change by charset.
 ///
 /// `control` and `whitespace` are by mapped code point, not glyph: CP437 draws
-/// all of C0, but calling those printable would colour everything the same.
+/// all of C0, but calling those printable would color everything the same.
 /// `unmapped`: nothing to draw (includes soft hyphen and private use).
 StructureRole structure_classify(ubyte value, immutable(Charset)* set = &ASCII)
 {
@@ -220,7 +220,7 @@ struct StructureBuilder
     /// Open a container at the cursor; the cursor doesn't move. `length` -1: close()
     /// measures it.
     ///
-    /// No role: colour belongs to the leaves. A role per record would colour the
+    /// No role: color belongs to the leaves. A role per record would color the
     /// whole file one way.
     void open(string name, long length = -1)
     {
@@ -390,7 +390,7 @@ void structure_invalidate(ref StructureCache c, long from)
     c.builder.depth = 0;
     c.builder.dropped = 0;
 
-    // Resume the shade run from the surviving leaf so fields don't flip colour.
+    // Resume the shade run from the surviving leaf so fields don't flip color.
     c.builder.lastEnd = long.min;
     c.builder.lastRole = StructureRole.none;
     c.builder.lastShade = false;
@@ -692,7 +692,7 @@ unittest
     b.field(StructureRole.scalar, "width", 4);
     b.field(StructureRole.scalar, "height", 4);
     b.field(StructureRole.scalar, "bit depth", 1);
-    b.field(StructureRole.flags, "colour type", 1);
+    b.field(StructureRole.flags, "color type", 1);
     b.field(StructureRole.flags, "compression", 1);
     b.close();
 

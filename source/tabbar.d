@@ -84,7 +84,7 @@ enum TabAction
     detach, /// Dragged out and released; caller decides where.
 }
 
-// The active tab uses the window body colour so it joins the content.
+// The active tab uses the window body color so it joins the content.
 private enum mu_Color TAB_IDLE    = mu_Color( 38,  38,  44, 255);
 private enum mu_Color TAB_HOVER   = mu_Color( 60,  60,  70, 255);
 private enum mu_Color TAB_ACCENT  = mu_Color(110, 170, 255, 255); // active tab top edge
@@ -440,12 +440,12 @@ int tab_width(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     return mu_clamp(tw + closeW + inset * 2 + TAB_GAP, bar.minWidth, bar.maxWidth);
 }
 
-// Target index for the tab dragged to `centre`. `from`: its index, `widths`:
+// Target index for the tab dragged to `center`. `from`: its index, `widths`:
 // slots in display order, `originX`: left edge they start from.
 //
 // The dragged tab is excluded from the layout, otherwise moving it shifts
 // the slots and tabs of unequal widths oscillate.
-int tab_drop_index(const(int)[] widths, int from, int originX, int centre)
+int tab_drop_index(const(int)[] widths, int from, int originX, int center)
 {
     int index;
     int x = originX;
@@ -453,7 +453,7 @@ int tab_drop_index(const(int)[] widths, int from, int originX, int centre)
     {
         if (cast(int) i == from)
             continue; // skip its own gap
-        if (x + w / 2 >= centre)
+        if (x + w / 2 >= center)
             break;    // middle still to the right
         x += w;
         ++index;
@@ -546,7 +546,7 @@ unittest
 /// Whole-number scale for the dot and padlock on a `th` line, so they stay crisp.
 int tab_scale(int th) => mu_max(1, th / TAB_ICON_TH);
 
-// Padlock TAB_LOCK_W wide (scaled) at `x`, centred on a `th` line at `y`. Drawn
+// Padlock TAB_LOCK_W wide (scaled) at `x`, centered on a `th` line at `y`. Drawn
 // with rects; the UI font may lack a glyph.
 void tab_lock(mu_Context* ctx, int x, int y, int th, mu_Color ink)
 {
@@ -573,7 +573,7 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
 {
     mu_Rect closeR = tab_close_rect(r, closeW);
 
-    // Active: full height, body colour. Others: lower and darker.
+    // Active: full height, body color. Others: lower and darker.
     mu_Color face = active ? (bar.content.a ? bar.content :
                               ctx.style.colors[MU_COLOR_WINDOWBG]) :
                     bodyHot || closeHot ? TAB_HOVER : TAB_IDLE;

@@ -2,7 +2,7 @@
 /// documents and views, plus window chrome.
 ///
 /// Saving edits lines in place, preserving comments, order and unknown keys.
-/// Key bindings (`bind`, `unbind`) are bindings.d's.
+/// Key bindings (`bind`, `unbind`) are bindings.d's, colors (`color`) theme.d's.
 /// Authors: dd86k <dd@dax.moe>
 module preferences;
 
@@ -11,6 +11,7 @@ import ddlogger;
 import ddhx.charset : Charset, ASCII, findCharset;
 import hexview : HEX_COLUMNS_MAX, HexBase;
 import bindings : bind_defaults, bind_edited, bind_key, bind_lines, bind_valid, unbind_key;
+import theme : theme_color, theme_defaults, theme_edited, theme_lines;
 
 /// Mode new tabs start in. Read-only only sets the tab's starting state.
 enum WriteMode { overwrite, insert, readonly }
@@ -63,6 +64,7 @@ void prefs_load()
 
     savePath = prefs_user_path();
     bind_defaults();
+    theme_defaults();
 
     string path = findConfig(APPNAME, FILENAME);
     if (path is null)
@@ -298,18 +300,26 @@ void prefs_parse(ref Prefs p, const(string)[] text, string path)
                 logWarn("%s:%u: ignored: %s", path, i + 1, line);
             continue;
         }
+        if (key == "color")
+        {
+            if (prefs_color(line, true) == false)
+                logWarn("%s:%u: ignored: %s", path, i + 1, line);
+            continue;
+        }
         if (prefs_set(p, key, value) == false)
             logWarn("%s:%u: ignored: %s", path, i + 1, line);
     }
 }
 
 // Rewrites each key's last line (the effective one). Missing keys are added
-// only when non-default, so an untouched file stays empty. Bindings edited in
-// Settings replace the bind lines.
+// only when non-default, so an untouched file stays empty. Bindings and colors
+// edited in Settings replace their lines.
 void prefs_merge(ref string[] text, ref const(Prefs) p)
 {
     if (bind_edited())
-        prefs_merge_binds(text, bind_lines());
+        prefs_replace(text, bind_lines(), (string l) => prefs_bind(l, false));
+    if (theme_edited())
+        prefs_replace(text, theme_lines(), (string l) => prefs_color(l, false));
 
     static immutable Prefs defaults;
 
@@ -352,17 +362,31 @@ bool prefs_bind(string line, bool apply)
     return false;
 }
 
-// Replace the valid bind/unbind lines with `binds`, where the first one was.
-// Ignored ones stay as written.
-void prefs_merge_binds(ref string[] text, string[] binds)
+// Apply rc line `line` (color) if `apply`, else only check it.
+bool prefs_color(string line, bool apply)
+{
+    import std.string : strip;
+    import utils : Argument, arguments;
+
+    Argument[] args;
+    try
+        args = arguments(strip(line));
+    catch (Exception)
+        return false;
+    if (args.length == 3 && args[0].text == "color")
+        return theme_color(args[1].text, args[2].text, apply);
+    return false;
+}
+
+// Replace the lines `owned` accepts with `repl`, where the first one was.
+// Others, like ignored ones, stay as written.
+void prefs_replace(ref string[] text, string[] repl, bool function(string) owned)
 {
     string[] kept;
     ptrdiff_t at = -1;
     foreach (string line; text)
     {
-        string value;
-        string key = prefs_line_key(line, value);
-        if ((key == "bind" || key == "unbind") && prefs_bind(line, false))
+        if (owned(line))
         {
             if (at < 0)
                 at = kept.length;
@@ -372,7 +396,7 @@ void prefs_merge_binds(ref string[] text, string[] binds)
     }
     if (at < 0)
         at = kept.length;
-    text = kept[0 .. at] ~ binds ~ kept[at .. $];
+    text = kept[0 .. at] ~ repl ~ kept[at .. $];
 }
 
 string prefs_text(const(string)[] text)
@@ -421,7 +445,7 @@ unittest
         "unbind j",
         "bind ctrl+p goto +32",
     ];
-    prefs_merge_binds(text, [ "bind h left" ]);
+    prefs_replace(text, [ "bind h left" ], (string l) => prefs_bind(l, false));
     assert(text == [
         "columns 8",
         "bind h left",
@@ -464,4 +488,29 @@ unittest
         prefs_parse(q, text, "test");
         assert(q.font == name, q.font);
     }
+}
+
+unittest
+{
+    import theme : Scheme, SCHEMES, theme_defaults, theme_fg, theme_reset;
+    scope (exit) theme_defaults();
+
+    Prefs p;
+    string[] text = [
+        "color zero gray",
+        "# mine",
+        "color selection blue",
+        "color zero red",
+    ];
+    prefs_parse(p, text, "test");
+    assert(theme_fg(Scheme.zero) != SCHEMES[Scheme.zero].fg);
+
+    // Settings edits rewrite the valid lines where the first one was.
+    theme_reset(Scheme.zero);
+    prefs_replace(text, [ "color cursor white" ], (string l) => prefs_color(l, false));
+    assert(text == [
+        "color cursor white",
+        "# mine",
+        "color selection blue",
+    ]);
 }

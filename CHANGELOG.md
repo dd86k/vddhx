@@ -37,6 +37,8 @@ Rules:
 - **Settings**: Key bindings. `bind KEY COMMAND` and `unbind KEY` in `.vddhxrc`,
   with ddhx's key and command names, or Settings > Keys. Caret moves are
   bindable too (`bind h left`).
+- **Settings**: Colors. `color SCHEME FG:BG` in `.vddhxrc`, with ddhx's scheme
+  and color names plus `#rrggbb`, or Settings > Colors.
 
 ### Changed
 
@@ -84,10 +86,10 @@ devices stay cheap to open and scroll.
 - **Omnibar** (Ctrl+E): one box for views, commands (>), offsets (:),
   find (/), the inspector (=), bookmarks (@), structure fields (#) and
   shortcuts (?).
-- **Colouring**: bytes are coloured by class under the chosen character set
+- **Coloring**: bytes are colored by class under the chosen character set
   (ASCII, CP437, EBCDIC, Mac OS Roman, Latin-1, Windows-1252). A minimap
-  shows the same colours plus bookmark and diff marks.
-- **Structure overlay**: PNG files get their fields coloured and named, a
+  shows the same colors plus bookmark and diff marks.
+- **Structure overlay**: PNG files get their fields colored and named, a
   breadcrumb trail, and a "go to field" list.
 - **Editing**: overwrite and insert modes, undo/redo, hex and text copy/cut,
   skip or select a run of identical bytes in one keystroke.

@@ -175,7 +175,7 @@ void elite_frame(mu_Context* ctx, int width, int height)
     // ddui only hashes its own commands; force a redraw.
     mu_invalidate(ctx);
 
-    // No centred mu_label; draw with the alignment flag.
+    // No centered mu_label; draw with the alignment flag.
     mu_layout_row(ctx, 1, full.ptr, 0);
     mu_draw_control_text(ctx, PROMPT, mu_layout_next(ctx), MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
 

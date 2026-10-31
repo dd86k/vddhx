@@ -191,7 +191,7 @@ void about_frame(mu_Context* ctx, int width, int height)
     mu_end_window(ctx);
 }
 
-// Icon palette. Byte-class colours come from hex_classify so they can't drift.
+// Icon palette. Byte-class colors come from hex_classify so they can't drift.
 private enum mu_Color NUL    = hex_classify(0, 0x00, null);
 private enum mu_Color PRINT  = hex_classify(0, 'A',  null);
 private enum mu_Color WS     = hex_classify(0, '\n', null);
@@ -275,7 +275,7 @@ private bool about_secret(mu_Context* ctx, string text)
     return ctx.mouse_pressed == MU_MOUSE_LEFT && ctx.focus == id;
 }
 
-/// URL link: coloured, underlined on hover/focus.
+/// URL link: colored, underlined on hover/focus.
 /// Returns: true on left click or Return.
 private bool about_link(mu_Context* ctx, string url)
 {
@@ -289,7 +289,7 @@ private bool about_link(mu_Context* ctx, string url)
     bool lit = ctx.hover == id || ctx.focus == id;
     mu_Color color = lit ? LINK_HOVER : LINK_COLOR;
 
-    // Left-aligned, vertically centred, like mu_label.
+    // Left-aligned, vertically centered, like mu_label.
     mu_Font font = ctx.style.font;
     int th = ctx.text_height(font);
     mu_Vec2 pos = mu_Vec2(r.x + ctx.style.padding, r.y + (r.h - th) / 2);

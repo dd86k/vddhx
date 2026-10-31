@@ -24,7 +24,7 @@ import elevate : Elevated, elevate_denied, elevate_poll, elevate_request;
 import hexview;
 import structure;
 import structures.png : PngStructure, png_detect;
-import theme : theme_edge, theme_role;
+import theme : Scheme, theme_bg, theme_edge, theme_fg, theme_role;
 import uitext : ui_elide;
 import omnibar;
 import bindings;
@@ -75,7 +75,7 @@ struct Document
     Bookmark[] marks;
 
     /// Structure overlay, bound by detectStructure if the format is known;
-    /// otherwise unbound and bytes are coloured by class.
+    /// otherwise unbound and bytes are colored by class.
     StructureCache structure;
 
     /// Structure parser read-ahead; length is capacity.
@@ -121,7 +121,7 @@ struct View
     /// Comparison this view is in, or null. See diff_peer.
     Diff* diff;
 
-    /// Read-ahead of the peer's bytes for the colour hook (asked in offset order).
+    /// Read-ahead of the peer's bytes for the color hook (asked in offset order).
     /// Dropped each frame in ui_pane instead of invalidated: the peer can change
     /// in ways that don't pass through here.
     ubyte[] peerBuf;
@@ -148,7 +148,7 @@ struct View
 /// Two views compared byte for byte, offset-aligned.
 ///
 /// Pairs views, not documents, so one file can be compared against two others.
-/// A view is in at most one Diff. `base` keeps its normal colours; only
+/// A view is in at most one Diff. `base` keeps its normal colors; only
 /// `against` is tinted and reads the peer's bytes.
 ///
 /// NOTE: Strictly offset-aligned (byte n vs n), wrong after an insertion.
@@ -156,10 +156,10 @@ struct View
 /// row = offset / columns everywhere else. A separate feature.
 struct Diff
 {
-    /// View the diff was started from; normal colours.
+    /// View the diff was started from; normal colors.
     View* base;
 
-    /// View opened against it; carries the colouring. Never `base`.
+    /// View opened against it; carries the coloring. Never `base`.
     View* against;
 }
 
@@ -171,7 +171,7 @@ View* diff_peer(View* v)
     return v.diff.base is v ? v.diff.against : v.diff.base;
 }
 
-/// Whether `v` is the coloured side.
+/// Whether `v` is the colored side.
 bool diff_reports(View* v)
 {
     return v.diff && v.diff.against is v;
@@ -400,26 +400,12 @@ ptrdiff_t ui_pane_index(const(Pane)* p)
 /// Main window, parent for native dialogs. Set by main.
 __gshared SDL_Window* uiWindow;
 
-/// Grid background. Near black: byte colours (dim zeros especially) are tuned
+/// Grid background. Near black: byte colors (dim zeros especially) are tuned
 /// for it.
 enum mu_Color CANVAS = mu_Color(0, 0, 0, 255);
 
-/// Bookmark wash. Amber, which no byte class uses. Dark so white text stays
-/// readable (~6.6:1 vs <2:1 for bright amber). The panel brightens it for
-/// outlines and the minimap (hex_wash_lift).
-enum mu_Color BOOKMARK_WASH = mu_Color(125, 85, 22, 255);
-
-/// Bookmarked glyph colour; overrides hex_classify inside marks.
-enum mu_Color BOOKMARK_TEXT = mu_Color(255, 255, 255, 255);
-
-/// Byte differs from the peer.
-enum mu_Color DIFF_CHANGED = mu_Color(255, 95, 95, 255);
-
-/// Byte past the peer's end. Green so a longer file reads as additions.
-enum mu_Color DIFF_ADDED = mu_Color(120, 230, 140, 255);
-
-/// Brightness kept by matching bytes in a diff, percent. Dimmed, not greyed,
-/// so the class colours stay readable.
+/// Brightness kept by matching bytes in a diff, percent. Dimmed, not grayed,
+/// so the class colors stay readable.
 enum int DIFF_MATCH_KEEP = 42;
 
 /// Ditto: `c` dimmed, alpha kept.
@@ -773,7 +759,7 @@ View* ui_split_view()
 }
 
 /// Pair views in a diff: `base` already open, `against` opened to compare and
-/// the coloured side (see Diff). Existing pairings are dropped first (one peer
+/// the colored side (see Diff). Existing pairings are dropped first (one peer
 /// per view). Self-comparison is refused.
 void diff_link(View* a, View* b)
 {
@@ -884,7 +870,7 @@ public void ui_close_pane()
 
         size_t before = p.views.length;
         ui_close_tab_in(p, p.current);
-        if (p.views.length == before) // cancelled
+        if (p.views.length == before) // canceled
             return;
     }
 }
@@ -1062,11 +1048,11 @@ ubyte[] hexRead(long pos, ubyte[] buf, void* user)
     return ed.view(pos, buf);
 }
 
-/// Panel colour hook: class colour, dimmed or highlighted in a diff. `user` is
+/// Panel color hook: class color, dimmed or highlighted in a diff. `user` is
 /// the View (hex.colorUser): the diff belongs to the drawn view.
 ///
-/// Marks override the diff colour (white text); the diff still shows via the
-/// wash. Only the reporting side is diff-coloured; see Diff.
+/// Marks override the diff color (white text); the diff still shows via the
+/// wash. Only the reporting side is diff-colored; see Diff.
 mu_Color hexColor(size_t offset, ubyte value, void* user)
 {
     View* v = cast(View*) user;
@@ -1074,17 +1060,17 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
         return hex_classify(offset, value, null);
 
     if (bookmark_has(v.doc.marks, cast(long) offset))
-        return BOOKMARK_TEXT;
+        return theme_fg(Scheme.bookmark);
 
     if (diff_reports(v))
     {
         if (cast(long) offset >= v.peerSize)
-            return DIFF_ADDED;
+            return theme_fg(Scheme.diff_missing);
 
         // Short peer read (file changing underneath): not a difference.
         ubyte other;
         if (diff_peer_byte(v, offset, other) && other != value)
-            return DIFF_CHANGED;
+            return theme_fg(Scheme.diff_changed);
         return diff_dim(byteColor(v, offset, value));
     }
 
@@ -1092,7 +1078,7 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
 }
 
 /// Byte role: structure field role, else the classifier's. Shared by grid
-/// colours and breadcrumbs so they agree. `shade` is set on alternating
+/// colors and breadcrumbs so they agree. `shade` is set on alternating
 /// same-role fields; classifier bytes are never shaded.
 StructureRole byteRole(View* v, size_t offset, ubyte value, out bool shade)
 {
@@ -1107,7 +1093,7 @@ StructureRole byteRole(View* v, size_t offset, ubyte value, out bool shade)
     return structure_classify(value, v.doc.charset);
 }
 
-/// Ditto, as a colour.
+/// Ditto, as a color.
 mu_Color byteColor(View* v, size_t offset, ubyte value)
 {
     bool shade;
@@ -1337,11 +1323,12 @@ mu_Color hexBack(size_t offset, ubyte value, void* user)
     if (v is null)
         return mu_Color(0, 0, 0, 0);
 
-    return bookmark_has(v.doc.marks, cast(long) offset) ? BOOKMARK_WASH : mu_Color(0, 0, 0, 0);
+    return bookmark_has(v.doc.marks, cast(long) offset)
+        ? theme_bg(Scheme.bookmark) : mu_Color(0, 0, 0, 0);
 }
 
 /// Ditto for a span: whether any byte is marked (bookmark_hits, so tiny marks
-/// show on huge files). Same colour as hexBack: the panel also probes it
+/// show on huge files). Same color as hexBack: the panel also probes it
 /// per byte for outlines, which must match to join.
 mu_Color hexBackSpan(long at, long length, void* user)
 {
@@ -1350,7 +1337,7 @@ mu_Color hexBackSpan(long at, long length, void* user)
         return mu_Color(0, 0, 0, 0);
 
     return bookmark_hits(v.doc.marks, at, length)
-        ? BOOKMARK_WASH : mu_Color(0, 0, 0, 0);
+        ? theme_bg(Scheme.bookmark) : mu_Color(0, 0, 0, 0);
 }
 
 /// Peer byte at `offset`, through the view's block cache (see View.peerBuf).
@@ -1530,7 +1517,7 @@ Pane* ui_drop_target(mu_Context* ctx, out SplitZone zone)
 {
     Pane* onto = ui_pane_at(ctx.mouse_pos.x, ctx.mouse_pos.y);
     zone = onto ? split_zone(onto.rect, tab_bar_height(ctx), ctx.mouse_pos)
-                : SplitZone.centre;
+                : SplitZone.center;
     return onto;
 }
 
@@ -1777,7 +1764,7 @@ bool ui_show(Document* doc, bool here)
     return true;
 }
 
-/// Open document for `path`, or null. Paths are normalised, so relative and
+/// Open document for `path`, or null. Paths are normalized, so relative and
 /// absolute forms match.
 Document* ui_find_document(string path)
 {
@@ -1790,7 +1777,7 @@ Document* ui_find_document(string path)
     return null;
 }
 
-/// Path comparison key: absolute and normalised. Symlinks and case aren't
+/// Path comparison key: absolute and normalized. Symlinks and case aren't
 /// resolved, since that needs the filesystem and deleted files would differ.
 string ui_path_key(string path)
 {
@@ -2867,7 +2854,7 @@ const(OmniItem)[] ui_omni_items()
                 "PNG is the only format read so far", -1, false, true);
             break;
         }
-        // Role as a hidden keyword ("#checksum" finds CRC); the colour already shows
+        // Role as a hidden keyword ("#checksum" finds CRC); the color already shows
         // it.
         foreach (size_t i, ref const(StructureSpan) s; spans)
         {
@@ -2935,7 +2922,7 @@ const(OmniItem)[] ui_omni_items()
     return omniItems[0 .. n];
 }
 
-/// Caret state before a '#' browse, restored if it's cancelled. One at a time
+/// Caret state before a '#' browse, restored if it's canceled. One at a time
 /// (the box has the keyboard).
 struct Preview
 {
@@ -2955,7 +2942,7 @@ struct Preview
 __gshared Preview preview;
 
 /// Move the caret along the '#' list as rows are highlighted; Enter confirms.
-/// Centred below the box, since a minimal reveal would land under it.
+/// Centered below the box, since a minimal reveal would land under it.
 void ui_struct_preview(OmniMode mode)
 {
     if (mode != OmniMode.structure || ui_omni_active() == false)
@@ -3737,7 +3724,7 @@ int ui_job_progress(const(View)* v)
 
 /// Run `walk` on `v`'s document on a worker, then `land(v)` on the UI thread.
 /// `v` is locked and edits refused until then, on `peer` too if the walk reads
-/// it. Cancelled, failed or orphaned walks don't land.
+/// it. Canceled, failed or orphaned walks don't land.
 void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*) land,
     Document* peer = null)
 {
@@ -3751,7 +3738,7 @@ void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*)
     ctx.progress = (int percent) { job.reportProgress(percent); };
 
     job.doWork   = (BackgroundWorker) { walk(*ctx); };
-    job.workDone = (bool cancelled, Exception error) {
+    job.workDone = (bool canceled, Exception error) {
         d.jobView = null;
         d.jobPeer = null;
         if (error)
@@ -3759,8 +3746,8 @@ void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*)
             logError("search failed: %s", error.msg);
             ui_status("search failed: %s", ui_clip(error.msg, 44));
         }
-        else if (cancelled)
-            ui_status("search cancelled");
+        else if (canceled)
+            ui_status("search canceled");
         else if (v.doc is d)
             land(v);
     };
@@ -3882,7 +3869,7 @@ public void ui_mark_all_prompt()
 }
 
 /// Bookmark every match of the last pattern in the focused document. Marks
-/// land together once the walk is done, so cancelling adds none.
+/// land together once the walk is done, so canceling adds none.
 void ui_mark_all()
 {
     View* v = &focusedView();
@@ -4998,7 +4985,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         mu_Container* win = mu_get_current_container(ctx);
         win.rect = mu_Rect(0, 0, width, height);
 
-        // No row gaps: ddui paints them in the window colour, striping the chrome.
+        // No row gaps: ddui paints them in the window color, striping the chrome.
         // Restored after so the About dialog keeps default spacing.
         int spacing = ctx.style.spacing;
         ctx.style.spacing = 0;
@@ -5221,7 +5208,7 @@ void ui_panes(mu_Context* ctx, int statusH)
         Pane* onto = ui_drop_target(ctx, zone);
         // Back over its own pane cancels, unless on an edge with other tabs (split).
         if (onto && (onto !is src ||
-                    (zone != SplitZone.centre && src.views.length > 1)))
+                    (zone != SplitZone.center && src.views.length > 1)))
             ui_mark_pane(ctx, ui_drop_rect(onto, zone));
         if (ghost.index >= 0 && ghost.index < src.items.length)
             tab_ghost(ctx, src.tabs, src.items[ghost.index], ghost.rect);
@@ -5247,7 +5234,7 @@ void ui_panes(mu_Context* ctx, int statusH)
     case TabAction.add:    focused = req.pane; ui_new_tab();      break;
     case TabAction.move:   ui_move_tab(req.pane, req.index, req.target); break;
     // Released outside its strip: join or split the pane under the pointer.
-    // Over nothing (splitter, status bar): cancelled.
+    // Over nothing (splitter, status bar): canceled.
     case TabAction.detach:
         SplitZone zone;
         Pane* onto = ui_drop_target(ctx, zone);
@@ -5515,6 +5502,9 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     }
 
     v.hex.minimap = prefs.minimap;
+    v.hex.selColor    = theme_bg(Scheme.selection);
+    v.hex.caretColor  = theme_fg(Scheme.cursor);
+    v.hex.mirrorColor = theme_fg(Scheme.mirror);
 
     // Charset is per document; rebind each frame so moved tabs follow.
     v.hex.textFn    = &ui_charset_text;
@@ -5598,7 +5588,7 @@ void ui_split_into(Pane* src, size_t index, Pane* dst, SplitZone zone)
 {
     if (src is null || dst is null || index >= src.views.length)
         return;
-    if (zone == SplitZone.centre)
+    if (zone == SplitZone.center)
     {
         ui_move_view(src, index, dst);
         return;

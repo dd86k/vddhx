@@ -1,8 +1,8 @@
 /// Settings tab: categories on the left, saved on every change.
 ///
 /// Saved settings only. Per-view setup (columns, charset, byte order) lives in
-/// the View menu, where it previews on the grid. Keys edits the bindings,
-/// saved as .vddhxrc bind lines.
+/// the View menu, where it previews on the grid. Colors and Keys edit
+/// the color schemes and bindings, saved as .vddhxrc color and bind lines.
 /// Authors: dd86k <dd@dax.moe>
 module settings;
 
@@ -11,6 +11,8 @@ import ddui;
 import ddhx.charset : Charset, charsets;
 import preferences;
 import bindings;
+import theme : SCHEMES, Scheme, SchemeInfo, theme_bg, theme_changed, theme_fg,
+    theme_reset, theme_reset_all, theme_set, theme_spec;
 import hexview : HexBase;
 import ui : ui_font_dialog, ui_fonts, ui_zoom;
 
@@ -21,9 +23,10 @@ private enum int BROWSE_W = 80;
 private enum int CLEAR_W = 60;
 private enum int COMMAND_W = 180;
 private enum int KEYS_W = 220;
+private enum int SWATCH_W = 24;
 
-private enum Category { defaults, appearance, keys }
-private static immutable string[] CATEGORY_NAMES = [ "Defaults", "Appearance", "Keys" ];
+private enum Category { defaults, appearance, colors, keys }
+private static immutable string[] CATEGORY_NAMES = [ "Defaults", "Appearance", "Colors", "Keys" ];
 
 private __gshared Category category;
 
@@ -52,6 +55,7 @@ void settings_page(mu_Context* ctx)
     {
     case Category.defaults:   settings_defaults(ctx);   break;
     case Category.appearance: settings_appearance(ctx); break;
+    case Category.colors:    settings_colors(ctx);    break;
     case Category.keys:       settings_keys(ctx);       break;
     }
     // Leaving the page stops a key capture.
@@ -297,6 +301,90 @@ void settings_appearance(mu_Context* ctx)
     }
 
     settings_saved(ctx, changed);
+}
+
+// Scheme colors box, committed like ValueBox. Fits two palette names.
+struct ColorBox
+{
+    char[40] buf;
+    bool editing;
+}
+
+/// Colors page: each scheme's swatches, its colors in rc syntax, Reset for
+/// its defaults.
+void settings_colors(mu_Context* ctx)
+{
+    __gshared ColorBox[SCHEMES.length] boxes;
+
+    settings_note(ctx, "Same as `color SCHEME FG:BG`. A name (red, brightblue...) or #rrggbb.");
+    settings_note(ctx, "A side left empty takes its default. Swatches show the text and wash.");
+
+    static immutable int[1] one = [ BROWSE_W ];
+    mu_layout_row(ctx, 1, one.ptr, 0);
+    if (mu_button(ctx, "Reset All"))
+    {
+        foreach (ref ColorBox box; boxes)
+            box.editing = false;
+        theme_reset_all();
+    }
+
+    static immutable int[5] row = [ LABEL_W, SWATCH_W, SWATCH_W, FIELD_W, CLEAR_W ];
+    foreach (size_t i, ref immutable SchemeInfo info; SCHEMES)
+    {
+        Scheme s = cast(Scheme) i;
+        mu_layout_row(ctx, 5, row.ptr, 0);
+        mu_label(ctx, info.label);
+        settings_swatch(ctx, theme_fg(s));
+        settings_swatch(ctx, theme_bg(s));
+        mu_push_id(ctx, info.name.ptr, cast(int) info.name.length);
+        settings_scheme(ctx, boxes[i], s);
+        if (mu_button(ctx, "Reset"))
+        {
+            boxes[i].editing = false;
+            theme_reset(s);
+        }
+        mu_pop_id(ctx);
+    }
+
+    settings_saved(ctx, theme_changed());
+}
+
+/// Filled square of color `c` in the next cell, nothing if `c` is unused.
+void settings_swatch(mu_Context* ctx, mu_Color c)
+{
+    mu_Rect r = mu_layout_next(ctx);
+    if (c.a == 0)
+        return;
+    int side = r.h - 4;
+    mu_Rect sq = mu_Rect(r.x + (r.w - side) / 2, r.y + 2, side, side);
+    mu_draw_rect(ctx, sq, c);
+    mu_draw_box(ctx, sq, ctx.style.colors[MU_COLOR_BORDER]);
+}
+
+/// Text box with scheme `s`'s colors. Bad input is dropped.
+void settings_scheme(mu_Context* ctx, ref ColorBox box, Scheme s)
+{
+    import core.stdc.string : strlen;
+    import std.string : strip;
+
+    mu_Id id = mu_get_id(ctx, &box, box.sizeof);
+    if (ctx.focus != id && box.editing == false)
+    {
+        string text = theme_spec(s);
+        size_t n = text.length < box.buf.length ? text.length : box.buf.length - 1;
+        box.buf[0 .. n] = text[0 .. n];
+        box.buf[n] = 0;
+    }
+
+    int res = mu_textbox_raw(ctx, box.buf.ptr, cast(int) box.buf.length, id, mu_layout_next(ctx), 0);
+    if (res & MU_RES_CHANGE)
+        box.editing = true;
+    if ((res & MU_RES_SUBMIT) || (box.editing && ctx.focus != id))
+    {
+        box.editing = false;
+        // Invalid input: the next frame restores the current value.
+        theme_set(s, strip(box.buf[0 .. strlen(box.buf.ptr)]).idup);
+    }
 }
 
 /// Keys page: each command's keys, Add to capture one more, Reset for its
