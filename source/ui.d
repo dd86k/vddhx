@@ -27,6 +27,7 @@ import structures.png : PngStructure, png_detect;
 import theme : theme_edge, theme_role;
 import uitext : ui_elide;
 import omnibar;
+import bindings;
 import search;
 import patterns : PatternRange;
 import split;
@@ -446,7 +447,7 @@ __gshared char[96] statusText;
 __gshared size_t statusLen;
 
 /// Ditto. Fixed buffer; long messages are truncated.
-void ui_status(Args...)(string fmt, Args args)
+public void ui_status(Args...)(string fmt, Args args)
 {
     // NOTE: sformat throws if the message doesn't fit ("comparing %s with %s"
     //       tripped it).
@@ -2569,7 +2570,7 @@ public bool ui_may_quit()
 }
 
 /// Omnibar command or shortcut sheet row: name, keys, and command code.
-struct Entry
+public struct Entry
 {
     string label;
     string keys;
@@ -2585,7 +2586,7 @@ enum string OPEN_DEVICE_LABEL = DISKS_LISTED ? "Open Disk..." : "Open Path...";
 
 /// Omnibar '>' commands: the menu actions. ddhx document commands join as
 /// ddhx exposes them.
-enum
+public enum
 {
     CMD_NEW_TAB, CMD_OPEN, CMD_OPEN_DEVICE, CMD_COMPARE, CMD_COMPARE_STOP, CMD_DIFF_NEXT, CMD_DIFF_PREV,
     CMD_SAVE, CMD_SAVE_AS,
@@ -2600,72 +2601,79 @@ enum
     CMD_ZOOM_IN, CMD_ZOOM_OUT, CMD_ZOOM_RESET,
     CMD_MINIMAP, CMD_CRUMBS, CMD_ENDIAN, CMD_COLUMNS, CMD_CHARSET, CMD_ADDRESS,
     CMD_SETTINGS, CMD_KEYS, CMD_ABOUT, CMD_QUIT,
+    // Key bindings only.
+    CMD_LEFT, CMD_RIGHT, CMD_UP, CMD_DOWN, CMD_HOME, CMD_END, CMD_TOP, CMD_BOTTOM,
+    CMD_PAGE_UP, CMD_PAGE_DOWN, CMD_VIEW_UP, CMD_VIEW_DOWN,
+    CMD_SELECT_LEFT, CMD_SELECT_RIGHT, CMD_SELECT_UP, CMD_SELECT_DOWN, CMD_SELECT_HOME,
+    CMD_SELECT_END, CMD_SELECT_TOP, CMD_SELECT_BOTTOM, CMD_SELECT_PAGE_UP, CMD_SELECT_PAGE_DOWN,
+    CMD_OMNIBAR, CMD_MENU, CMD_TAB_NEXT, CMD_TAB_PREV,
+    CMD_COUNT, /// Number of command codes.
 }
 
-/// Ditto.
-immutable Entry[] COMMANDS = [
-    Entry("New Tab",          "Ctrl+T",       CMD_NEW_TAB,      "create buffer"),
-    Entry("Open File...",     "Ctrl+O",       CMD_OPEN,         "load edit read"),
-    Entry(OPEN_DEVICE_LABEL,  "",             CMD_OPEN_DEVICE,  "disk drive device volume partition physical raw block path type"),
-    Entry("Compare With...",  "",             CMD_COMPARE,      "diff difference against versus changes"),
-    Entry("Stop Comparing",   "",             CMD_COMPARE_STOP, "undiff end diff close comparison"),
-    Entry("Next Difference",  "}",            CMD_DIFF_NEXT,    "diff compare change hunk forward"),
-    Entry("Previous Difference","{",          CMD_DIFF_PREV,    "diff compare change hunk back backward"),
-    Entry("Save",             "Ctrl+S",       CMD_SAVE,         "write store commit"),
-    Entry("Save As...",       "Ctrl+Shift+S", CMD_SAVE_AS,      "write export copy to"),
-    Entry("Close Tab",        "Ctrl+W",       CMD_CLOSE_TAB,    "shut document"),
-    Entry("Toggle Read-Only", "",             CMD_READONLY,     "readonly lock unlock writable allow editing restricted protect elevate admin root"),
-    Entry("Refresh",          "Ctrl+L",       CMD_REFRESH,      "reread redraw repaint disk changed outside"),
-    Entry("Undo",             "Ctrl+Z",       CMD_UNDO,         "back revert history step"),
-    Entry("Redo",             "Ctrl+Y",       CMD_REDO,         "forward again history step"),
-    Entry("Cut",              "Ctrl+X",       CMD_CUT,          "clipboard remove delete"),
-    Entry("Cut as Text",      "Ctrl+Shift+X", CMD_CUT_TEXT,     "clipboard remove delete ascii string chars characters column lane"),
-    Entry("Copy",             "Ctrl+C",       CMD_COPY,         "clipboard yank hex"),
-    Entry("Copy as Text",     "Ctrl+Shift+C", CMD_COPY_TEXT,    "clipboard yank ascii string chars characters column lane"),
-    Entry("Paste",            "Ctrl+V",       CMD_PASTE,        "clipboard insert put"),
-    Entry("Replace...",       "",             CMD_REPLACE,      "fill overwrite pattern stamp repeat"),
-    Entry("Insert...",        "",             CMD_INSERT,       "add splice pattern repeat"),
-    Entry("Replace Range...", "",             CMD_REPLACE_RANGE,"fill overwrite pattern stamp repeat span"),
-    Entry("Insert Range...",  "",             CMD_INSERT_RANGE, "add splice pattern repeat span"),
-    Entry("Go to Offset...",  "Ctrl+G",       CMD_GOTO,         "goto jump seek address position"),
-    Entry("Find...",          "Ctrl+F",       CMD_FIND,         "search grep pattern bytes string"),
-    Entry("Find Backward...", "Ctrl+Shift+F", CMD_FIND_BACK,    "search grep pattern back backward reverse"),
-    Entry("Find Next",        "Ctrl+N",       CMD_FIND_NEXT,    "search again forward"),
-    Entry("Find Previous",    "Ctrl+Shift+N", CMD_FIND_PREV,    "search back backward"),
-    Entry("Bookmark All Matches...","",       CMD_MARK_ALL,     "find search mark every each highlight count occurrences"),
-    Entry("Inspect Bytes...", "Alt+I",        CMD_INSPECT,      "data types decode value integer float"),
-    Entry("Go to Field...",   "",             CMD_STRUCTURE,    "structure layout chunk record section symbol header"),
-    Entry("Skip Forward",     "Ctrl+Right",   CMD_SKIP_NEXT,    "run element next word"),
-    Entry("Skip Back",        "Ctrl+Left",    CMD_SKIP_PREV,    "run element previous word"),
-    Entry("Select Run Forward","Ctrl+Shift+Right", CMD_SKIP_SEL_NEXT, "skip selection extend next padding"),
-    Entry("Select Run Back",  "Ctrl+Shift+Left",  CMD_SKIP_SEL_PREV, "skip selection extend previous padding"),
-    Entry("Select Range...",  "",             CMD_SELECT_RANGE, "selection mark span offset length start end"),
-    Entry("Toggle Bookmark",  "Ctrl+B",       CMD_MARK,         "mark set flag"),
-    Entry("Name Bookmark...", "Ctrl+Shift+B", CMD_MARK_NAME,    "mark label rename annotate tag comment field"),
-    Entry("Next Bookmark",    "]",            CMD_MARK_NEXT,    "mark forward"),
-    Entry("Previous Bookmark","[",            CMD_MARK_PREV,    "mark back backward"),
-    Entry("Bookmarks...",     "",             CMD_MARK_LIST,    "marks list show all"),
-    Entry("Clear Bookmarks",  "",             CMD_MARK_CLEAR,   "marks remove delete none"),
-    Entry("Load Bookmarks...","",             CMD_MARK_LOAD,    "marks open import read file ddhx"),
-    Entry("Save Bookmarks...","",             CMD_MARK_SAVE,    "marks write export file ddhx"),
-    Entry("Split Pane Right", "Ctrl+\\",      CMD_SPLIT,        "vsplit vertical side view new second"),
-    Entry("Split Pane Down",  "Ctrl+Shift+\\",CMD_SPLIT_DOWN,   "hsplit horizontal below view new second"),
-    Entry("Close Pane",       "",             CMD_CLOSE_PANE,   "unsplit remove"),
-    Entry("Next Pane",        "",             CMD_PANE_NEXT,    "forward switch go"),
-    Entry("Previous Pane",    "",             CMD_PANE_PREV,    "back backward switch go"),
-    Entry("Zoom In",          "Ctrl+=",       CMD_ZOOM_IN,      "font text size bigger larger increase magnify"),
-    Entry("Zoom Out",         "Ctrl+-",       CMD_ZOOM_OUT,     "font text size smaller decrease shrink"),
-    Entry("Reset Zoom",       "Ctrl+0",       CMD_ZOOM_RESET,   "font text size default normal actual restore"),
-    Entry("Toggle Minimap",   "",             CMD_MINIMAP,      "ribbon overview scrollbar sidebar"),
-    Entry("Toggle Breadcrumbs","",            CMD_CRUMBS,       "crumbs path field structure format layout trail"),
-    Entry("Toggle Byte Order","",             CMD_ENDIAN,       "endian endianness little big le be swap order inspector pattern"),
-    Entry("Columns...",       "",             CMD_COLUMNS,      "width row bytes per line wrap 8 16 24 32 auto fit resize"),
-    Entry("Character Set...", "",             CMD_CHARSET,      "charset encoding text lane ascii cp437 ibm dos oem ebcdic mainframe mac roman latin1 iso 8859 win1252 windows"),
-    Entry("Offset Format...", "",             CMD_ADDRESS,      "address offsets base radix hex hexadecimal dec decimal oct octal"),
-    Entry("Settings",         "",             CMD_SETTINGS,     "preferences options configure defaults rc vddhxrc"),
-    Entry("Keyboard Shortcuts...", "",        CMD_KEYS,          "keys chords bindings help cheat sheet"),
-    Entry("About vddhx",      "",             CMD_ABOUT,        "version credits license help"),
-    Entry("Quit",             "Ctrl+Q",       CMD_QUIT,         "exit leave"),
+/// Ditto. Keys come from the bindings.
+public immutable Entry[] COMMANDS = [
+    Entry("New Tab",                "", CMD_NEW_TAB,       "create buffer"),
+    Entry("Open File...",           "", CMD_OPEN,          "load edit read"),
+    Entry(OPEN_DEVICE_LABEL,        "", CMD_OPEN_DEVICE,   "disk drive device volume partition physical raw block path type"),
+    Entry("Compare With...",        "", CMD_COMPARE,       "diff difference against versus changes"),
+    Entry("Stop Comparing",         "", CMD_COMPARE_STOP,  "undiff end diff close comparison"),
+    Entry("Next Difference",        "", CMD_DIFF_NEXT,     "diff compare change hunk forward"),
+    Entry("Previous Difference",    "", CMD_DIFF_PREV,     "diff compare change hunk back backward"),
+    Entry("Save",                   "", CMD_SAVE,          "write store commit"),
+    Entry("Save As...",             "", CMD_SAVE_AS,       "write export copy to"),
+    Entry("Close Tab",              "", CMD_CLOSE_TAB,     "shut document"),
+    Entry("Toggle Read-Only",       "", CMD_READONLY,      "readonly lock unlock writable allow editing restricted protect elevate admin root"),
+    Entry("Refresh",                "", CMD_REFRESH,       "reread redraw repaint disk changed outside"),
+    Entry("Undo",                   "", CMD_UNDO,          "back revert history step"),
+    Entry("Redo",                   "", CMD_REDO,          "forward again history step"),
+    Entry("Cut",                    "", CMD_CUT,           "clipboard remove delete"),
+    Entry("Cut as Text",            "", CMD_CUT_TEXT,      "clipboard remove delete ascii string chars characters column lane"),
+    Entry("Copy",                   "", CMD_COPY,          "clipboard yank hex"),
+    Entry("Copy as Text",           "", CMD_COPY_TEXT,     "clipboard yank ascii string chars characters column lane"),
+    Entry("Paste",                  "", CMD_PASTE,         "clipboard insert put"),
+    Entry("Replace...",             "", CMD_REPLACE,       "fill overwrite pattern stamp repeat"),
+    Entry("Insert...",              "", CMD_INSERT,        "add splice pattern repeat"),
+    Entry("Replace Range...",       "", CMD_REPLACE_RANGE, "fill overwrite pattern stamp repeat span"),
+    Entry("Insert Range...",        "", CMD_INSERT_RANGE,  "add splice pattern repeat span"),
+    Entry("Go to Offset...",        "", CMD_GOTO,          "goto jump seek address position"),
+    Entry("Find...",                "", CMD_FIND,          "search grep pattern bytes string"),
+    Entry("Find Backward...",       "", CMD_FIND_BACK,     "search grep pattern back backward reverse"),
+    Entry("Find Next",              "", CMD_FIND_NEXT,     "search again forward"),
+    Entry("Find Previous",          "", CMD_FIND_PREV,     "search back backward"),
+    Entry("Bookmark All Matches...","", CMD_MARK_ALL,      "find search mark every each highlight count occurrences"),
+    Entry("Inspect Bytes...",       "", CMD_INSPECT,       "data types decode value integer float"),
+    Entry("Go to Field...",         "", CMD_STRUCTURE,     "structure layout chunk record section symbol header"),
+    Entry("Skip Forward",           "", CMD_SKIP_NEXT,     "run element next word"),
+    Entry("Skip Back",              "", CMD_SKIP_PREV,     "run element previous word"),
+    Entry("Select Run Forward",     "", CMD_SKIP_SEL_NEXT, "skip selection extend next padding"),
+    Entry("Select Run Back",        "", CMD_SKIP_SEL_PREV, "skip selection extend previous padding"),
+    Entry("Select Range...",        "", CMD_SELECT_RANGE,  "selection mark span offset length start end"),
+    Entry("Toggle Bookmark",        "", CMD_MARK,          "mark set flag"),
+    Entry("Name Bookmark...",       "", CMD_MARK_NAME,     "mark label rename annotate tag comment field"),
+    Entry("Next Bookmark",          "", CMD_MARK_NEXT,     "mark forward"),
+    Entry("Previous Bookmark",      "", CMD_MARK_PREV,     "mark back backward"),
+    Entry("Bookmarks...",           "", CMD_MARK_LIST,     "marks list show all"),
+    Entry("Clear Bookmarks",        "", CMD_MARK_CLEAR,    "marks remove delete none"),
+    Entry("Load Bookmarks...",      "", CMD_MARK_LOAD,     "marks open import read file ddhx"),
+    Entry("Save Bookmarks...",      "", CMD_MARK_SAVE,     "marks write export file ddhx"),
+    Entry("Split Pane Right",       "", CMD_SPLIT,         "vsplit vertical side view new second"),
+    Entry("Split Pane Down",        "", CMD_SPLIT_DOWN,    "hsplit horizontal below view new second"),
+    Entry("Close Pane",             "", CMD_CLOSE_PANE,    "unsplit remove"),
+    Entry("Next Pane",              "", CMD_PANE_NEXT,     "forward switch go"),
+    Entry("Previous Pane",          "", CMD_PANE_PREV,     "back backward switch go"),
+    Entry("Zoom In",                "", CMD_ZOOM_IN,       "font text size bigger larger increase magnify"),
+    Entry("Zoom Out",               "", CMD_ZOOM_OUT,      "font text size smaller decrease shrink"),
+    Entry("Reset Zoom",             "", CMD_ZOOM_RESET,    "font text size default normal actual restore"),
+    Entry("Toggle Minimap",         "", CMD_MINIMAP,       "ribbon overview scrollbar sidebar"),
+    Entry("Toggle Breadcrumbs",     "", CMD_CRUMBS,        "crumbs path field structure format layout trail"),
+    Entry("Toggle Byte Order",      "", CMD_ENDIAN,        "endian endianness little big le be swap order inspector pattern"),
+    Entry("Columns...",             "", CMD_COLUMNS,       "width row bytes per line wrap 8 16 24 32 auto fit resize"),
+    Entry("Character Set...",       "", CMD_CHARSET,       "charset encoding text lane ascii cp437 ibm dos oem ebcdic mainframe mac roman latin1 iso 8859 win1252 windows"),
+    Entry("Offset Format...",       "", CMD_ADDRESS,       "address offsets base radix hex hexadecimal dec decimal oct octal"),
+    Entry("Settings",               "", CMD_SETTINGS,      "preferences options configure defaults rc vddhxrc"),
+    Entry("Keyboard Shortcuts...",  "", CMD_KEYS,          "keys chords bindings help cheat sheet"),
+    Entry("About vddhx",            "", CMD_ABOUT,         "version credits license help"),
+    Entry("Quit",                   "", CMD_QUIT,          "exit leave"),
 ];
 
 /// '?' sheet head: omnibar prefixes, from the omnibar's enums so they can't
@@ -2682,44 +2690,14 @@ immutable Entry[] PREFIXES = [
     Entry("Omnibar: fill in the row's word", "Tab"),
 ];
 
-/// '?' sheet: all shortcuts (omnibar, window, caret and bytes). Display only.
+/// '?' sheet: keys that aren't bindings, listed after the bound commands.
+/// Display only.
 immutable Entry[] SHORTCUTS = [
-    Entry("Omnibar",                        "Ctrl+E"),
-    Entry("Omnibar, on commands",           "Ctrl+Shift+P"),
-    Entry("Omnibar, on an offset",          "Ctrl+G"),
     Entry("Take a row / bring it here",     "Enter / Shift+Enter"),
     Entry("Close the omnibar",              "Esc"),
-    Entry("New tab",                        "Ctrl+T"),
-    Entry("Open file",                      "Ctrl+O"),
-    Entry("Save",                           "Ctrl+S"),
-    Entry("Save as",                        "Ctrl+Shift+S"),
-    Entry("Close tab",                      "Ctrl+W"),
-    Entry("Redraw screen",                  "Ctrl+L"),
-    Entry("Next / previous tab",            "Ctrl+Tab / Ctrl+Shift+Tab"),
-    Entry("Split the pane",                 "Ctrl+\\"),
+    Entry("Find the other way, in the box", "Shift+Enter"),
     Entry("Go to pane 1, 2, 3...",          "Ctrl+1 .. Ctrl+9"),
     Entry("Go to tab 1, 2, 3...",           "Alt+1 .. Alt+9"),
-    Entry("Quit",                           "Ctrl+Q"),
-    Entry("Find",                           "Ctrl+F"),
-    Entry("Find backward",                  "Ctrl+Shift+F"),
-    Entry("Find the other way, in the box", "Shift+Enter"),
-    Entry("Find next / previous",           "Ctrl+N / Ctrl+Shift+N"),
-    Entry("Inspect bytes at the caret",     "Alt+I"),
-    Entry("Text size bigger / smaller",     "Ctrl+= / Ctrl+-"),
-    Entry("Text size back to the setting",  "Ctrl+0"),
-    Entry("Toggle bookmark",                "Ctrl+B"),
-    Entry("Name the bookmark at the caret", "Ctrl+Shift+B"),
-    Entry("Next / previous bookmark",       "] / ["),
-    Entry("Cut / copy / paste bytes",       "Ctrl+X / C / V"),
-    Entry("Cut / copy the selection as text", "Ctrl+Shift+X / Ctrl+Shift+C"),
-    Entry("Undo / redo",                    "Ctrl+Z / Ctrl+Y"),
-    Entry("Move the caret",                 "Arrows"),
-    Entry("Skip the run under the caret",   "Ctrl+Left / Ctrl+Right"),
-    Entry("Select that run instead",        "Ctrl+Shift+Left / Ctrl+Shift+Right"),
-    Entry("Extend the selection",           "Shift+Arrows"),
-    Entry("Row start / row end",            "Home / End"),
-    Entry("File start / file end",          "Ctrl+Home / Ctrl+End"),
-    Entry("Page up / page down",            "PgUp / PgDn"),
     Entry("Overwrite or insert",            "Insert"),
     Entry("Delete a byte, back / forward",  "Backspace / Delete"),
     Entry("Type a byte",                    "0-9 a-f"),
@@ -2811,7 +2789,7 @@ const(OmniItem)[] ui_omni_items()
         break;
     case OmniMode.command:
         foreach (ref immutable Entry e; COMMANDS)
-            put(e.label, e.keys, e.id, false, false, e.keywords);
+            put(e.label, bind_keys(e.id), e.id, false, false, e.keywords);
         break;
     case OmniMode.address:
         // Pinned readout of the offset; not filtered.
@@ -2943,9 +2921,13 @@ const(OmniItem)[] ui_omni_items()
         }
         break;
     case OmniMode.help:
-        // Prefixes, then chords; stable sort keeps the order unfiltered.
+        // Prefixes, bound commands, then fixed keys. Stable sort keeps the order
+        // unfiltered. rc names as keywords, to look up a binding.
         foreach (ref immutable Entry e; PREFIXES)
             put(e.label, e.keys, e.id);
+        foreach (ref immutable Command c; BINDABLE)
+            if (bind_keys(c.id).length)
+                put(bind_command_label(c.id), bind_keys_all(c.id), -1, false, false, c.name);
         foreach (ref immutable Entry e; SHORTCUTS)
             put(e.label, e.keys, e.id);
         break;
@@ -3252,7 +3234,7 @@ public void ui_settings_open()
 }
 
 /// Whether the focused tab is the settings page.
-bool ui_on_settings()
+public bool ui_on_settings()
 {
     return focusedDoc.settingsPage;
 }
@@ -4864,8 +4846,34 @@ void ui_mark_select(ref View v, ptrdiff_t index)
         cast(size_t) v.doc.marks[index].length);
 }
 
-/// Run a '>' command. All are menu entry points, so they can't diverge.
-void ui_omni_run(int id)
+/// Move the caret for key binding `id` (CMD_LEFT .. CMD_SELECT_PAGE_DOWN).
+void ui_caret(int id)
+{
+    if (ui_on_settings() || focusedDoc.editor is null)
+        return;
+    HexMove m;
+    switch (id)
+    {
+    case CMD_LEFT,      CMD_SELECT_LEFT:      m = HexMove.left;     break;
+    case CMD_RIGHT,     CMD_SELECT_RIGHT:     m = HexMove.right;    break;
+    case CMD_UP,        CMD_SELECT_UP:        m = HexMove.up;       break;
+    case CMD_DOWN,      CMD_SELECT_DOWN:      m = HexMove.down;     break;
+    case CMD_HOME,      CMD_SELECT_HOME:      m = HexMove.home;     break;
+    case CMD_END,       CMD_SELECT_END:       m = HexMove.end;      break;
+    case CMD_TOP,       CMD_SELECT_TOP:       m = HexMove.top;      break;
+    case CMD_BOTTOM,    CMD_SELECT_BOTTOM:    m = HexMove.bottom;   break;
+    case CMD_PAGE_UP,   CMD_SELECT_PAGE_UP:   m = HexMove.pageUp;   break;
+    case CMD_PAGE_DOWN, CMD_SELECT_PAGE_DOWN: m = HexMove.pageDown; break;
+    case CMD_VIEW_UP:                         m = HexMove.viewUp;   break;
+    case CMD_VIEW_DOWN:                       m = HexMove.viewDown; break;
+    default: return;
+    }
+    hex_move(focusedView.hex, m, id >= CMD_SELECT_LEFT);
+}
+
+/// Run a '>' command or key binding. All are menu entry points, so they can't
+/// diverge.
+public void ui_omni_run(int id)
 {
     switch (id) {
     case CMD_NEW_TAB:   ui_new_tab();          break;
@@ -4906,6 +4914,8 @@ void ui_omni_run(int id)
     case CMD_CLOSE_PANE: ui_close_pane();      break;
     case CMD_PANE_NEXT:  ui_cycle_pane(1);     break;
     case CMD_PANE_PREV:  ui_cycle_pane(-1);    break;
+    case CMD_TAB_NEXT:   ui_cycle_tab(1);      break;
+    case CMD_TAB_PREV:   ui_cycle_tab(-1);     break;
     case CMD_MARK_CLEAR: ui_mark_clear();      break;
     case CMD_MARK_LOAD:  ui_marks_load_dialog(); break;
     case CMD_MARK_SAVE:  ui_marks_save_dialog(); break;
@@ -4928,6 +4938,11 @@ void ui_omni_run(int id)
     case CMD_INSERT_RANGE:  ui_write_prompt(true, true);   return;
     case CMD_SELECT_RANGE:  ui_select_prompt();            return;
     case CMD_KEYS:      ui_omni_open(OMNI_HELP);     return;
+    case CMD_OMNIBAR:   ui_omni_toggle();            return;
+    case CMD_MENU:      ui_omni_toggle(OMNI_COMMAND); return;
+    case CMD_LEFT: .. case CMD_SELECT_PAGE_DOWN:
+        ui_caret(id);
+        return;
     case CMD_SETTINGS:  ui_settings_open();    break;
     case CMD_ABOUT:     about_open();          break;
     case CMD_QUIT:
@@ -5697,7 +5712,7 @@ void ui_menubar(mu_Context* ctx)
     int baseMenuWidth = ctx.style.menu_width;
     int menuWidth = baseMenuWidth;
     foreach (ref immutable Entry e; COMMANDS)
-        menuWidth = mu_max(menuWidth, itemWidth(e.label.ptr, e.keys.ptr));
+        menuWidth = mu_max(menuWidth, itemWidth(e.label.ptr, bind_keys(e.id).ptr));
     ctx.style.menu_width = menuWidth;
     scope(exit) ctx.style.menu_width = baseMenuWidth;
 
@@ -5705,22 +5720,22 @@ void ui_menubar(mu_Context* ctx)
     {
         ctx.style.padding = itemPadding;
         // Ellipsis: opens a dialog first.
-        if (mu_menu_item_ex(ctx, "New Tab",    "Ctrl+T",       0, 0)) ui_new_tab();
-        if (mu_menu_item_ex(ctx, "Open...",    "Ctrl+O",       0, 0)) ui_open_dialog();
-        if (mu_menu_item_ex(ctx, OPEN_DEVICE_LABEL.ptr, "",    0, 0)) ui_open_device_prompt();
+        if (mu_menu_item_ex(ctx, "New Tab", bind_keys(CMD_NEW_TAB).ptr, 0, 0)) ui_new_tab();
+        if (mu_menu_item_ex(ctx, "Open...", bind_keys(CMD_OPEN).ptr, 0, 0)) ui_open_dialog();
+        if (mu_menu_item_ex(ctx, OPEN_DEVICE_LABEL.ptr, bind_keys(CMD_OPEN_DEVICE).ptr, 0, 0)) ui_open_device_prompt();
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Compare With...", "",        0, 0)) ui_compare_dialog();
-        if (mu_menu_item_ex(ctx, "Stop Comparing",  "",        0, 0)) ui_compare_stop();
-        if (mu_menu_item_ex(ctx, "Next Difference", "}",       0, 0)) ui_diff_step(false);
-        if (mu_menu_item_ex(ctx, "Previous Difference", "{",   0, 0)) ui_diff_step(true);
+        if (mu_menu_item_ex(ctx, "Compare With...", bind_keys(CMD_COMPARE).ptr, 0, 0)) ui_compare_dialog();
+        if (mu_menu_item_ex(ctx, "Stop Comparing", bind_keys(CMD_COMPARE_STOP).ptr, 0, 0)) ui_compare_stop();
+        if (mu_menu_item_ex(ctx, "Next Difference", bind_keys(CMD_DIFF_NEXT).ptr, 0, 0)) ui_diff_step(false);
+        if (mu_menu_item_ex(ctx, "Previous Difference", bind_keys(CMD_DIFF_PREV).ptr, 0, 0)) ui_diff_step(true);
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Save",       "Ctrl+S",       0, 0)) cast(void)ui_save();
-        if (mu_menu_item_ex(ctx, "Save As...", "Ctrl+Shift+S", 0, 0)) ui_save_as();
-        if (mu_menu_item_ex(ctx, "Refresh",    "Ctrl+L",       0, 0)) ui_refresh();
+        if (mu_menu_item_ex(ctx, "Save", bind_keys(CMD_SAVE).ptr, 0, 0)) cast(void)ui_save();
+        if (mu_menu_item_ex(ctx, "Save As...", bind_keys(CMD_SAVE_AS).ptr, 0, 0)) ui_save_as();
+        if (mu_menu_item_ex(ctx, "Refresh", bind_keys(CMD_REFRESH).ptr, 0, 0)) ui_refresh();
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Close Tab",  "Ctrl+W",       0, 0)) ui_close_current_tab();
+        if (mu_menu_item_ex(ctx, "Close Tab", bind_keys(CMD_CLOSE_TAB).ptr, 0, 0)) ui_close_current_tab();
         // Via SDL's queue; main owns the loop flag.
-        if (mu_menu_item_ex(ctx, "Quit", "Ctrl+Q", 0, 0))
+        if (mu_menu_item_ex(ctx, "Quit", bind_keys(CMD_QUIT).ptr, 0, 0))
         {
             SDL_Event quit; // .init zeroes the union
             quit.type = SDL_EVENT_QUIT;
@@ -5735,16 +5750,16 @@ void ui_menubar(mu_Context* ctx)
         ctx.style.padding = itemPadding;
         if (mu_menu_item_ex(ctx, "Read-Only", focusedDoc.restricted ? "On" : "Off", 0, 0)) ui_toggle_readonly();
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Undo",  "Ctrl+Z", 0, 0)) ui_undo(false);
-        if (mu_menu_item_ex(ctx, "Redo",  "Ctrl+Y", 0, 0)) ui_undo(true);
+        if (mu_menu_item_ex(ctx, "Undo", bind_keys(CMD_UNDO).ptr, 0, 0)) ui_undo(false);
+        if (mu_menu_item_ex(ctx, "Redo", bind_keys(CMD_REDO).ptr, 0, 0)) ui_undo(true);
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Cut",   "Ctrl+X", 0, 0)) ui_cut();
-        if (mu_menu_item_ex(ctx, "Cut as Text", "Ctrl+Shift+X", 0, 0)) ui_cut_text();
-        if (mu_menu_item_ex(ctx, "Copy",  "Ctrl+C", 0, 0)) cast(void)ui_copy();
-        if (mu_menu_item_ex(ctx, "Copy as Text", "Ctrl+Shift+C", 0, 0)) cast(void)ui_copy_text();
-        if (mu_menu_item_ex(ctx, "Paste", "Ctrl+V", 0, 0)) ui_paste();
+        if (mu_menu_item_ex(ctx, "Cut", bind_keys(CMD_CUT).ptr, 0, 0)) ui_cut();
+        if (mu_menu_item_ex(ctx, "Cut as Text", bind_keys(CMD_CUT_TEXT).ptr, 0, 0)) ui_cut_text();
+        if (mu_menu_item_ex(ctx, "Copy", bind_keys(CMD_COPY).ptr, 0, 0)) cast(void)ui_copy();
+        if (mu_menu_item_ex(ctx, "Copy as Text", bind_keys(CMD_COPY_TEXT).ptr, 0, 0)) cast(void)ui_copy_text();
+        if (mu_menu_item_ex(ctx, "Paste", bind_keys(CMD_PASTE).ptr, 0, 0)) ui_paste();
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Settings", "", 0, 0)) ui_settings_open();
+        if (mu_menu_item_ex(ctx, "Settings", bind_keys(CMD_SETTINGS).ptr, 0, 0)) ui_settings_open();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }
@@ -5753,20 +5768,20 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "Search"))
     {
         ctx.style.padding = itemPadding;
-        if (mu_menu_item_ex(ctx, "Find...",       "Ctrl+F",       0, 0)) ui_omni_open(OMNI_FIND);
-        if (mu_menu_item_ex(ctx, "Find Backward...", "Ctrl+Shift+F", 0, 0)) ui_find_back_prompt();
-        if (mu_menu_item_ex(ctx, "Find Next",     "Ctrl+N",       0, 0)) ui_find_repeat(false);
-        if (mu_menu_item_ex(ctx, "Find Previous", "Ctrl+Shift+N", 0, 0)) ui_find_repeat(true);
-        if (mu_menu_item_ex(ctx, "Bookmark All Matches...", "", 0, 0)) ui_mark_all_prompt();
+        if (mu_menu_item_ex(ctx, "Find...", bind_keys(CMD_FIND).ptr, 0, 0)) ui_omni_open(OMNI_FIND);
+        if (mu_menu_item_ex(ctx, "Find Backward...", bind_keys(CMD_FIND_BACK).ptr, 0, 0)) ui_find_back_prompt();
+        if (mu_menu_item_ex(ctx, "Find Next", bind_keys(CMD_FIND_NEXT).ptr, 0, 0)) ui_find_repeat(false);
+        if (mu_menu_item_ex(ctx, "Find Previous", bind_keys(CMD_FIND_PREV).ptr, 0, 0)) ui_find_repeat(true);
+        if (mu_menu_item_ex(ctx, "Bookmark All Matches...", bind_keys(CMD_MARK_ALL).ptr, 0, 0)) ui_mark_all_prompt();
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Go to Offset...", "Ctrl+G",     0, 0)) ui_omni_open(OMNI_ADDRESS);
-        if (mu_menu_item_ex(ctx, "Go to Field...",  "",           0, 0)) ui_omni_open(OMNI_STRUCTURE);
+        if (mu_menu_item_ex(ctx, "Go to Offset...", bind_keys(CMD_GOTO).ptr, 0, 0)) ui_omni_open(OMNI_ADDRESS);
+        if (mu_menu_item_ex(ctx, "Go to Field...", bind_keys(CMD_STRUCTURE).ptr, 0, 0)) ui_omni_open(OMNI_STRUCTURE);
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Skip Forward",  "Ctrl+Right",   0, 0)) ui_skip_element(false);
-        if (mu_menu_item_ex(ctx, "Skip Back",     "Ctrl+Left",    0, 0)) ui_skip_element(true);
-        if (mu_menu_item_ex(ctx, "Select Run Forward", "Ctrl+Shift+Right", 0, 0)) ui_skip_element(false, true);
-        if (mu_menu_item_ex(ctx, "Select Run Back",    "Ctrl+Shift+Left",  0, 0)) ui_skip_element(true, true);
-        if (mu_menu_item_ex(ctx, "Select Range...",    "",                 0, 0)) ui_select_prompt();
+        if (mu_menu_item_ex(ctx, "Skip Forward", bind_keys(CMD_SKIP_NEXT).ptr, 0, 0)) ui_skip_element(false);
+        if (mu_menu_item_ex(ctx, "Skip Back", bind_keys(CMD_SKIP_PREV).ptr, 0, 0)) ui_skip_element(true);
+        if (mu_menu_item_ex(ctx, "Select Run Forward", bind_keys(CMD_SKIP_SEL_NEXT).ptr, 0, 0)) ui_skip_element(false, true);
+        if (mu_menu_item_ex(ctx, "Select Run Back", bind_keys(CMD_SKIP_SEL_PREV).ptr, 0, 0)) ui_skip_element(true, true);
+        if (mu_menu_item_ex(ctx, "Select Range...", bind_keys(CMD_SELECT_RANGE).ptr, 0, 0)) ui_select_prompt();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }
@@ -5774,16 +5789,16 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "Bookmarks"))
     {
         ctx.style.padding = itemPadding;
-        if (mu_menu_item_ex(ctx, "Toggle Bookmark",   "Ctrl+B", 0, 0)) ui_mark_toggle();
-        if (mu_menu_item_ex(ctx, "Name Bookmark...",  "Ctrl+Shift+B", 0, 0)) ui_mark_name();
-        if (mu_menu_item_ex(ctx, "Next Bookmark",     "]",      0, 0)) ui_mark_step(1);
-        if (mu_menu_item_ex(ctx, "Previous Bookmark", "[",      0, 0)) ui_mark_step(-1);
+        if (mu_menu_item_ex(ctx, "Toggle Bookmark", bind_keys(CMD_MARK).ptr, 0, 0)) ui_mark_toggle();
+        if (mu_menu_item_ex(ctx, "Name Bookmark...", bind_keys(CMD_MARK_NAME).ptr, 0, 0)) ui_mark_name();
+        if (mu_menu_item_ex(ctx, "Next Bookmark", bind_keys(CMD_MARK_NEXT).ptr, 0, 0)) ui_mark_step(1);
+        if (mu_menu_item_ex(ctx, "Previous Bookmark", bind_keys(CMD_MARK_PREV).ptr, 0, 0)) ui_mark_step(-1);
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "List Bookmarks...", "",       0, 0)) ui_omni_open(OMNI_BOOKMARK);
-        if (mu_menu_item_ex(ctx, "Clear Bookmarks",   "",       0, 0)) ui_mark_clear();
+        if (mu_menu_item_ex(ctx, "List Bookmarks...", bind_keys(CMD_MARK_LIST).ptr, 0, 0)) ui_omni_open(OMNI_BOOKMARK);
+        if (mu_menu_item_ex(ctx, "Clear Bookmarks", bind_keys(CMD_MARK_CLEAR).ptr, 0, 0)) ui_mark_clear();
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Load Bookmarks...", "",       0, 0)) ui_marks_load_dialog();
-        if (mu_menu_item_ex(ctx, "Save Bookmarks...", "",       0, 0)) ui_marks_save_dialog();
+        if (mu_menu_item_ex(ctx, "Load Bookmarks...", bind_keys(CMD_MARK_LOAD).ptr, 0, 0)) ui_marks_load_dialog();
+        if (mu_menu_item_ex(ctx, "Save Bookmarks...", bind_keys(CMD_MARK_SAVE).ptr, 0, 0)) ui_marks_save_dialog();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }
@@ -5791,7 +5806,7 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "View"))
     {
         ctx.style.padding = itemPadding;
-        if (mu_menu_item_ex(ctx, "Inspect Bytes...", "Alt+I", 0, 0)) ui_omni_open(OMNI_INSPECT);
+        if (mu_menu_item_ex(ctx, "Inspect Bytes...", bind_keys(CMD_INSPECT).ptr, 0, 0)) ui_omni_open(OMNI_INSPECT);
         // Value in the shortcut column, like the toggles below.
         if (mu_menu_item_ex(ctx, "Byte Order", focusedDoc.endian == Endian.bigEndian ? "Big" : "Little", 0, 0))
             ui_endian_toggle();
@@ -5809,9 +5824,9 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Breadcrumbs", prefs.crumbs ? "On" : "Off", 0, 0))
             ui_toggle_crumbs();
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Zoom In",    "Ctrl+=", 0, 0)) ui_zoom(1);
-        if (mu_menu_item_ex(ctx, "Zoom Out",   "Ctrl+-", 0, 0)) ui_zoom(-1);
-        if (mu_menu_item_ex(ctx, "Reset Zoom", "Ctrl+0", 0, 0)) ui_zoom(0);
+        if (mu_menu_item_ex(ctx, "Zoom In", bind_keys(CMD_ZOOM_IN).ptr, 0, 0)) ui_zoom(1);
+        if (mu_menu_item_ex(ctx, "Zoom Out", bind_keys(CMD_ZOOM_OUT).ptr, 0, 0)) ui_zoom(-1);
+        if (mu_menu_item_ex(ctx, "Reset Zoom", bind_keys(CMD_ZOOM_RESET).ptr, 0, 0)) ui_zoom(0);
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }
@@ -5819,9 +5834,9 @@ void ui_menubar(mu_Context* ctx)
     if (mu_begin_menu(ctx, "Help"))
     {
         ctx.style.padding = itemPadding;
-        if (mu_menu_item(ctx, "Keyboard Shortcuts...")) ui_omni_open(OMNI_HELP);
+        if (mu_menu_item_ex(ctx, "Keyboard Shortcuts...", bind_keys(CMD_KEYS).ptr, 0, 0)) ui_omni_open(OMNI_HELP);
         mu_menu_separator(ctx);
-        if (mu_menu_item(ctx, "About")) about_open();
+        if (mu_menu_item_ex(ctx, "About", bind_keys(CMD_ABOUT).ptr, 0, 0)) about_open();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }

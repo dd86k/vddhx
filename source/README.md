@@ -8,7 +8,8 @@ this is the map and the handful of things that span modules.
 | File | What it holds |
 | --- | --- |
 | `main.d` | SDL setup, event loop |
-| `input.d` | SDL input routing: every key binding |
+| `input.d` | SDL input routing, key presses through the bindings |
+| `bindings.d` | key bindings: chords to commands, ddhx's `bind`/`unbind` |
 | `keys.d` | key binding checks through `input.d` (`--screenshot --keys`) |
 | `ui.d` | documents, views, panes, tabs, and every command |
 | `hexview.d` | the hex panel widget: grid, caret, minimap, edit hooks |
@@ -153,13 +154,18 @@ pointers, so the caller must repoint them before the new panel draws.
 ## Keys
 
 ddui's `MU_KEY_*` bits stop at `1 << 5`; `hexview.d` continues from `1 << 6`
-(`HEX_KEY_*`) so caret keys ride the same `ctx.key_down` bitmask. `input.d` does
-the mapping.
+(`HEX_KEY_*`) so caret keys ride the same `ctx.key_down` bitmask. `input.d` only
+sends the unbound ones. Bound caret keys queue a move (`hex_move`) that the panel
+runs on its next frame, so a binding's own modifiers (`bind ctrl+j down`) don't
+leak into the move.
 
-Two rules in the routing:
+Every command has a code (`CMD_*` in `ui.d`) and one entry in `bindings.d`'s
+table: rc name and default keys. A new command needs both, never a key check in
+`input.d`. Rules in the routing:
 
 - The omnibar takes the keyboard when it is open (`ui_omni_active`), since it
-  wants text where the panel wants hex digits and chords.
+  wants text where the panel wants hex digits and chords. Only commands marked
+  global (omnibar modes, zoom) get past it.
 - Punctuation shortcuts bind to **typed characters, not keycodes** - a `[` is not
   at a fixed position on every layout.
 - One modifier per level of the grid: `Ctrl+1..9` counts panes, `Alt+1..9` counts

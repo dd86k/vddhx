@@ -34,10 +34,16 @@ Rules:
 - **Compare**: "Next Difference" (`}`) and "Previous Difference" (`{`) keys.
   Like ddhx's `diff-next` and `diff-prev` commands.
 - "Select Range...", like ddhx's `select`. Same range syntax as "Replace Range...".
+- **Settings**: Key bindings. `bind KEY COMMAND` and `unbind KEY` in `.vddhxrc`,
+  with ddhx's key and command names, or Settings > Keys. Caret moves are
+  bindable too (`bind h left`).
 
 ### Changed
 
 - The offset column stays in place when scrolling sideways.
+- Arrow keys and Home/End work after clicking outside the grid, without
+  clicking back into it.
+- Shortcuts need their exact modifiers: Ctrl+Alt+N no longer acts as Ctrl+N.
 
 ## v0.1.1
 

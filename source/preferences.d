@@ -2,6 +2,7 @@
 /// documents and views, plus window chrome.
 ///
 /// Saving edits lines in place, preserving comments, order and unknown keys.
+/// Key bindings (`bind`, `unbind`) are bindings.d's.
 /// Authors: dd86k <dd@dax.moe>
 module preferences;
 
@@ -9,6 +10,7 @@ import std.system : Endian;
 import ddlogger;
 import ddhx.charset : Charset, ASCII, findCharset;
 import hexview : HEX_COLUMNS_MAX, HexBase;
+import bindings : bind_defaults, bind_edited, bind_key, bind_lines, bind_valid, unbind_key;
 
 /// Mode new tabs start in. Read-only only sets the tab's starting state.
 enum WriteMode { overwrite, insert, readonly }
@@ -60,6 +62,7 @@ void prefs_load()
     import os.path : findConfig;
 
     savePath = prefs_user_path();
+    bind_defaults();
 
     string path = findConfig(APPNAME, FILENAME);
     if (path is null)
@@ -289,15 +292,25 @@ void prefs_parse(ref Prefs p, const(string)[] text, string path)
         string key = prefs_line_key(line, value);
         if (key is null)
             continue;
+        if (key == "bind" || key == "unbind")
+        {
+            if (prefs_bind(line, true) == false)
+                logWarn("%s:%u: ignored: %s", path, i + 1, line);
+            continue;
+        }
         if (prefs_set(p, key, value) == false)
             logWarn("%s:%u: ignored: %s", path, i + 1, line);
     }
 }
 
 // Rewrites each key's last line (the effective one). Missing keys are added
-// only when non-default, so an untouched file stays empty.
+// only when non-default, so an untouched file stays empty. Bindings edited in
+// Settings replace the bind lines.
 void prefs_merge(ref string[] text, ref const(Prefs) p)
 {
+    if (bind_edited())
+        prefs_merge_binds(text, bind_lines());
+
     static immutable Prefs defaults;
 
     foreach (string key; PREFS_KEYS)
@@ -318,6 +331,48 @@ void prefs_merge(ref string[] text, ref const(Prefs) p)
         else if (prefs_get(p, key) != prefs_get(defaults, key))
             text ~= line;
     }
+}
+
+// Apply rc line `line` (bind or unbind) if `apply`, else only check it.
+// Parameters after the command aren't supported yet.
+bool prefs_bind(string line, bool apply)
+{
+    import std.string : strip;
+    import utils : Argument, arguments;
+
+    Argument[] args;
+    try
+        args = arguments(strip(line));
+    catch (Exception)
+        return false;
+    if (args.length == 3 && args[0].text == "bind")
+        return apply ? bind_key(args[1].text, args[2].text) : bind_valid(args[1].text, args[2].text);
+    if (args.length == 2 && args[0].text == "unbind")
+        return apply ? unbind_key(args[1].text) : bind_valid(args[1].text, null);
+    return false;
+}
+
+// Replace the valid bind/unbind lines with `binds`, where the first one was.
+// Ignored ones stay as written.
+void prefs_merge_binds(ref string[] text, string[] binds)
+{
+    string[] kept;
+    ptrdiff_t at = -1;
+    foreach (string line; text)
+    {
+        string value;
+        string key = prefs_line_key(line, value);
+        if ((key == "bind" || key == "unbind") && prefs_bind(line, false))
+        {
+            if (at < 0)
+                at = kept.length;
+            continue;
+        }
+        kept ~= line;
+    }
+    if (at < 0)
+        at = kept.length;
+    text = kept[0 .. at] ~ binds ~ kept[at .. $];
 }
 
 string prefs_text(const(string)[] text)
@@ -353,6 +408,26 @@ unittest
         "charset cp437",
         "columns auto",
         "minimap off",
+    ]);
+}
+
+unittest
+{
+    string[] text = [
+        "columns 8",
+        "bind j down",
+        "# vim",
+        "bind k nope",
+        "unbind j",
+        "bind ctrl+p goto +32",
+    ];
+    prefs_merge_binds(text, [ "bind h left" ]);
+    assert(text == [
+        "columns 8",
+        "bind h left",
+        "# vim",
+        "bind k nope",
+        "bind ctrl+p goto +32",
     ]);
 }
 

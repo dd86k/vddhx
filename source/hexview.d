@@ -27,6 +27,24 @@ enum
     HEX_KEY_REDO  = (1 << 17),  // @suppress(dscanner.style.undocumented_declaration)
 }
 
+/// Caret move queued by hex_move, run on the panel's next frame.
+enum HexMove
+{
+    none,       /// Nothing queued.
+    left,       /// Back a nibble when editing, else a byte.
+    right,      /// Forward a nibble when editing, else a byte.
+    up,         /// Up a row.
+    down,       /// Down a row.
+    home,       /// Row start.
+    end,        /// Row end.
+    top,        /// First byte.
+    bottom,     /// Last byte, or the append slot.
+    pageUp,     /// Up a screen.
+    pageDown,   /// Down a screen.
+    viewUp,     /// Scroll up a row, caret stays.
+    viewDown,   /// Scroll down a row, caret stays.
+}
+
 /// Number base of the offset column and lane headers.
 enum HexBase { hex, dec, oct }
 
@@ -155,6 +173,11 @@ struct HexView
     /// Take keyboard focus on the next draw (after opening a file or switching
     /// tabs outside a frame). Cleared once done.
     bool takeFocus;
+
+    /// Move queued by hex_move. One per frame, the last one wins.
+    HexMove move;
+    /// Queued move keeps the anchor.
+    bool moveExtend;
 
     /// Optional per-byte colour scheme. Null falls back to hex_classify.
     HexColorFn colorFn;
@@ -469,6 +492,31 @@ void hex_extend_caret(ref HexView v, size_t pos)
     v.editLow = false;
     hex_reveal(v, pos, v.columns > 0 ? v.columns : 16, v.visRows);
 }
+
+/// Queue caret move `m` for the next frame, keeping the anchor if `extend`.
+/// Takes keyboard focus. For key bindings, which run outside a frame.
+void hex_move(ref HexView v, HexMove m, bool extend)
+{
+    v.move = m;
+    v.moveExtend = extend;
+    v.takeFocus = true;
+}
+
+/// Move for the panel's own arrow keys in `keys` (HEX_KEY_* bits), Ctrl held
+/// if `ctrl`. First match only.
+HexMove hex_key_move(int keys, bool ctrl)
+{
+    if (keys & HEX_KEY_UP)    return ctrl ? HexMove.viewUp : HexMove.up;
+    if (keys & HEX_KEY_DOWN)  return ctrl ? HexMove.viewDown : HexMove.down;
+    if (keys & HEX_KEY_PGUP)  return HexMove.pageUp;
+    if (keys & HEX_KEY_PGDN)  return HexMove.pageDown;
+    if (keys & HEX_KEY_HOME)  return ctrl ? HexMove.top : HexMove.home;
+    if (keys & HEX_KEY_END)   return ctrl ? HexMove.bottom : HexMove.end;
+    if (keys & HEX_KEY_LEFT)  return HexMove.left;
+    if (keys & HEX_KEY_RIGHT) return HexMove.right;
+    return HexMove.none;
+}
+
 
 /// Scroll row, to save and restore (omnibar browsing). Clamped on next draw.
 long hex_top(ref const(HexView) v)
@@ -1176,6 +1224,10 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     // Hold focus after release; tab stop for keyboard access.
     mu_update_control(ctx, id, body, MU_OPT_HOLDFOCUS | MU_OPT_TABSTOP);
 
+    // Taken every frame so a move queued while locked doesn't run later.
+    HexMove queued = v.move;
+    v.move = HexMove.none;
+
     // Release ends this panel's drag. Before the early returns below.
     if ((ctx.mouse_down & MU_MOUSE_LEFT) == 0)
         v.dragSel = false;
@@ -1254,55 +1306,52 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         }
     }
 
-    // Keyboard: Shift keeps the anchor.
-    if (ctx.focus == id && ctx.key_pressed && v.active)
+    // Keyboard: a queued move (key bindings), else the panel's own arrow keys.
+    // Shift keeps the anchor.
+    HexMove move = queued;
+    bool extend = v.moveExtend;
+    if (move == HexMove.none && ctx.focus == id)
+    {
+        move = hex_key_move(ctx.key_pressed, (ctx.key_down & MU_KEY_CTRL) != 0);
+        extend = shift;
+    }
+    if (move != HexMove.none && v.active)
     {
         long dst = cast(long) v.cursor;
         bool low = v.editLow;
-        int keys = ctx.key_pressed;
         int page = mu_max(1, (visibleRows - 1) * cols);
-        bool ctrl = (ctx.key_down & MU_KEY_CTRL) != 0;
-
-        // Ctrl+Up/Down scrolls without moving the caret (may go off screen). Caller
-        // re-clamps topRow.
-        if (ctrl && (keys & (HEX_KEY_UP | HEX_KEY_DOWN)))
-        {
-            if (keys & HEX_KEY_UP)   v.topRow -= 1;
-            if (keys & HEX_KEY_DOWN) v.topRow += 1;
-            keys &= ~(HEX_KEY_UP | HEX_KEY_DOWN);
-        }
 
         // Byte-wise moves reset to the high nibble.
-        bool byteMove = (keys & (HEX_KEY_UP | HEX_KEY_DOWN | HEX_KEY_PGUP |
-            HEX_KEY_PGDN | HEX_KEY_HOME | HEX_KEY_END)) != 0;
-        if (keys & HEX_KEY_UP)    dst -= cols;
-        if (keys & HEX_KEY_DOWN)  dst += cols;
-        if (keys & HEX_KEY_PGUP)  dst -= page;
-        if (keys & HEX_KEY_PGDN)  dst += page;
-        if (keys & HEX_KEY_HOME)  dst = ctrl ? 0 : dst - dst % cols;                 // Ctrl: SOF, else row start
-        if (keys & HEX_KEY_END)   dst = ctrl ? caretMax : dst + (cols - 1) - (dst % cols);  // Ctrl: EOF, else row end
-        if (byteMove) low = false;
-
-        // Left/Right step a nibble when editing, a byte when extending or read-only.
-        if (keys & (HEX_KEY_LEFT | HEX_KEY_RIGHT))
+        final switch (move)
         {
-            if (editable && shift == false)
+        case HexMove.none:     break;
+        // Caret may go off screen. Caller re-clamps topRow.
+        case HexMove.viewUp:   v.topRow -= 1; break;
+        case HexMove.viewDown: v.topRow += 1; break;
+        case HexMove.up:       dst -= cols; low = false; break;
+        case HexMove.down:     dst += cols; low = false; break;
+        case HexMove.pageUp:   dst -= page; low = false; break;
+        case HexMove.pageDown: dst += page; low = false; break;
+        case HexMove.home:     dst -= dst % cols; low = false; break;
+        case HexMove.end:      dst += (cols - 1) - (dst % cols); low = false; break;
+        case HexMove.top:      dst = 0; low = false; break;
+        case HexMove.bottom:   dst = caretMax; low = false; break;
+        // A nibble when editing, a byte when extending or read-only.
+        case HexMove.left, HexMove.right:
+            int step = move == HexMove.left ? -1 : 1;
+            if (editable && extend == false)
             {
                 // The append slot has only a high nibble: cap at caretMax * 2.
-                long maxNib = caretMax * 2;
-                long nib = dst * 2 + (low ? 1 : 0);
-                if (keys & HEX_KEY_LEFT)  nib -= 1;
-                if (keys & HEX_KEY_RIGHT) nib += 1;
-                nib = mu_clamp(nib, 0L, maxNib);
+                long nib = mu_clamp(dst * 2 + (low ? 1 : 0) + step, 0L, caretMax * 2);
                 dst = nib / 2;
                 low = (nib & 1) != 0;
             }
             else
             {
-                if (keys & HEX_KEY_LEFT)  dst -= 1;
-                if (keys & HEX_KEY_RIGHT) dst += 1;
+                dst += step;
                 low = false;
             }
+            break;
         }
 
         dst = mu_clamp(dst, 0L, caretMax);
@@ -1310,7 +1359,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         {
             v.cursor  = cast(size_t) dst;
             v.editLow = low;
-            if (shift == false)
+            if (extend == false)
                 v.anchor = v.cursor;
             res |= MU_RES_CHANGE;
             hex_reveal(v, v.cursor, cols, visibleRows);

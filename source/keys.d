@@ -12,6 +12,7 @@ import std.string : toStringz;
 import bindbc.sdl;
 import ddlogger;
 import ddui;
+import bindings;
 import input : input_event;
 import omnibar : OmniMode;
 import render : render_size;
@@ -41,6 +42,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     keys_edit();
     keys_patterns();
     keys_marks();
+    keys_bindings();
 
     Files files = keys_files();
     keys_open(files);
@@ -123,6 +125,19 @@ void type(string text)
     event.text.text = text.toStringz;
     input_event(ctx, event);
     frame(); frame();
+}
+
+/// Press `code` the way a keyboard does: key down, its `text`, key up.
+void typeKey(SDL_Keycode code, string text)
+{
+    key(code, SDL_KMOD_NONE, true);
+    SDL_Event event;
+    event.type = SDL_EVENT_TEXT_INPUT;
+    event.text.text = text.toStringz;
+    input_event(ctx, event);
+    frame();
+    key(code, SDL_KMOD_NONE, false);
+    frame();
 }
 
 /// Go to `where` through Ctrl+G.
@@ -348,6 +363,47 @@ void keys_marks()
     expect(ui_probe().cursor == at, "] steps to the next bookmark");
     press(SDLK_B, CTRL);
     expect(ui_probe().marks == 0, "Ctrl+B again clears it");
+}
+
+/// rc bind lines and Settings' key capture, through the same routing.
+void keys_bindings()
+{
+    press(SDLK_HOME, CTRL);
+    Probe before = ui_probe();
+    expect(bind_key("a", "down"), "`bind a down` applies");
+    typeKey(SDLK_A, "a");
+    Probe p = ui_probe();
+    expect(p.cursor > 1 && p.edited == before.edited, "a bound hex digit moves, typing nothing");
+
+    expect(bind_key("ctrl+b", "bottom"), "`bind ctrl+b bottom` applies");
+    press(SDLK_B, CTRL);
+    expect(ui_probe().cursor == p.size, "Ctrl+B runs its new command");
+    expect(unbind_key("ctrl+b"), "`unbind ctrl+b` applies");
+    press(SDLK_B, CTRL);
+    expect(ui_probe().marks == before.marks + 1, "...and gets its default back");
+    press(SDLK_B, CTRL);
+
+    expect(bind_key("#", "top"), "`bind # top` applies");
+    type("#");
+    expect(ui_probe().cursor == 0, "a typed character runs its command");
+
+    // Capture in Settings. The page isn't clicked: capture starts as Add does.
+    press(SDLK_P, CTRL | SHIFT);
+    type("Settings");
+    press(SDLK_RETURN);
+    bind_capture(CMD_BOTTOM);
+    typeKey(SDLK_J, "j");
+    expect(bind_capturing() == -1, "a key press ends the capture");
+    press(SDLK_W, CTRL);
+    typeKey(SDLK_J, "j");
+    expect(ui_probe().cursor == p.size, "...and binds it");
+    bind_capture(CMD_TOP);
+    typeKey(SDLK_J, "j");
+    expect(bind_capturing() == -1 && ui_probe().cursor == p.size,
+        "capture stops outside Settings, the key keeps its command");
+
+    bind_defaults();
+    press(SDLK_HOME, CTRL);
 }
 
 void keys_quit()

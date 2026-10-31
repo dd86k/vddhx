@@ -1,7 +1,8 @@
 /// Settings tab: categories on the left, saved on every change.
 ///
 /// Saved settings only. Per-view setup (columns, charset, byte order) lives in
-/// the View menu, where it previews on the grid.
+/// the View menu, where it previews on the grid. Keys edits the bindings,
+/// saved as .vddhxrc bind lines.
 /// Authors: dd86k <dd@dax.moe>
 module settings;
 
@@ -9,6 +10,7 @@ import std.system : Endian;
 import ddui;
 import ddhx.charset : Charset, charsets;
 import preferences;
+import bindings;
 import hexview : HexBase;
 import ui : ui_font_dialog, ui_fonts, ui_zoom;
 
@@ -17,9 +19,11 @@ private enum int LABEL_W = 120;
 private enum int FIELD_W = 260;
 private enum int BROWSE_W = 80;
 private enum int CLEAR_W = 60;
+private enum int COMMAND_W = 180;
+private enum int KEYS_W = 220;
 
-private enum Category { defaults, appearance }
-private static immutable string[] CATEGORY_NAMES = [ "Defaults", "Appearance" ];
+private enum Category { defaults, appearance, keys }
+private static immutable string[] CATEGORY_NAMES = [ "Defaults", "Appearance", "Keys" ];
 
 private __gshared Category category;
 
@@ -48,7 +52,11 @@ void settings_page(mu_Context* ctx)
     {
     case Category.defaults:   settings_defaults(ctx);   break;
     case Category.appearance: settings_appearance(ctx); break;
+    case Category.keys:       settings_keys(ctx);       break;
     }
+    // Leaving the page stops a key capture.
+    if (category != Category.keys)
+        bind_capture(-1);
     ctx.style.spacing = spacing;
     mu_end_panel(ctx);
 }
@@ -289,6 +297,42 @@ void settings_appearance(mu_Context* ctx)
     }
 
     settings_saved(ctx, changed);
+}
+
+/// Keys page: each command's keys, Add to capture one more, Reset for its
+/// defaults.
+void settings_keys(mu_Context* ctx)
+{
+    settings_note(ctx, "To bind a key: Add, then press it (Esc cancels). Same as `bind KEY COMMAND`.");
+    settings_note(ctx, "A default key can only move to another command. Reset brings it back.");
+
+    static immutable int[1] one = [ BROWSE_W ];
+    mu_layout_row(ctx, 1, one.ptr, 0);
+    if (mu_button(ctx, "Reset All"))
+    {
+        bind_capture(-1);
+        bind_reset_all();
+    }
+
+    static immutable int[4] row = [ COMMAND_W, KEYS_W, CLEAR_W, CLEAR_W ];
+    int capture = bind_capturing();
+    foreach (ref immutable Command c; BINDABLE)
+    {
+        mu_layout_row(ctx, 4, row.ptr, 0);
+        mu_label(ctx, bind_command_label(c.id));
+        mu_label(ctx, capture == c.id ? "Press a key..." : bind_keys_all(c.id));
+        mu_push_id(ctx, c.name.ptr, cast(int) c.name.length);
+        if (mu_button(ctx, capture == c.id ? "Cancel" : "Add"))
+            bind_capture(capture == c.id ? -1 : c.id);
+        if (mu_button(ctx, "Reset"))
+        {
+            bind_capture(-1);
+            bind_reset(c.id);
+        }
+        mu_pop_id(ctx);
+    }
+
+    settings_saved(ctx, bind_changed());
 }
 
 // Saves on change, then shows the file path (only place it's shown).

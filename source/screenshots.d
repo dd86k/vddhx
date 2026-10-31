@@ -21,6 +21,7 @@ import ddui;
 import hexview : HexBase, HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
 import preferences : prefs;
+import bindings : bind_capture;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
@@ -482,12 +483,25 @@ int screenshot_run(string[] args)
     click(settingsItem.x + 3, settingsItem.y + 3);
     frame(); frame();
     shot("settings.bmp");
-    foreach (string page; ["Appearance", "Defaults"])
+    foreach (string page; ["Appearance", "Keys", "Defaults"])
     {
         mu_Vec2 at = find(page.ptr); // literals are NUL-terminated
         click(at.x + 3, at.y + 3);
         frame(); frame();
-        shot(page == "Defaults" ? "settings-defaults.bmp" : "settings-appearance.bmp");
+        switch (page)
+        {
+        case "Appearance": shot("settings-appearance.bmp"); break;
+        case "Keys":
+            shot("settings-keys.bmp");
+            // First row waits for a key.
+            mu_Vec2 add = find("Add");
+            click(add.x + 3, add.y + 3);
+            frame(); frame();
+            shot("settings-keys-capture.bmp");
+            bind_capture(-1);
+            break;
+        default:           shot("settings-defaults.bmp"); break;
+        }
     }
     ui_close_current_tab();
     frame();

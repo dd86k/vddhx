@@ -67,6 +67,13 @@ Settings live in `.vddhxrc`, the first found of:
 
 The settings tab saves to the first two, never to the system file.
 
+Key bindings use ddhx's lines and names, also editable in Settings > Keys:
+```
+bind h left
+bind ctrl+k find-next
+unbind ctrl+b
+```
+
 Each session logs to `vddhx.log`, the previous session's kept as `vddhx.log.old`:
 - Linux and macOS: `$XDG_STATE_HOME/vddhx/` (`~/.local/state/vddhx/`)
 - Windows: `%LOCALAPPDATA%\vddhx\`

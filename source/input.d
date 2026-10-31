@@ -1,11 +1,14 @@
-/// SDL input events into ddui and the UI. All key bindings live here.
+/// SDL input events into ddui and the UI. Key chords go through the bindings
+/// (bindings.d) first.
 module input;
 
+import std.ascii : isAlphaNum;
 import std.string : fromStringz;
 import bindbc.sdl;
 import ddui;
 import hexview;
-import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
+import bindings;
+import omnibar : OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_KEY_UP, OMNI_KEY_DOWN, OMNI_KEY_PAGEUP, OMNI_KEY_PAGEDOWN;
 import ui;
 
@@ -32,29 +35,26 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
             mu_input_scroll(ctx, cast(int)(event.wheel.x * 30), cast(int)(event.wheel.y * -30));
         break;
     case SDL_EVENT_TEXT_INPUT:
-        // Brackets step bookmarks, braces differences, like ddhx. Bound to the
-        // typed character, not the keycode: on many layouts they're behind AltGr
-        // (e.g. fr-ca). The omnibar keeps its brackets.
-        if (ui_omni_active() == false && event.text.text && event.text.text[0] && event.text.text[1] == 0)
+        // The text of a key a binding just took.
+        if (swallowText)
         {
-            if (event.text.text[0] == ']')
+            swallowText = false;
+            break;
+        }
+        // Typed-character bindings (brackets, braces), matched on the character
+        // so they follow the layout (behind AltGr on fr-ca).
+        dchar ch = textChar(event.text.text);
+        if (ch && capturing())
+        {
+            capture(Chord(ch, 0, true));
+            break;
+        }
+        if (ch && typing(ctx) == false)
+        {
+            int id = bind_find(Chord(ch, 0, true));
+            if (id >= 0)
             {
-                ui_mark_step(1);
-                break;
-            }
-            if (event.text.text[0] == '[')
-            {
-                ui_mark_step(-1);
-                break;
-            }
-            if (event.text.text[0] == '}')
-            {
-                ui_diff_step(false);
-                break;
-            }
-            if (event.text.text[0] == '{')
-            {
-                ui_diff_step(true);
+                run(id);
                 break;
             }
         }
@@ -84,52 +84,20 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
             mu_input_mouseup(ctx, x, y, btn);
         break;
     case SDL_EVENT_KEY_DOWN, SDL_EVENT_KEY_UP:
-        // Omnibar: Ctrl+E opens the tab switcher, other keys open their mode directly
-        // and toggle it closed. Ctrl+G, Ctrl+F, Alt+I match ddhx.
-        if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)
+        bool down = event.type == SDL_EVENT_KEY_DOWN;
+        if (down)
+            swallowText = false;
+        if (down && capturing() && modifierKey(event.key.key) == false)
         {
-            if (event.key.key == SDLK_E)
-            {
-                ui_omni_toggle();
-                break;
-            }
-            if (event.key.key == SDLK_P && event.key.mod & SDL_KMOD_SHIFT)
-            {
-                ui_omni_toggle(OMNI_COMMAND);
-                break;
-            }
-            if (event.key.key == SDLK_G)
-            {
-                ui_omni_toggle(OMNI_ADDRESS);
-                break;
-            }
-            if (event.key.key == SDLK_F)
-            {
-                if (event.key.mod & SDL_KMOD_SHIFT)
-                    ui_find_back_toggle();
-                else
-                    ui_omni_toggle(OMNI_FIND);
-                break;
-            }
-            // Text size, any time. Plus too: some layouts have it unshifted.
-            switch (event.key.key)
-            {
-            case SDLK_EQUALS, SDLK_PLUS, SDLK_KP_PLUS: ui_zoom(1);  return;
-            case SDLK_MINUS, SDLK_KP_MINUS:            ui_zoom(-1); return;
-            case SDLK_0, SDLK_KP_0:                    ui_zoom(0);  return;
-            default:
-            }
-        }
-        if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_ALT &&
-            event.key.key == SDLK_I)
-        {
-            ui_omni_toggle(OMNI_INSPECT);
+            captureKey(event.key.key, event.key.mod);
             break;
         }
-        // While open it owns the keyboard; panel chords and hex digits would interfere.
+        if (down && bindKey(ctx, event.key.key, event.key.mod))
+            break;
+        // While open it owns the keyboard. Panel keys and hex digits would interfere.
         if (ui_omni_active())
         {
-            if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)
+            if (down && event.key.key == SDLK_ESCAPE)
             {
                 ui_omni_close();
                 break;
@@ -137,126 +105,27 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
             int okey = omniKey(event.key.key);
             if (okey == 0)
                 break;
-            if (event.type == SDL_EVENT_KEY_DOWN)
+            if (down)
                 mu_input_keydown(ctx, okey);
             else
                 mu_input_keyup(ctx, okey);
             break;
         }
         // After the omnibar, which handles its own Escape.
-        if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE &&
-            ui_job_cancel())
+        if (down && event.key.key == SDLK_ESCAPE && ui_job_cancel())
             break;
-        // Alt+1..9: tab in focused pane (Ctrl+1..9 is panes). After the omnibar,
+        // Alt+1..9: tab in focused pane, Ctrl+1..9: pane. After the omnibar,
         // which would take them as text.
-        if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_ALT &&
-            event.key.key >= SDLK_1 && event.key.key <= SDLK_9)
+        if (down && event.key.key >= SDLK_1 && event.key.key <= SDLK_9)
         {
-            ui_select_tab(event.key.key - SDLK_1);
-            break;
-        }
-        // Menu shortcuts.
-        if (event.type == SDL_EVENT_KEY_DOWN && event.key.mod & SDL_KMOD_CTRL)
-        {
-            // Push SDL_EVENT_QUIT so it goes through the unsaved-changes check.
-            if (event.key.key == SDLK_Q)
+            if (event.key.mod & SDL_KMOD_ALT)
             {
-                SDL_Event quit; // .init zeroes the union
-                quit.type = SDL_EVENT_QUIT;
-                SDL_PushEvent(&quit);
+                ui_select_tab(event.key.key - SDLK_1);
                 break;
             }
-            if (event.key.key == SDLK_O)
-            {
-                ui_open_dialog();
-                break;
-            }
-            // Handle Ctrl+Tab here so ddui doesn't take it as a focus step.
-            if (event.key.key == SDLK_T)
-            {
-                ui_new_tab();
-                break;
-            }
-            if (event.key.key == SDLK_W)
-            {
-                ui_close_current_tab();
-                break;
-            }
-            if (event.key.key == SDLK_L)
-            {
-                ui_refresh();
-                break;
-            }
-            if (event.key.key == SDLK_TAB)
-            {
-                ui_cycle_tab(event.key.mod & SDL_KMOD_SHIFT ? -1 : 1);
-                break;
-            }
-            // Ctrl+\ splits (VS Code), Shift splits down; Ctrl+1..9 focuses panes.
-            // Layouts with backslash behind AltGr can use the omnibar's split commands.
-            if (event.key.key == SDLK_BACKSLASH)
-            {
-                if (event.key.mod & SDL_KMOD_SHIFT)
-                    ui_split_down();
-                else
-                    ui_split();
-                break;
-            }
-            if (event.key.key >= SDLK_1 && event.key.key <= SDLK_9)
+            if (event.key.mod & SDL_KMOD_CTRL)
             {
                 ui_focus_pane(event.key.key - SDLK_1);
-                break;
-            }
-            // Ctrl+S saves in place (dialog if no path); Shift forces Save As.
-            if (event.key.key == SDLK_S)
-            {
-                if (event.key.mod & SDL_KMOD_SHIFT)
-                    ui_save_as();
-                else
-                    ui_save();
-                break;
-            }
-            if (event.key.key == SDLK_X)
-            {
-                if (event.key.mod & SDL_KMOD_SHIFT)
-                    ui_cut_text();
-                else
-                    ui_cut();
-                break;
-            }
-            // Shift copies the text lane. Handled here: Shift doesn't change the keycode,
-            // so muiKey would give MU_KEY_COPY for both.
-            if (event.key.key == SDLK_C)
-            {
-                if (event.key.mod & SDL_KMOD_SHIFT)
-                    ui_copy_text();
-                else
-                    ui_copy();
-                break;
-            }
-            if (event.key.key == SDLK_V)
-            {
-                ui_paste();
-                break;
-            }
-            if (event.key.key == SDLK_N)
-            {
-                ui_find_repeat((event.key.mod & SDL_KMOD_SHIFT) != 0);
-                break;
-            }
-            if (event.key.key == SDLK_B)
-            {
-                if (event.key.mod & SDL_KMOD_SHIFT)
-                    ui_mark_name();
-                else
-                    ui_mark_toggle();
-                break;
-            }
-            // ddhx skip back/forward; intercepted so the panel doesn't step a nibble.
-            // Shift selects the skipped run.
-            if (event.key.key == SDLK_LEFT || event.key.key == SDLK_RIGHT)
-            {
-                ui_skip_element(event.key.key == SDLK_LEFT, (event.key.mod & SDL_KMOD_SHIFT) != 0);
                 break;
             }
         }
@@ -270,6 +139,112 @@ void input_event(mu_Context* ctx, ref const(SDL_Event) event)
         break;
     default:
     }
+}
+
+/// Text of the key a binding just took, dropped when it arrives.
+private __gshared bool swallowText;
+
+/// Run the command bound to a key press, if any. Returns: True if one ran.
+private bool bindKey(mu_Context* ctx, SDL_Keycode key, SDL_Keymod mod)
+{
+    Chord c = bind_chord(key, mod);
+    int id = bind_find(c);
+    if (id < 0)
+        return false;
+    // Only some reach past the omnibar. Keys without Ctrl or Alt are text in a box.
+    bool plain = (c.mods & (MOD_CTRL | MOD_ALT)) == 0;
+    if (ui_omni_active())
+    {
+        if (bind_global(id) == false)
+            return false;
+    }
+    else if (plain && typing(ctx))
+        return false;
+    run(id);
+    swallowText = plain;
+    return true;
+}
+
+/// Run bound command `id`. Omnibar keys toggle the box, and none of these take
+/// the focus from it.
+private void run(int id)
+{
+    switch (id)
+    {
+    case CMD_GOTO:       ui_omni_toggle(OMNI_ADDRESS); return;
+    case CMD_FIND:       ui_omni_toggle(OMNI_FIND);    return;
+    case CMD_FIND_BACK:  ui_find_back_toggle();        return;
+    case CMD_INSPECT:    ui_omni_toggle(OMNI_INSPECT); return;
+    case CMD_ZOOM_IN:    ui_zoom(1);                   return;
+    case CMD_ZOOM_OUT:   ui_zoom(-1);                  return;
+    case CMD_ZOOM_RESET: ui_zoom(0);                   return;
+    default:             ui_omni_run(id);
+    }
+}
+
+/// Whether Settings waits for a key. Leaving its tab stops it.
+private bool capturing()
+{
+    if (bind_capturing() < 0)
+        return false;
+    if (ui_on_settings())
+        return true;
+    bind_capture(-1);
+    return false;
+}
+
+/// Capture a key press for Settings. Esc cancels. Plain punctuation waits for
+/// its typed character, the way such bindings match.
+private void captureKey(SDL_Keycode key, SDL_Keymod mod)
+{
+    if (key == SDLK_ESCAPE)
+    {
+        bind_capture(-1);
+        return;
+    }
+    Chord c = bind_chord(key, mod);
+    if ((c.mods & (MOD_CTRL | MOD_ALT)) == 0 && key < 0x7F && key > ' ' &&
+        isAlphaNum(cast(char) key) == false)
+        return;
+    if (c.key >= 0x80 && (c.key & SDLK_SCANCODE_MASK) == 0 && c.mods == 0)
+        return; // non-ASCII layout key, same
+    capture(c);
+}
+
+/// Bind `c` to the command being captured, telling what it ran before.
+private void capture(Chord c)
+{
+    int id = bind_capturing();
+    int was = bind_capture_take(c);
+    swallowText = true;
+    if (was >= 0 && was != id)
+        ui_status("%s now runs %s, no longer %s", bind_label(c),
+            bind_command_label(id), bind_command_label(was));
+    else
+        ui_status("%s now runs %s", bind_label(c), bind_command_label(id));
+}
+
+/// Whether a text box has the keyboard (omnibar, Settings fields).
+private bool typing(mu_Context* ctx)
+{
+    return ui_omni_active() || (ctx.focus != 0 && ctx.focus == ctx.caret_id);
+}
+
+/// The one character in `text`, or 0.
+private dchar textChar(const(char)* text)
+{
+    import std.utf : decode, UTFException;
+
+    if (text is null || text[0] == 0)
+        return 0;
+    const(char)[] s = text.fromStringz;
+    size_t i;
+    dchar ch;
+    try
+        ch = decode(s, i);
+    catch (UTFException)
+        return 0;
+    return i == s.length ? ch : 0;
 }
 
 /// Modifier and lock keys. Only used to decide what dismisses a status message.
@@ -358,8 +333,6 @@ private int muiKey(SDL_KeyCode key)
     case SDLK_PAGEDOWN:              return HEX_KEY_PGDN;
     case SDLK_INSERT:                return HEX_KEY_INS;
     case SDLK_DELETE:                return HEX_KEY_DEL;
-    case SDLK_Z:                     return HEX_KEY_UNDO; // assumes with Ctrl
-    case SDLK_Y:                     return HEX_KEY_REDO; // assumes with Ctrl
     default:                         return 0;
     }
 }
