@@ -319,6 +319,21 @@ void keys_patterns()
     expect(p.anchor == 0 && p.cursor == 2, "the selection is kept");
     press(SDLK_Z, CTRL);
     expect(ui_probe().edited == before.edited, "one Ctrl+Z undoes the fill");
+
+    press(SDLK_P, CTRL | SHIFT);
+    type("Select Range");
+    press(SDLK_RETURN);
+    type("0x10:+3");
+    press(SDLK_RETURN);
+    p = ui_probe();
+    expect(p.anchor == 0x10 && p.cursor == 0x13, "Select Range... selects start to end");
+    press(SDLK_P, CTRL | SHIFT);
+    type("Select Range");
+    press(SDLK_RETURN);
+    type(".:$");
+    press(SDLK_RETURN);
+    p = ui_probe();
+    expect(p.anchor == 0x13 && p.cursor == p.size - 1, "...from the caret to the last byte");
 }
 
 void keys_marks()

@@ -16,7 +16,7 @@ import settings : settings_page;
 import preferences : prefs, prefs_save, WriteMode, FONT_SIZE_MAX, FONT_SIZE_MIN;
 import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
-import edit : EditRequest, edit_parse;
+import edit : EditRequest, edit_parse, edit_range;
 import bookmarks;
 import crumbs;
 import disks : DISKS_LISTED, Disk, disks_list, disks_size;
@@ -318,6 +318,7 @@ enum PromptKind
     address,
     openDevice,
     write,
+    select,
 }
 /// Ditto. Only valid while the box is in OmniMode.prompt.
 __gshared PromptKind promptKind;
@@ -2590,7 +2591,7 @@ enum
     CMD_SAVE, CMD_SAVE_AS,
     CMD_CLOSE_TAB, CMD_READONLY, CMD_REFRESH,
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE,
-    CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_GOTO,
+    CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_GOTO, CMD_SELECT_RANGE,
     CMD_FIND, CMD_FIND_BACK, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_MARK_ALL, CMD_INSPECT, CMD_STRUCTURE,
     CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
@@ -2638,6 +2639,7 @@ immutable Entry[] COMMANDS = [
     Entry("Skip Back",        "Ctrl+Left",    CMD_SKIP_PREV,    "run element previous word"),
     Entry("Select Run Forward","Ctrl+Shift+Right", CMD_SKIP_SEL_NEXT, "skip selection extend next padding"),
     Entry("Select Run Back",  "Ctrl+Shift+Left",  CMD_SKIP_SEL_PREV, "skip selection extend previous padding"),
+    Entry("Select Range...",  "",             CMD_SELECT_RANGE, "selection mark span offset length start end"),
     Entry("Toggle Bookmark",  "Ctrl+B",       CMD_MARK,         "mark set flag"),
     Entry("Name Bookmark...", "Ctrl+Shift+B", CMD_MARK_NAME,    "mark label rename annotate tag comment field"),
     Entry("Next Bookmark",    "]",            CMD_MARK_NEXT,    "mark forward"),
@@ -2932,6 +2934,11 @@ const(OmniItem)[] ui_omni_items()
             string wlabel, wdetail;
             ui_write_preview(wlabel, wdetail);
             put(wlabel, wdetail, 0, false, true);
+            break;
+        case PromptKind.select:
+            string slabel, sdetail;
+            ui_select_preview(slabel, sdetail);
+            put(slabel, sdetail, 0, false, true);
             break;
         }
         break;
@@ -3641,6 +3648,7 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             ui_device_commit(id);
             return; // opened tab has focus
         case PromptKind.write:    ui_write_commit(omni_query(omni));   break;
+        case PromptKind.select:   ui_select_commit(omni_query(omni));  break;
         }
         focusedView.hex.takeFocus = true;
         break;
@@ -4351,7 +4359,7 @@ void ui_setting_preview(OmniMode mode)
 {
     if (mode != OmniMode.prompt || ui_omni_active() == false
         || promptKind == PromptKind.markName || promptKind == PromptKind.openDevice
-        || promptKind == PromptKind.write)
+        || promptKind == PromptKind.write || promptKind == PromptKind.select)
     {
         ui_setting_restore(); // box moved on or another question
         return;
@@ -4630,6 +4638,102 @@ void ui_write_commit(const(char)[] typed)
     logDebugging("%s: %d byte(s) at %#x", verb, req.length, req.start);
 }
 
+/// Range selection being typed (ddhx's select): target view, its caret, and
+/// the last parse, reused while the text is unchanged.
+struct SelectPrompt
+{
+    View* view;
+    long cursor;    /// Caret when opened, what `.` stands for.
+    string text;
+    bool parsed;
+    string error;
+    long start, length;
+}
+/// Ditto.
+__gshared SelectPrompt selectPrompt;
+
+/// Prompt for a range to select, like ddhx's select.
+public void ui_select_prompt()
+{
+    if (ui_on_settings())
+        return;
+    View* v = &focusedView();
+    if (v.doc.editor is null || ui_refuse_busy(v.doc))
+        return;
+
+    selectPrompt = SelectPrompt(v, cast(long) v.hex.cursor);
+    promptKind = PromptKind.select;
+    omni_prompt(omni, "range: 0x100:0x1ff, 0x100:+16, 16, .:$");
+}
+
+/// Parse `typed` into `start` and `length`, the end clamped to the last byte.
+/// Returns: null, or what's wrong.
+string ui_select_parse(const(char)[] typed, out long start, out long length)
+{
+    SelectPrompt* s = &selectPrompt;
+    if (s.parsed == false || s.text != typed)
+    {
+        s.text   = typed.idup;
+        s.parsed = true;
+        s.error  = ui_select_resolve(strip(s.text), s.cursor, s.view.doc.editor.size(),
+            s.start, s.length);
+    }
+    start  = s.start;
+    length = s.length;
+    return s.error;
+}
+
+/// Resolve range `text` against `cursor` and the document `size`.
+/// Returns: null, or what's wrong.
+string ui_select_resolve(string text, long cursor, long size, ref long start, ref long length)
+{
+    if (size == 0)
+        return "the document is empty";
+    if (text.length == 0)
+        return "type a range";
+
+    EditRequest req;
+    string error = edit_range(text, cursor, size, req);
+    if (error)
+        return error;
+    if (req.start >= size)
+        return "range starts past the end";
+    start  = req.start;
+    length = req.start + req.length > size ? size - req.start : req.length;
+    return null;
+}
+
+/// Select prompt row: what Enter selects, or what's wrong.
+void ui_select_preview(out string label, out string detail)
+{
+    long start, length;
+    string error = ui_select_parse(omni_query(omni), start, length);
+    if (error)
+    {
+        label  = "Select";
+        detail = ui_row_text(error);
+        return;
+    }
+    char[96] buf = void;
+    label  = ui_row_text(sformat(buf, "Select %d byte(s) at %s", length, ui_offset(start, true)));
+    detail = ui_row_text(sformat(buf, "to %s", ui_offset(start + length - 1, true)));
+}
+
+/// Select the range in `typed`, caret on its last byte.
+void ui_select_commit(const(char)[] typed)
+{
+    long start, length;
+    string error = ui_select_parse(typed, start, length);
+    if (error)
+    {
+        ui_status("select: %s", error);
+        return;
+    }
+    if (ui_refuse_busy(selectPrompt.view.doc))
+        return;
+    ui_select_range(*selectPrompt.view, cast(size_t) start, cast(size_t) length);
+}
+
 /// Jump to the next/previous bookmark (wrapping) and select it.
 public void ui_mark_step(int dir)
 {
@@ -4822,6 +4926,7 @@ void ui_omni_run(int id)
     case CMD_INSERT:        ui_write_prompt(true, false);  return;
     case CMD_REPLACE_RANGE: ui_write_prompt(false, true);  return;
     case CMD_INSERT_RANGE:  ui_write_prompt(true, true);   return;
+    case CMD_SELECT_RANGE:  ui_select_prompt();            return;
     case CMD_KEYS:      ui_omni_open(OMNI_HELP);     return;
     case CMD_SETTINGS:  ui_settings_open();    break;
     case CMD_ABOUT:     about_open();          break;
@@ -5661,6 +5766,7 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Skip Back",     "Ctrl+Left",    0, 0)) ui_skip_element(true);
         if (mu_menu_item_ex(ctx, "Select Run Forward", "Ctrl+Shift+Right", 0, 0)) ui_skip_element(false, true);
         if (mu_menu_item_ex(ctx, "Select Run Back",    "Ctrl+Shift+Left",  0, 0)) ui_skip_element(true, true);
+        if (mu_menu_item_ex(ctx, "Select Range...",    "",                 0, 0)) ui_select_prompt();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);
     }

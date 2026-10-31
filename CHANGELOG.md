@@ -33,6 +33,7 @@ Rules:
   Re-read document and redraw screen.
 - **Compare**: "Next Difference" (`}`) and "Previous Difference" (`{`) keys.
   Like ddhx's `diff-next` and `diff-prev` commands.
+- "Select Range...", like ddhx's `select`. Same range syntax as "Replace Range...".
 
 ### Changed
 
