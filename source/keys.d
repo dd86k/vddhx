@@ -1,5 +1,5 @@
 /// Key binding checks: synthetic SDL events through input_event, so input.d
-/// routing is exercised. Run with
+/// routing is exercised. Only compiled in the screenshots build. Run with
 /// `SDL_VIDEODRIVER=offscreen dub run -b screenshots -- --screenshot --keys`.
 /// NOTE: Events carry keycodes; keyboard layout translation isn't covered.
 module keys;
@@ -344,7 +344,8 @@ void keys_quit()
 }
 
 /// `nav`: zeros with needles at NEEDLE_A and NEEDLE_B. `drop`, `edit`: copies.
-/// `saved`, `marks`: don't exist yet.
+/// `diff`: `nav` changed at DIFF_A and DIFF_B, plus a tail.
+/// `saved`, `fresh`, `marks`: don't exist yet.
 struct Files
 {
     string nav, drop, edit, saved, fresh, marks, diff;
@@ -356,6 +357,7 @@ enum size_t NEEDLE_B = 0x300;
 enum size_t DIFF_A = 0x10;
 enum size_t DIFF_B = 0x200;
 
+/// Write test files to the temp dir, delete old outputs, return their paths.
 Files keys_files()
 {
     import std.file : mkdirRecurse, tempDir;

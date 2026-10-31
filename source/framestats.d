@@ -1,4 +1,5 @@
 /// Per-second frame timings, to judge whether skipping unchanged frames pays.
+/// Only compiled with `-version=FrameStats`.
 ///
 /// Build and hash average over every frame built, render and present over the
 /// ones mu_frame_dirty let through.
