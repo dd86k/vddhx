@@ -146,6 +146,7 @@ int main(string[] args)
 
     // Before ui_init: the first tab uses the defaults.
     prefs_load();
+    ui_theme_apply();
     ui_zoom(0);
     ui_fonts(false);
 
@@ -211,6 +212,11 @@ int main(string[] args)
                     interval = frameInterval(window);
                 if (event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)
                     render_set_density(SDL_GetWindowPixelDensity(window));
+                break;
+            case SDL_EVENT_SYSTEM_THEME_CHANGED:
+                // `theme auto` follows the OS.
+                ui_theme_apply();
+                mu_invalidate(ctx);
                 break;
             default:
                 version (Screenshots)

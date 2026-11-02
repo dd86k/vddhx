@@ -14,9 +14,9 @@ import bindings;
 import theme : SCHEMES, SCHEME_UI, Scheme, SchemeInfo, theme_bg, theme_changed,
     theme_copy, theme_current, theme_editable, theme_fg, theme_file, theme_list,
     theme_overridden, theme_parent, theme_reset, theme_reset_all, theme_save,
-    theme_scan, theme_set, theme_spec, theme_use;
+    theme_scan, theme_set, theme_spec;
 import hexview : HexBase;
-import ui : ui_font_dialog, ui_fonts, ui_zoom;
+import ui : ui_font_dialog, ui_fonts, ui_system_dark, ui_theme_apply, ui_zoom;
 
 private enum int CATEGORY_W = 120;
 private enum int LABEL_W = 120;
@@ -273,18 +273,38 @@ void settings_defaults(mu_Context* ctx)
 void settings_appearance(mu_Context* ctx)
 {
     __gshared int minimap, crumbs;
-    __gshared int themeIndex;
+    // Separate statics: dropdowns are identified by their index's address.
+    __gshared int theme, themeDark, themeLight;
+    __gshared ThemeNames themeNames, darkNames, lightNames;
     __gshared ValueBox fontsize;
     __gshared FontBox font, monofont;
 
     bool changed;
 
     settings_label(ctx, "Theme");
-    if (settings_theme(ctx, themeIndex) && theme_use(theme_list()[themeIndex]))
+    if (string name = settings_theme(ctx, themeNames, theme, prefs.theme, true))
     {
-        prefs.theme = theme_list()[themeIndex];
+        prefs.theme = name;
         changed = true;
     }
+    if (prefs.theme == "auto")
+    {
+        settings_label(ctx, "Dark mode");
+        if (string name = settings_theme(ctx, darkNames, themeDark, prefs.themeDark, false))
+        {
+            prefs.themeDark = name;
+            changed = true;
+        }
+        settings_label(ctx, "Light mode");
+        if (string name = settings_theme(ctx, lightNames, themeLight, prefs.themeLight, false))
+        {
+            prefs.themeLight = name;
+            changed = true;
+        }
+        settings_note(ctx, "auto follows the system's dark or light mode.");
+    }
+    if (changed)
+        ui_theme_apply();
 
     settings_label(ctx, "Text size");
     if (settings_value(ctx, fontsize, "fontsize"))
@@ -416,7 +436,13 @@ void settings_copy(mu_Context* ctx)
         error = theme_copy(text);
         if (error is null)
         {
-            prefs.theme = text;
+            // Under auto, the copy takes the current mode's slot.
+            if (prefs.theme != "auto")
+                prefs.theme = text;
+            else if (ui_system_dark())
+                prefs.themeDark = text;
+            else
+                prefs.themeLight = text;
             prefs_save();
             name[] = 0;
         }
@@ -425,26 +451,38 @@ void settings_copy(mu_Context* ctx)
         settings_note(ctx, "%s", error);
 }
 
-/// Theme dropdown over theme_list, true on change.
-bool settings_theme(mu_Context* ctx, ref int index)
+// Theme dropdown names, rebuilt when theme_list changes.
+struct ThemeNames
+{
+    const(string)[] shown;  // theme_list as of the build
+    string[] list;          // dropdown items
+    const(char)*[] ptrs;    // ditto, for ddui
+}
+
+/// Theme dropdown, `auto` first if `withAuto`, on `current`. Returns: The
+/// picked name, null if unchanged.
+string settings_theme(mu_Context* ctx, ref ThemeNames names, ref int index,
+    string current, bool withAuto)
 {
     import std.string : toStringz;
 
-    __gshared const(string)[] shown;
-    __gshared const(char)*[] names;
-    const(string)[] list = theme_list();
-    if (list !is shown)
+    const(string)[] themes = theme_list();
+    if (themes !is names.shown || names.list.length == 0)
     {
-        shown = list;
-        names.length = list.length;
-        foreach (size_t i, string n; list)
-            names[i] = toStringz(n);
+        names.shown = themes;
+        names.list = (withAuto ? [ "auto" ] : null) ~ themes.dup;
+        names.ptrs.length = names.list.length;
+        foreach (size_t i, string n; names.list)
+            names.ptrs[i] = toStringz(n);
     }
 
-    foreach (size_t i, string n; list)
-        if (n == theme_current())
+    foreach (size_t i, string n; names.list)
+        if (n == current)
             index = cast(int) i;
-    return (mu_dropdown(ctx, &index, names.ptr, cast(int) names.length) & MU_RES_CHANGE) != 0;
+    int res = mu_dropdown(ctx, &index, names.ptrs.ptr, cast(int) names.ptrs.length);
+    if ((res & MU_RES_CHANGE) == 0)
+        return null;
+    return names.list[index];
 }
 
 /// Filled square of color `c` in the next cell, nothing if `c` is unused.

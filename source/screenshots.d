@@ -511,7 +511,15 @@ int screenshot_run(string[] args)
         frame(); frame();
         switch (page)
         {
-        case "Appearance": shot("settings-appearance.bmp"); break;
+        case "Appearance":
+            shot("settings-appearance.bmp");
+            // auto adds the dark and light mode rows.
+            prefs.theme = "auto";
+            frame(); frame();
+            shot("settings-appearance-auto.bmp");
+            prefs.theme = "dark";
+            frame();
+            break;
         case "Colors":    shot("settings-colors.bmp");
                            light("settings-colors-light.bmp"); break;
         case "Keys":

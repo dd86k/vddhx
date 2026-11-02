@@ -74,8 +74,9 @@ bind ctrl+k find-next
 unbind ctrl+b
 ```
 
-Colors come from a theme: `theme dark` (default), `theme light`, or a user theme
-file. Settings > Appearance picks one. Settings > Colors edits user themes, and
+Colors come from a theme: `theme dark` (default), `theme light`, a user theme
+file, or `theme auto` to follow the system's dark or light mode (`theme-dark`
+and `theme-light` name the two). Settings > Appearance picks them. Settings > Colors edits user themes, and
 saves a copy of a built-in one to start from. A theme file lives in the config
 folder as `themes/NAME.theme` (`~/.config/vddhx/themes/` on Linux) and holds
 its base theme plus ddhx's `color SCHEME FG:BG` lines:

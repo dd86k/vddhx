@@ -11,7 +11,7 @@ import ddlogger;
 import ddhx.charset : Charset, ASCII, findCharset;
 import hexview : HEX_COLUMNS_MAX, HexBase;
 import bindings : bind_defaults, bind_edited, bind_key, bind_lines, bind_valid, unbind_key;
-import theme : theme_color, theme_defaults, theme_exists, theme_use;
+import theme : theme_color, theme_defaults, theme_exists;
 
 /// Mode new tabs start in. Read-only only sets the tab's starting state.
 enum WriteMode { overwrite, insert, readonly }
@@ -36,7 +36,9 @@ struct Prefs
     int fontsize = FONT_SIZE;   /// Text size in points.
     string font;        /// UI font file or name, empty for the default.
     string monofont;    /// Hex panel font file or name, empty for the default.
-    string theme = "dark";    /// Theme name, built-in or a user file.
+    string theme = "dark";        /// Theme name, built-in or a user file, or `auto`.
+    string themeDark = "dark";    /// Ditto, `auto` with the OS in dark mode.
+    string themeLight = "light";  /// Ditto, light mode.
 }
 
 /// Ditto.
@@ -46,6 +48,7 @@ __gshared Prefs prefs;
 immutable string[] PREFS_KEYS = [
     "columns", "charset", "endian", "writemode", "address", "minimap",
     "breadcrumbs", "fontsize", "font", "monofont", "theme",
+    "theme-dark", "theme-light",
 ];
 
 private enum string APPNAME = "vddhx";
@@ -86,8 +89,14 @@ void prefs_load()
 
     lines = text.lineSplitter.array;
     prefs_parse(prefs, lines, path);
-    if (theme_use(prefs.theme) == false)
-        logWarn("%s: theme %s could not be read", path, prefs.theme);
+}
+
+/// Theme `p` picks, `dark` telling the OS mode for `auto`.
+string prefs_theme_name(ref const(Prefs) p, bool dark)
+{
+    if (p.theme != "auto")
+        return p.theme;
+    return dark ? p.themeDark : p.themeLight;
 }
 
 /// Write `prefs` back. Errors are logged, not thrown.
@@ -195,9 +204,14 @@ bool prefs_set(ref Prefs p, string key, string value)
     case "font":        p.font = value;     return true;
     case "monofont":    p.monofont = value; return true;
     case "theme":
-        if (theme_exists(value) == false)
+        if (value != "auto" && theme_exists(value) == false)
             return false;
         p.theme = value;
+        return true;
+    case "theme-dark", "theme-light":
+        if (theme_exists(value) == false)
+            return false;
+        (key == "theme-dark" ? p.themeDark : p.themeLight) = value;
         return true;
     default:            return false;
     }
@@ -221,6 +235,8 @@ string prefs_get(ref const(Prefs) p, string key)
     case "font":        return prefs_quote(p.font);
     case "monofont":    return prefs_quote(p.monofont);
     case "theme":       return p.theme;
+    case "theme-dark":  return p.themeDark;
+    case "theme-light": return p.themeLight;
     default:            assert(false, key);
     }
 }
@@ -516,6 +532,16 @@ unittest
     // Themes: built-in names only here, unknown ones ignored.
     assert(prefs_set(p, "theme", "light"));
     assert(p.theme == "light");
-    assert(theme_current() == "dark"); // applied by prefs_load
+    assert(theme_current() == "dark"); // applied by ui_theme_apply
     assert(prefs_set(p, "theme", "no-such-theme") == false);
+
+    // auto follows the OS through theme-dark and theme-light.
+    assert(prefs_set(p, "theme", "auto"));
+    assert(prefs_set(p, "theme-light", "dark"));
+    assert(prefs_set(p, "theme-dark", "auto") == false);
+    assert(prefs_theme_name(p, true) == "dark");
+    assert(prefs_theme_name(p, false) == "dark");
+    assert(prefs_set(p, "theme-light", "light"));
+    assert(prefs_theme_name(p, false) == "light");
+    assert(prefs_get(p, "theme-dark") == "dark");
 }

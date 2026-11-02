@@ -42,6 +42,8 @@ Rules:
 - **Themes**: built-in `dark` and `light`, plus user themes (`themes/NAME.theme`:
   a `base` theme and `color` lines). `theme NAME` in `.vddhxrc`, or Settings >
   Appearance. Settings > Colors edits user themes and copies built-in ones.
+- **Themes**: `theme auto` follows the system's dark or light mode, live, using
+  `theme-dark` and `theme-light`.
 
 ### Changed
 

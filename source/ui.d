@@ -13,7 +13,8 @@ import ddhx.editor : IDocumentEditor;
 import ddhx.editor.piecev4 : PieceV4DocumentEditor;
 import about : about_open, about_frame;
 import settings : settings_page;
-import preferences : prefs, prefs_save, WriteMode, FONT_SIZE_MAX, FONT_SIZE_MIN;
+import preferences : prefs, prefs_save, prefs_theme_name, WriteMode, FONT_SIZE_MAX,
+    FONT_SIZE_MIN;
 import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
 import edit : EditRequest, edit_parse, edit_range;
@@ -26,7 +27,7 @@ import structure;
 import structures.png : PngStructure, png_detect;
 import theme : Scheme, theme_alpha, theme_bg, theme_crumbs, theme_edge, theme_fg,
     theme_hex, theme_omni, theme_role, theme_split, theme_stamp, theme_style,
-    theme_tabs;
+    theme_tabs, theme_use;
 import uitext : ui_elide;
 import omnibar;
 import bindings;
@@ -3276,6 +3277,25 @@ private void ui_fonts_apply()
     if (fontsSave)
         cast(void) prefs_save();
     fontsSave = false;
+}
+
+/// OS in dark mode as of the last ui_theme_apply. Unknown counts as dark.
+private __gshared bool systemDark = true;
+
+/// Use the theme .vddhxrc picks: `theme`, or under `auto` `theme-dark` or
+/// `theme-light` by the OS mode. Call on load and when either changes.
+public void ui_theme_apply()
+{
+    systemDark = SDL_GetSystemTheme() != SDL_SYSTEM_THEME_LIGHT;
+    string name = prefs_theme_name(prefs, systemDark);
+    if (theme_use(name) == false)
+        logWarn("theme %s could not be read", name);
+}
+
+/// Ditto, whether the OS was in dark mode.
+public bool ui_system_dark()
+{
+    return systemDark;
 }
 
 /// Session zoom in points, on top of the saved text size.
