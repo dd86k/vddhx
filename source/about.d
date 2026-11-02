@@ -12,6 +12,7 @@ import ddui;
 import elite : elite_open;
 import logging : logging_folder;
 import hexview : hex_classify;
+import theme : Scheme, theme_fg;
 
 /// Application version. Lives here only; dub.sdl has none (dub uses git tags).
 enum VERSION = "0.1.1";
@@ -98,9 +99,6 @@ private enum int HEIGHT = 270;
 
 /// Icon size beside the heading.
 private enum int MARK = 48;
-
-private enum mu_Color LINK_COLOR = mu_Color(110, 170, 255, 255);
-private enum mu_Color LINK_HOVER = mu_Color(160, 205, 255, 255);
 
 // Deferred to the next about_frame: placement needs the window size.
 private __gshared bool wantOpen;
@@ -199,7 +197,7 @@ private enum mu_Color CTRL   = hex_classify(0, 0x01, null);
 private enum mu_Color HIGH   = hex_classify(0, 0x80, null);
 /// Not a byte class: the bookmark tint is too dark for a whole cell.
 private enum mu_Color ACCENT = mu_Color(230, 170, 60, 255);
-/// ui.d's CANVAS (black) would vanish in a dark dialog.
+/// The black canvas would vanish in a dark dialog.
 private enum mu_Color PLATE  = mu_Color(18, 18, 22, 255);
 
 private immutable mu_Color[3][3] MARK_CELLS = [
@@ -287,7 +285,7 @@ private bool about_link(mu_Context* ctx, string url)
                   (ctx.focus == id && (ctx.key_pressed & MU_KEY_RETURN) != 0);
 
     bool lit = ctx.hover == id || ctx.focus == id;
-    mu_Color color = lit ? LINK_HOVER : LINK_COLOR;
+    mu_Color color = theme_fg(lit ? Scheme.ui_link_hover : Scheme.ui_accent);
 
     // Left-aligned, vertically centered, like mu_label.
     mu_Font font = ctx.style.font;

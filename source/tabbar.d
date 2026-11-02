@@ -24,6 +24,16 @@ struct TabItem
     bool locked;
 }
 
+/// Tab strip colors. The active tab uses TabBar.content.
+struct TabColors
+{
+    mu_Color idle   = mu_Color( 38,  38,  44, 255);  /// Inactive tab.
+    mu_Color hover  = mu_Color( 60,  60,  70, 255);  /// Hovered tab, new tab button.
+    mu_Color accent = mu_Color(110, 170, 255, 255);  /// Active tab top edge, progress.
+    mu_Color dim    = mu_Color(170, 170, 185, 255);  /// Inactive label and icon.
+    mu_Color close  = mu_Color( 90,  90, 105, 255);  /// Hovered close box, progress track.
+}
+
 /// Persistent strip state (scroll, drag). Keep across frames.
 struct TabBar
 {
@@ -34,6 +44,8 @@ struct TabBar
     /// Background under the strip; the active tab uses it to blend in.
     /// Transparent: window background.
     mu_Color content;
+    /// Other colors. Read per frame.
+    TabColors colors;
 
     /// Mute the active tab's accent: only the focused strip is lit.
     bool unfocused;
@@ -83,13 +95,6 @@ enum TabAction
     move,   /// Move from `index` to `target`.
     detach, /// Dragged out and released; caller decides where.
 }
-
-// The active tab uses the window body color so it joins the content.
-private enum mu_Color TAB_IDLE    = mu_Color( 38,  38,  44, 255);
-private enum mu_Color TAB_HOVER   = mu_Color( 60,  60,  70, 255);
-private enum mu_Color TAB_ACCENT  = mu_Color(110, 170, 255, 255); // active tab top edge
-private enum mu_Color TAB_DIM     = mu_Color(170, 170, 185, 255); // inactive label/icon
-private enum mu_Color TAB_CLOSEBG = mu_Color( 90,  90, 105, 255); // hovered close box
 
 private enum int TAB_LIFT     = 3; // inactive tab offset from strip top
 private enum int TAB_ACCENT_H = 2;
@@ -344,7 +349,7 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
         index  = -1;
     }
     if (ctx.hover == nid)
-        mu_draw_rect(ctx, newR, TAB_HOVER);
+        mu_draw_rect(ctx, newR, bar.colors.hover);
     mu_Rect plusR = mu_Rect(newR.x, newR.y + TAB_HEADROOM, newR.w, newR.h - TAB_HEADROOM);
     mu_draw_control_text(ctx, "+", plusR, MU_COLOR_TEXT, MU_OPT_ALIGNCENTER);
 
@@ -392,7 +397,7 @@ int tab_badge(mu_Context* ctx, ref const(TabBar) bar, mu_Rect strip, int th, mu_
     int tw = ctx.text_width(font, bar.badge.ptr, cast(int) bar.badge.length);
     mu_draw_text(ctx, font, bar.badge,
         mu_Vec2(strip.x + TAB_INSET + TAB_PAD, strip.y + TAB_HEADROOM + (strip.h - TAB_HEADROOM - th) / 2),
-        bar.unfocused ? TAB_DIM : TAB_ACCENT);
+        bar.unfocused ? bar.colors.dim : bar.colors.accent);
     return tw + TAB_PAD * 2 + TAB_INSET;
 }
 
@@ -576,14 +581,14 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     // Active: full height, body color. Others: lower and darker.
     mu_Color face = active ? (bar.content.a ? bar.content :
                               ctx.style.colors[MU_COLOR_WINDOWBG]) :
-                    bodyHot || closeHot ? TAB_HOVER : TAB_IDLE;
+                    bodyHot || closeHot ? bar.colors.hover : bar.colors.idle;
     int top = active ? 0 : TAB_LIFT;
     mu_draw_rect(ctx, mu_Rect(r.x, r.y + top, r.w, r.h - top), face);
     if (active)
         mu_draw_rect(ctx, mu_Rect(r.x, r.y, r.w, TAB_ACCENT_H),
-            bar.unfocused ? TAB_DIM : TAB_ACCENT);
+            bar.unfocused ? bar.colors.dim : bar.colors.accent);
 
-    mu_Color ink = active ? ctx.style.colors[MU_COLOR_TEXT] : TAB_DIM;
+    mu_Color ink = active ? ctx.style.colors[MU_COLOR_TEXT] : bar.colors.dim;
 
     int textX = r.x + inset;
     int textW = closeR.x - inset - textX;
@@ -608,7 +613,8 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
         int tagW = ctx.text_width(font, tag.ptr, cast(int) tag.length);
         if (labelW + inset + tagW <= textW)
         {
-            mu_draw_text(ctx, font, cast(string) tag, mu_Vec2(closeR.x - inset - tagW, textY), TAB_DIM);
+            mu_draw_text(ctx, font, cast(string) tag,
+                mu_Vec2(closeR.x - inset - tagW, textY), bar.colors.dim);
             textW -= tagW + inset;
         }
     }
@@ -627,9 +633,9 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
         int barX = r.x + inset;
         int barW = closeR.x + closeR.w - barX;
         int y = mu_min(textY + th + 1, r.y + r.h - TAB_BAR_H);
-        mu_draw_rect(ctx, mu_Rect(barX, y, barW, TAB_BAR_H), TAB_CLOSEBG);
+        mu_draw_rect(ctx, mu_Rect(barX, y, barW, TAB_BAR_H), bar.colors.close);
         mu_draw_rect(ctx, mu_Rect(barX, y, barW * mu_min(it.progress, 100) / 100, TAB_BAR_H),
-            TAB_ACCENT);
+            bar.colors.accent);
     }
 
     if (it.modified && closeHot == false)
@@ -642,7 +648,7 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     else if (active || bodyHot || closeHot)
     {
         if (closeHot)
-            mu_draw_rect(ctx, closeR, TAB_CLOSEBG);
+            mu_draw_rect(ctx, closeR, bar.colors.close);
         mu_draw_icon(ctx, MU_ICON_CLOSE, closeR, ink);
     }
 }

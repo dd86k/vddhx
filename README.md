@@ -83,7 +83,9 @@ color selection :#304060
 ```
 Schemes are ddhx's (`normal`, `zero`, `cursor`, `mirror`, `selection`, `bookmark`,
 `diff-changed`, `diff-missing`) plus the byte classes `whitespace`, `control` and
-`unmapped`. `normal` is printable bytes.
+`unmapped`. `normal` is printable bytes. The offset column, header, scrollbar,
+minimap, structure fields (`structure-magic`...) and the UI (`ui-accent`,
+`ui-tab`...) have schemes too: Settings > Colors lists them all.
 
 Each session logs to `vddhx.log`, the previous session's kept as `vddhx.log.old`:
 - Linux and macOS: `$XDG_STATE_HOME/vddhx/` (`~/.local/state/vddhx/`)

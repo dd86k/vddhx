@@ -16,33 +16,40 @@ enum int SPLIT_WIDTH = 6;
 /// drag never rounds away.
 enum int SPLIT_WEIGHT = 1000;
 
-private enum mu_Color SPLIT_IDLE  = mu_Color( 30,  30,  38, 255);
-private enum mu_Color SPLIT_HOVER = mu_Color( 70,  70,  85, 255);
-private enum mu_Color SPLIT_HELD  = mu_Color(110, 170, 255, 255);
+/// Splitter bar colors.
+struct SplitColors
+{
+    mu_Color idle  = mu_Color( 30,  30,  38, 255);   /// At rest.
+    mu_Color hover = mu_Color( 70,  70,  85, 255);   /// Hovered.
+    mu_Color held  = mu_Color(110, 170, 255, 255);   /// Dragged.
+}
 
 /// Vertical splitter bar between side-by-side panes. `name` is a stable id.
 /// Returns: Pixels dragged this frame, 0 if not dragging. Positive: rightwards.
-int split_bar_x(mu_Context* ctx, const(char)* name, mu_Rect r)
+int split_bar_x(mu_Context* ctx, const(char)* name, mu_Rect r,
+    SplitColors colors = SplitColors.init)
 {
-    return split_bar(ctx, name, r, true);
+    return split_bar(ctx, name, r, true, colors);
 }
 
 /// Horizontal splitter bar between stacked panes.
 /// Returns: Pixels dragged this frame, 0 if not dragging. Positive: downwards.
-int split_bar_y(mu_Context* ctx, const(char)* name, mu_Rect r)
+int split_bar_y(mu_Context* ctx, const(char)* name, mu_Rect r,
+    SplitColors colors = SplitColors.init)
 {
-    return split_bar(ctx, name, r, false);
+    return split_bar(ctx, name, r, false, colors);
 }
 
 /// Holds focus while dragged so fast drags don't lose it.
-private int split_bar(mu_Context* ctx, const(char)* name, mu_Rect r, bool alongX)
+private int split_bar(mu_Context* ctx, const(char)* name, mu_Rect r, bool alongX,
+    SplitColors colors)
 {
     mu_Id id = mu_get_id(ctx, name, cast(int) strlen(name));
     mu_update_control(ctx, id, r, MU_OPT_HOLDFOCUS);
 
     bool held = ctx.focus == id && (ctx.mouse_down & MU_MOUSE_LEFT) != 0;
-    mu_draw_rect(ctx, r, held ? SPLIT_HELD :
-                         ctx.hover == id ? SPLIT_HOVER : SPLIT_IDLE);
+    mu_draw_rect(ctx, r, held ? colors.held :
+                         ctx.hover == id ? colors.hover : colors.idle);
 
     if (held == false)
         return 0;

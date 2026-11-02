@@ -91,6 +91,19 @@ struct OmniItem
 }
 
 /// Persistent state; keep across frames.
+/// Omnibar colors. Text and the query box use the ddui style.
+struct OmniColors
+{
+    mu_Color list     = mu_Color( 30,  30,  38, 255); /// List background.
+    mu_Color selected = mu_Color( 52,  72, 110, 255); /// Selected row.
+    mu_Color hover    = mu_Color( 62,  62,  74, 255); /// Hovered row.
+    mu_Color accent   = mu_Color(110, 170, 255, 255); /// Selected row edge, unsaved dot.
+    mu_Color detail   = mu_Color(150, 150, 165, 255); /// Detail column, mode tag.
+    mu_Color hint     = mu_Color(120, 120, 135, 255); /// Placeholder, empty notice.
+    mu_Color track    = mu_Color( 44,  44,  54, 255); /// Scrollbar track.
+    mu_Color thumb    = mu_Color( 90, 110, 150, 255); /// Scrollbar thumb.
+}
+
 struct Omnibar
 {
     /// Max visible rows; the list scrolls past this.
@@ -99,6 +112,8 @@ struct Omnibar
     int width = 560;
     /// Offset from the window top.
     int top = 12;
+    /// Read per frame.
+    OmniColors colors;
 
     private:
 
@@ -348,14 +363,14 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     string hint = o.prompting ? o.hint : HINT;
     if (o.text[0] == 0 && hint.length)
         mu_draw_text(ctx, font, hint,
-            mu_Vec2(box.x + pad + HINT_INSET, box.y + (box.h - th) / 2), OMNI_HINT);
+            mu_Vec2(box.x + pad + HINT_INSET, box.y + (box.h - th) / 2), o.colors.hint);
     if (o.tag.length)
     {
         int tw = ctx.text_width(font, o.tag.ptr, cast(int) o.tag.length);
         int qw = ctx.text_width(font, o.text.ptr, cast(int) omni_textlen(o));
         if (pad + qw + ROW_GAP + tw + pad <= box.w)
             mu_draw_text(ctx, font, o.tag,
-                mu_Vec2(box.x + box.w - pad - tw, box.y + (box.h - th) / 2), OMNI_DIM);
+                mu_Vec2(box.x + box.w - pad - tw, box.y + (box.h - th) / 2), o.colors.detail);
     }
 
     // Clamp the selection to a shrunken list, then step. Arrows wrap.
@@ -379,7 +394,7 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
 
     mu_layout_row(ctx, 1, full.ptr, visible * rowH);
     mu_Rect list = mu_layout_next(ctx);
-    mu_draw_rect(ctx, list, OMNI_LIST);
+    mu_draw_rect(ctx, list, o.colors.list);
 
     // NOSCROLL box isn't a wheel target; set it manually while hovered so the
     // grid below doesn't scroll. Applied at frame end, read above.
@@ -415,7 +430,7 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
     if (count == 0)
     {
         mu_draw_text(ctx, font, EMPTY,
-            mu_Vec2(list.x + ROW_INSET, list.y + (rowH - th) / 2), OMNI_HINT);
+            mu_Vec2(list.x + ROW_INSET, list.y + (rowH - th) / 2), o.colors.hint);
     }
     else foreach (int k; 0 .. visible)
     {
@@ -434,18 +449,18 @@ OmniAction omni_frame(mu_Context* ctx, ref Omnibar o, const(OmniItem)[] items,
         bool active = i == o.selected;
         if (active)
         {
-            mu_draw_rect(ctx, r, OMNI_ROW_SEL);
-            mu_draw_rect(ctx, mu_Rect(r.x, r.y, ACCENT_W, r.h), OMNI_ACCENT);
+            mu_draw_rect(ctx, r, o.colors.selected);
+            mu_draw_rect(ctx, mu_Rect(r.x, r.y, ACCENT_W, r.h), o.colors.accent);
         }
         else if (ctx.hover == rid)
-            mu_draw_rect(ctx, r, OMNI_ROW_HOVER);
+            mu_draw_rect(ctx, r, o.colors.hover);
 
         // Text stops before the scrollbar; the row stays full width for clicks.
-        omni_row(ctx, rows[i], mu_Rect(r.x, r.y, r.w - barW, r.h));
+        omni_row(ctx, o.colors, rows[i], mu_Rect(r.x, r.y, r.w - barW, r.h));
     }
 
     if (barW)
-        omni_scrollbar(ctx, mu_Rect(list.x + list.w - BAR_INSET - BAR_W, list.y,
+        omni_scrollbar(ctx, o.colors, mu_Rect(list.x + list.w - BAR_INSET - BAR_W, list.y,
             BAR_W, list.h), o.scroll, visible, count);
 
     // Losing focus (click elsewhere, menu) dismisses. Enter is handled above.
@@ -478,15 +493,6 @@ enum string EMPTY = "no matches";
 
 /// Query buffer size; fits long paths.
 enum size_t TEXT_MAX = 192;
-
-enum mu_Color OMNI_LIST      = mu_Color( 30,  30,  38, 255); // list background
-enum mu_Color OMNI_ROW_SEL   = mu_Color( 52,  72, 110, 255);
-enum mu_Color OMNI_ROW_HOVER = mu_Color( 62,  62,  74, 255);
-enum mu_Color OMNI_ACCENT    = mu_Color(110, 170, 255, 255); // selected row edge, unsaved dot
-enum mu_Color OMNI_DIM       = mu_Color(150, 150, 165, 255); // detail column
-enum mu_Color OMNI_HINT      = mu_Color(120, 120, 135, 255); // placeholder, empty notice
-enum mu_Color OMNI_BAR_TRACK = mu_Color( 44,  44,  54, 255);
-enum mu_Color OMNI_BAR_THUMB = mu_Color( 90, 110, 150, 255);
 
 enum int MARGIN     = 40; // either side of the box
 enum int MIN_WIDTH  = 240;
@@ -699,20 +705,21 @@ unittest
 }
 
 /// Read-only scrollbar (the list is keyboard-driven).
-void omni_scrollbar(mu_Context* ctx, mu_Rect track, int scroll, int visible, int count)
+void omni_scrollbar(mu_Context* ctx, ref const(OmniColors) c, mu_Rect track,
+    int scroll, int visible, int count)
 {
-    mu_draw_rect(ctx, track, OMNI_BAR_TRACK);
+    mu_draw_rect(ctx, track, c.track);
 
     // Min height so long lists still show a thumb.
     int thumbH = mu_clamp(visible * track.h / count, BAR_MIN, track.h);
     int travel = track.h - thumbH;
     int last   = count - visible;
     int y = track.y + (last > 0 ? scroll * travel / last : 0);
-    mu_draw_rect(ctx, mu_Rect(track.x, y, track.w, thumbH), OMNI_BAR_THUMB);
+    mu_draw_rect(ctx, mu_Rect(track.x, y, track.w, thumbH), c.thumb);
 }
 
 /// Draw a row: label left, elided after the detail column and dot.
-void omni_row(mu_Context* ctx, ref const(OmniItem) it, mu_Rect r)
+void omni_row(mu_Context* ctx, ref const(OmniColors) c, ref const(OmniItem) it, mu_Rect r)
 {
     mu_Font font = ctx.style.font;
     int th = ctx.text_height(font);
@@ -726,14 +733,14 @@ void omni_row(mu_Context* ctx, ref const(OmniItem) it, mu_Rect r)
         ctx.text_width(font, detail.ptr, cast(int) detail.length) : 0;
     if (detailW)
     {
-        mu_draw_text(ctx, font, detail, mu_Vec2(right - detailW, y), OMNI_DIM);
+        mu_draw_text(ctx, font, detail, mu_Vec2(right - detailW, y), c.detail);
         right -= detailW + ROW_GAP;
     }
 
     if (it.marked)
     {
         mu_draw_rect(ctx, mu_Rect(right - ROW_DOT, y + (th - ROW_DOT) / 2,
-            ROW_DOT, ROW_DOT), OMNI_ACCENT);
+            ROW_DOT, ROW_DOT), c.accent);
         right -= ROW_DOT + ROW_GAP;
     }
 

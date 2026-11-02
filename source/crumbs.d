@@ -10,14 +10,19 @@ enum string CRUMB_SEP = " / ";
 
 private:
 
-enum mu_Color CRUMB_DIM  = mu_Color(130, 130, 145, 255); // ancestors
-enum mu_Color CRUMB_LAST = mu_Color(190, 190, 205, 255); // innermost
 enum string   CRUMB_CUT  = "... ";                       // shown when components are dropped
 
 enum int CRUMB_PAD   = 2; // above and below text
 enum int CRUMB_INSET = 4; // both ends
 
 public:
+
+/// Breadcrumb text colors.
+struct CrumbColors
+{
+    mu_Color dim  = mu_Color(130, 130, 145, 255);    /// Ancestors.
+    mu_Color last = mu_Color(190, 190, 205, 255);    /// Innermost.
+}
 
 /// Height the strip takes, for a caller measuring a column before laying it out.
 int crumb_bar_height(mu_Context* ctx)
@@ -31,7 +36,8 @@ int crumb_bar_height(mu_Context* ctx)
 /// highlighted. If too long, components are dropped from the root end behind
 /// an ellipsis. A lone component is truncated and never dropped.
 /// An empty strip would mean nothing was parsed.
-void crumb_bar(mu_Context* ctx, string trail, mu_Color back)
+void crumb_bar(mu_Context* ctx, string trail, mu_Color back,
+    CrumbColors colors = CrumbColors.init)
 {
     import std.string : indexOf, lastIndexOf;
 
@@ -64,7 +70,7 @@ void crumb_bar(mu_Context* ctx, string trail, mu_Color back)
 
     if (cut)
     {
-        mu_draw_text(ctx, font, CRUMB_CUT, mu_Vec2(x, y), CRUMB_DIM);
+        mu_draw_text(ctx, font, CRUMB_CUT, mu_Vec2(x, y), colors.dim);
         x += cutW;
     }
 
@@ -73,7 +79,7 @@ void crumb_bar(mu_Context* ctx, string trail, mu_Color back)
     if (last >= 0)
     {
         size_t head = last + CRUMB_SEP.length;
-        mu_draw_text(ctx, font, rest.ptr, cast(int) head, mu_Vec2(x, y), CRUMB_DIM);
+        mu_draw_text(ctx, font, rest.ptr, cast(int) head, mu_Vec2(x, y), colors.dim);
         x += ctx.text_width(font, rest.ptr, cast(int) head);
         rest = rest[head .. $];
     }
@@ -81,7 +87,7 @@ void crumb_bar(mu_Context* ctx, string trail, mu_Color back)
     char[128] buf = void;
     string tail = ui_elide(ctx, rest, endX - x, buf);
     if (tail.length)
-        mu_draw_text(ctx, font, tail, mu_Vec2(x, y), CRUMB_LAST);
+        mu_draw_text(ctx, font, tail, mu_Vec2(x, y), colors.last);
 }
 
 unittest

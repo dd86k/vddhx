@@ -11,8 +11,8 @@ import ddui;
 import ddhx.charset : Charset, charsets;
 import preferences;
 import bindings;
-import theme : SCHEMES, Scheme, SchemeInfo, theme_bg, theme_changed, theme_fg,
-    theme_reset, theme_reset_all, theme_set, theme_spec;
+import theme : SCHEMES, SCHEME_UI, Scheme, SchemeInfo, theme_bg, theme_changed,
+    theme_fg, theme_reset, theme_reset_all, theme_set, theme_spec;
 import hexview : HexBase;
 import ui : ui_font_dialog, ui_fonts, ui_zoom;
 
@@ -317,7 +317,8 @@ void settings_colors(mu_Context* ctx)
     __gshared ColorBox[SCHEMES.length] boxes;
 
     settings_note(ctx, "Same as `color SCHEME FG:BG`. A name (red, brightblue...) or #rrggbb.");
-    settings_note(ctx, "A side left empty takes its default. Swatches show the text and wash.");
+    settings_note(ctx, "A side left empty takes its default. "
+        ~ "Swatches show the foreground and background.");
 
     static immutable int[1] one = [ BROWSE_W ];
     mu_layout_row(ctx, 1, one.ptr, 0);
@@ -332,6 +333,8 @@ void settings_colors(mu_Context* ctx)
     foreach (size_t i, ref immutable SchemeInfo info; SCHEMES)
     {
         Scheme s = cast(Scheme) i;
+        if (i == 0 || s == SCHEME_UI)
+            settings_note(ctx, s == SCHEME_UI ? "UI" : "Hex View");
         mu_layout_row(ctx, 5, row.ptr, 0);
         mu_label(ctx, info.label);
         settings_swatch(ctx, theme_fg(s));

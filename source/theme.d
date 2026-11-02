@@ -1,4 +1,4 @@
-/// Colors by role, including byte classes, and ddhx's `color` schemes.
+/// Colors by role (bytes, structure fields, UI), set by ddhx's `color` schemes.
 ///
 /// High-coverage roles (data, text, padding) are muted on purpose; vivid
 /// colors go to rare fields. Keep it that way.
@@ -8,7 +8,11 @@ module theme;
 import ddui;
 
 import structure;
-import hexview : HEX_CARET, HEX_SEL_WASH;
+import crumbs : CrumbColors;
+import hexview : HexColors;
+import omnibar : OmniColors;
+import split : SplitColors;
+import tabbar : TabColors;
 
 /// Glyph color for `role`. StructureRole.none has no color: the caller
 /// classifies the byte instead.
@@ -50,35 +54,40 @@ private mu_Color theme_base(StructureRole role)
     case control:    return theme_fg(Scheme.control);
     case unmapped:   return theme_fg(Scheme.unmapped);
 
-    case magic:      return mu_Color(240, 205, 115, 255);  // gold
-    case length:     return mu_Color(120, 195, 235, 255);  // sky blue
-    case offset:     return mu_Color(150, 170, 255, 255);  // periwinkle
-    case count:      return mu_Color(105, 210, 185, 255);  // teal
-    case flags:      return mu_Color(215, 150, 230, 255);  // orchid
-    case scalar:     return mu_Color(205, 215, 230, 255);  // pale blue-gray
-    case text:       return mu_Color(185, 225, 160, 255);  // light green
-    case timestamp:  return mu_Color(245, 175, 125, 255);  // peach
-    case checksum:   return mu_Color(155, 155, 180, 255);  // lavender gray
-    case reserved:   return mu_Color(105, 105, 120, 255);  // slate gray
-    case data:       return mu_Color(165, 170, 185, 255);  // light slate
+    case magic:      return theme_fg(Scheme.structure_magic);
+    case length:     return theme_fg(Scheme.structure_length);
+    case offset:     return theme_fg(Scheme.structure_offset);
+    case count:      return theme_fg(Scheme.structure_count);
+    case flags:      return theme_fg(Scheme.structure_flags);
+    case scalar:     return theme_fg(Scheme.structure_scalar);
+    case text:       return theme_fg(Scheme.structure_text);
+    case timestamp:  return theme_fg(Scheme.structure_timestamp);
+    case checksum:   return theme_fg(Scheme.structure_checksum);
+    case reserved:   return theme_fg(Scheme.structure_reserved);
+    case data:       return theme_fg(Scheme.structure_data);
 
     default:         return mu_Color(0, 0, 0, 0);          // transparent
     }
 }
 
-/// Border color for a structure `level` levels deep.
-///
-/// Gray on purpose: role hues and the selection/caret/focus blues are all
-/// taken, and gray reads as chrome (like the offset column).
+/// Border color for a structure `level` levels deep, translucent.
 mu_Color theme_edge(int level)
 {
     return level <= 0 ?
-        mu_Color(165, 168, 180, 220) :  // light gray: record
-        mu_Color(120, 122, 132, 170);   // mid gray: nested
+        theme_alpha(theme_fg(Scheme.structure_edge), 220) :
+        theme_alpha(theme_fg(Scheme.structure_edge_nested), 170);
+}
+
+/// `c` with alpha `a`.
+mu_Color theme_alpha(mu_Color c, ubyte a)
+{
+    c.a = a;
+    return c;
 }
 
 /// Color scheme, set by .vddhxrc's `color SCHEME COLOR` like ddhx. ddhx's
-/// schemes, with its `normal` split into the byte classes.
+/// schemes (its `normal` split into the byte classes), then the rest of the
+/// Hex View group, then the UI group (from SCHEME_UI).
 enum Scheme
 {
     normal,         /// Printable bytes.
@@ -92,7 +101,60 @@ enum Scheme
     bookmark,       /// Bookmarked bytes: glyph and wash.
     diff_changed,   /// Byte differs from the peer.
     diff_missing,   /// Byte past the peer's end.
+    offset,         /// Offset column.
+    header,         /// Lane headers.
+    scrollbar,      /// Scrollbar thumb and track, minimap backdrop.
+    minimap_view,   /// Minimap view marker: outline and wash.
+
+    structure_magic,        /// Structure field roles, see StructureRole.
+    structure_length,       /// Ditto.
+    structure_offset,       /// Ditto.
+    structure_count,        /// Ditto.
+    structure_flags,        /// Ditto.
+    structure_scalar,       /// Ditto.
+    structure_text,         /// Ditto.
+    structure_timestamp,    /// Ditto.
+    structure_checksum,     /// Ditto.
+    structure_reserved,     /// Ditto.
+    structure_data,         /// Ditto.
+    structure_edge,         /// Record border.
+    structure_edge_nested,  /// Nested field border.
+
+    ui_canvas,          /// Panel background, under the grid.
+    ui_window,          /// Text and window body.
+    ui_title,           /// Title text and bar, tab strip.
+    ui_border,          /// Control border.
+    ui_button,          /// Button.
+    ui_button_hover,    /// Ditto, hovered.
+    ui_button_focus,    /// Ditto, pressed.
+    ui_input,           /// Text box, check box.
+    ui_input_hover,     /// Ditto, hovered.
+    ui_input_focus,     /// Ditto, focused.
+    ui_scrollbar,       /// Scrollbar thumb and track.
+    ui_text_selection,  /// Selected text in a text box.
+    ui_accent,          /// Focus, active tab, drop target, links.
+    ui_link_hover,      /// Hovered link.
+    ui_tab,             /// Inactive tab label and face.
+    ui_tab_hover,       /// Hovered tab.
+    ui_tab_close,       /// Hovered close box, progress track.
+    ui_splitter,        /// Pane splitter.
+    ui_splitter_hover,  /// Ditto, hovered.
+    ui_tooltip,         /// Tooltip text and face.
+    ui_tooltip_border,  /// Tooltip border.
+    ui_status,          /// Status bar text and face.
+    ui_status_message,  /// Status bar message.
+    ui_breadcrumb,      /// Breadcrumb ancestors.
+    ui_breadcrumb_last, /// Innermost breadcrumb.
+    ui_list,            /// Omnibar list.
+    ui_list_selected,   /// Ditto, selected row.
+    ui_list_hover,      /// Ditto, hovered row.
+    ui_list_detail,     /// Ditto, detail column.
+    ui_hint,            /// Placeholder text, empty notice.
+    ui_list_scrollbar,  /// Omnibar scrollbar thumb and track.
 }
+
+/// First scheme of the UI group.
+enum Scheme SCHEME_UI = Scheme.ui_canvas;
 
 /// Scheme name, label and default colors. A part with alpha 0 isn't drawn,
 /// so a color for it is refused.
@@ -100,8 +162,8 @@ struct SchemeInfo
 {
     string name;    /// rc name, ddhx's where it has the scheme.
     string label;   /// Settings label.
-    mu_Color fg;    /// Glyph or outline.
-    mu_Color bg;    /// Wash.
+    mu_Color fg;    /// Glyph, outline, or thumb.
+    mu_Color bg;    /// Wash, face, or track.
 }
 
 /// All schemes, in Scheme order.
@@ -111,16 +173,75 @@ immutable SchemeInfo[] SCHEMES = [
     SchemeInfo("whitespace",   "Whitespace",   mu_Color(120, 170, 200, 255)),   // steel blue
     SchemeInfo("control",      "Control",      mu_Color(200, 130, 90, 255)),    // burnt orange
     SchemeInfo("unmapped",     "Unmapped",     mu_Color(150, 190, 130, 255)),   // sage green
-    SchemeInfo("cursor",       "Caret",        HEX_CARET),
-    SchemeInfo("mirror",       "Caret (text)", HEX_CARET),
-    SchemeInfo("selection",    "Selection",    mu_Color.init, HEX_SEL_WASH),
+    SchemeInfo("cursor",       "Caret",        HexColors.init.caret),
+    SchemeInfo("mirror",       "Caret (text)", HexColors.init.mirror),
+    SchemeInfo("selection",    "Selection",    mu_Color.init, HexColors.init.selection),
     // Amber wash, which no byte class uses. Dark so white text stays readable
     // (~6.6:1 vs <2:1 for bright amber). The panel brightens it for outlines
     // and the minimap (hex_wash_lift).
-    SchemeInfo("bookmark",     "Bookmark",     mu_Color(255, 255, 255, 255), mu_Color(125, 85, 22, 255)),
+    SchemeInfo("bookmark",     "Bookmark",
+        mu_Color(255, 255, 255, 255), mu_Color(125, 85, 22, 255)),
     SchemeInfo("diff-changed", "Diff changed", mu_Color(255, 95, 95, 255)),
     // Green so a longer file reads as additions.
     SchemeInfo("diff-missing", "Diff missing", mu_Color(120, 230, 140, 255)),
+    SchemeInfo("offset",       "Offset column", HexColors.init.offset),
+    SchemeInfo("header",       "Column header", HexColors.init.header),
+    SchemeInfo("scrollbar",    "Scrollbar",    HexColors.init.thumb, HexColors.init.track),
+    SchemeInfo("minimap-view", "Minimap view", HexColors.init.view, HexColors.init.viewWash),
+
+    SchemeInfo("structure-magic",     "Magic field",     mu_Color(240, 205, 115, 255)), // gold
+    SchemeInfo("structure-length",    "Length field",    mu_Color(120, 195, 235, 255)), // sky blue
+    SchemeInfo("structure-offset",    "Offset field",    mu_Color(150, 170, 255, 255)), // periwinkle
+    SchemeInfo("structure-count",     "Count field",     mu_Color(105, 210, 185, 255)), // teal
+    SchemeInfo("structure-flags",     "Flags field",     mu_Color(215, 150, 230, 255)), // orchid
+    SchemeInfo("structure-scalar",    "Scalar field",    mu_Color(205, 215, 230, 255)), // pale blue-gray
+    SchemeInfo("structure-text",      "Text field",      mu_Color(185, 225, 160, 255)), // light green
+    SchemeInfo("structure-timestamp", "Timestamp field", mu_Color(245, 175, 125, 255)), // peach
+    SchemeInfo("structure-checksum",  "Checksum field",  mu_Color(155, 155, 180, 255)), // lavender gray
+    SchemeInfo("structure-reserved",  "Reserved field",  mu_Color(105, 105, 120, 255)), // slate gray
+    SchemeInfo("structure-data",      "Data field",      mu_Color(165, 170, 185, 255)), // light slate
+    // Gray: role hues and the selection, caret and focus blues are all taken,
+    // and gray reads as chrome (like the offset column).
+    SchemeInfo("structure-edge",        "Field border",          mu_Color(165, 168, 180, 255)),
+    SchemeInfo("structure-edge-nested", "Field border (nested)", mu_Color(120, 122, 132, 255)),
+
+    // Black: byte colors (dim zeros especially) are tuned for it.
+    SchemeInfo("ui-canvas",          "Canvas",          mu_Color.init, mu_Color(0, 0, 0, 255)),
+    SchemeInfo("ui-window",          "Window",
+        mu_Color(230, 230, 230, 255), mu_Color(50, 50, 50, 255)),
+    SchemeInfo("ui-title",           "Title bar",
+        mu_Color(240, 240, 240, 255), mu_Color(25, 25, 25, 255)),
+    SchemeInfo("ui-border",          "Border",          mu_Color(25, 25, 25, 255)),
+    SchemeInfo("ui-button",          "Button",          mu_Color.init, mu_Color(75, 75, 75, 255)),
+    SchemeInfo("ui-button-hover",    "Button hover",    mu_Color.init, mu_Color(95, 95, 95, 255)),
+    SchemeInfo("ui-button-focus",    "Button pressed",  mu_Color.init, mu_Color(115, 115, 115, 255)),
+    SchemeInfo("ui-input",           "Input",           mu_Color.init, mu_Color(30, 30, 30, 255)),
+    SchemeInfo("ui-input-hover",     "Input hover",     mu_Color.init, mu_Color(35, 35, 35, 255)),
+    SchemeInfo("ui-input-focus",     "Input focus",     mu_Color.init, mu_Color(40, 40, 40, 255)),
+    SchemeInfo("ui-scrollbar",       "Scrollbar",
+        mu_Color(30, 30, 30, 255), mu_Color(43, 43, 43, 255)),
+    SchemeInfo("ui-text-selection",  "Text selection",  mu_Color.init, mu_Color(60, 90, 160, 255)),
+    SchemeInfo("ui-accent",          "Accent",          TabColors.init.accent),
+    SchemeInfo("ui-link-hover",      "Link hover",      mu_Color(160, 205, 255, 255)),
+    SchemeInfo("ui-tab",             "Tab",             TabColors.init.dim, TabColors.init.idle),
+    SchemeInfo("ui-tab-hover",       "Tab hover",       mu_Color.init, TabColors.init.hover),
+    SchemeInfo("ui-tab-close",       "Tab close",       mu_Color.init, TabColors.init.close),
+    SchemeInfo("ui-splitter",        "Splitter",        mu_Color.init, SplitColors.init.idle),
+    SchemeInfo("ui-splitter-hover",  "Splitter hover",  mu_Color.init, SplitColors.init.hover),
+    SchemeInfo("ui-tooltip",         "Tooltip",
+        mu_Color(215, 215, 225, 255), mu_Color(48, 48, 58, 255)),
+    SchemeInfo("ui-tooltip-border",  "Tooltip border",  mu_Color(80, 80, 95, 255)),
+    SchemeInfo("ui-status",          "Status bar",
+        mu_Color(170, 170, 185, 255), mu_Color(30, 30, 40, 255)),
+    SchemeInfo("ui-status-message",  "Status message",  mu_Color(200, 200, 150, 255)),
+    SchemeInfo("ui-breadcrumb",      "Breadcrumb",      CrumbColors.init.dim),
+    SchemeInfo("ui-breadcrumb-last", "Breadcrumb (last)", CrumbColors.init.last),
+    SchemeInfo("ui-list",            "List",            mu_Color.init, OmniColors.init.list),
+    SchemeInfo("ui-list-selected",   "List selected",   mu_Color.init, OmniColors.init.selected),
+    SchemeInfo("ui-list-hover",      "List hover",      mu_Color.init, OmniColors.init.hover),
+    SchemeInfo("ui-list-detail",     "List detail",     OmniColors.init.detail),
+    SchemeInfo("ui-hint",            "Hint",            OmniColors.init.hint),
+    SchemeInfo("ui-list-scrollbar",  "List scrollbar",  OmniColors.init.thumb, OmniColors.init.track),
 ];
 static assert(SCHEMES.length == Scheme.max + 1);
 
@@ -134,6 +255,88 @@ mu_Color theme_fg(Scheme s)
 mu_Color theme_bg(Scheme s)
 {
     return colors[s][1];
+}
+
+/// Hex view colors other than the bytes'.
+HexColors theme_hex()
+{
+    HexColors c;
+    c.selection = theme_bg(Scheme.selection);
+    c.caret     = theme_fg(Scheme.cursor);
+    c.mirror    = theme_fg(Scheme.mirror);
+    c.offset    = theme_fg(Scheme.offset);
+    c.header    = theme_fg(Scheme.header);
+    c.thumb     = theme_fg(Scheme.scrollbar);
+    c.track     = theme_bg(Scheme.scrollbar);
+    c.view      = theme_fg(Scheme.minimap_view);
+    c.viewWash  = theme_bg(Scheme.minimap_view);
+    return c;
+}
+
+/// Tab strip colors.
+TabColors theme_tabs()
+{
+    TabColors c;
+    c.idle   = theme_bg(Scheme.ui_tab);
+    c.hover  = theme_bg(Scheme.ui_tab_hover);
+    c.accent = theme_fg(Scheme.ui_accent);
+    c.dim    = theme_fg(Scheme.ui_tab);
+    c.close  = theme_bg(Scheme.ui_tab_close);
+    return c;
+}
+
+/// Splitter colors.
+SplitColors theme_split()
+{
+    SplitColors c;
+    c.idle  = theme_bg(Scheme.ui_splitter);
+    c.hover = theme_bg(Scheme.ui_splitter_hover);
+    c.held  = theme_fg(Scheme.ui_accent);
+    return c;
+}
+
+/// Breadcrumb colors.
+CrumbColors theme_crumbs()
+{
+    CrumbColors c;
+    c.dim  = theme_fg(Scheme.ui_breadcrumb);
+    c.last = theme_fg(Scheme.ui_breadcrumb_last);
+    return c;
+}
+
+/// Omnibar colors.
+OmniColors theme_omni()
+{
+    OmniColors c;
+    c.list     = theme_bg(Scheme.ui_list);
+    c.selected = theme_bg(Scheme.ui_list_selected);
+    c.hover    = theme_bg(Scheme.ui_list_hover);
+    c.accent   = theme_fg(Scheme.ui_accent);
+    c.detail   = theme_fg(Scheme.ui_list_detail);
+    c.hint     = theme_fg(Scheme.ui_hint);
+    c.thumb    = theme_fg(Scheme.ui_list_scrollbar);
+    c.track    = theme_bg(Scheme.ui_list_scrollbar);
+    return c;
+}
+
+/// Fill ddui's style colors.
+void theme_style(ref mu_Color[MU_COLOR_MAX] c)
+{
+    c[MU_COLOR_TEXT]        = theme_fg(Scheme.ui_window);
+    c[MU_COLOR_BORDER]      = theme_fg(Scheme.ui_border);
+    c[MU_COLOR_WINDOWBG]    = theme_bg(Scheme.ui_window);
+    c[MU_COLOR_TITLEBG]     = theme_bg(Scheme.ui_title);
+    c[MU_COLOR_TITLETEXT]   = theme_fg(Scheme.ui_title);
+    c[MU_COLOR_PANELBG]     = theme_bg(Scheme.ui_canvas);
+    c[MU_COLOR_BUTTON]      = theme_bg(Scheme.ui_button);
+    c[MU_COLOR_BUTTONHOVER] = theme_bg(Scheme.ui_button_hover);
+    c[MU_COLOR_BUTTONFOCUS] = theme_bg(Scheme.ui_button_focus);
+    c[MU_COLOR_BASE]        = theme_bg(Scheme.ui_input);
+    c[MU_COLOR_BASEHOVER]   = theme_bg(Scheme.ui_input_hover);
+    c[MU_COLOR_BASEFOCUS]   = theme_bg(Scheme.ui_input_focus);
+    c[MU_COLOR_SCROLLBASE]  = theme_bg(Scheme.ui_scrollbar);
+    c[MU_COLOR_SCROLLTHUMB] = theme_fg(Scheme.ui_scrollbar);
+    c[MU_COLOR_SELECTION]   = theme_bg(Scheme.ui_text_selection);
 }
 
 /// Apply rc line `color SCHEME COLOR` if `apply`, else only check it.
@@ -390,6 +593,12 @@ unittest
 
     assert(theme_color("zero", "default", true));
     assert(theme_fg(Scheme.zero) == SCHEMES[Scheme.zero].fg);
+
+    // UI schemes reach the widgets.
+    assert(theme_color("ui-accent", "red", true));
+    assert(theme_tabs().accent == mu_Color(205, 49, 49, 255));
+    assert(theme_split().held == mu_Color(205, 49, 49, 255));
+    assert(theme_color("ui-button", "red", false) == false);
 }
 
 

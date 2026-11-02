@@ -192,7 +192,6 @@ int screenshot_run(string[] args)
     ctx.text_width  = &render_text_width;
     ctx.text_height = &render_text_height;
     ctx.style.font  = render_font_ui();
-    ui_style(&ctx);
 
     ui_init(window);
 
@@ -420,7 +419,8 @@ int screenshot_run(string[] args)
     shot("clip-sel.bmp");
     // Same, recolored through .vddhxrc color lines.
     foreach (string[2] c; [ ["zero", "red"], ["normal", "yellow"], ["selection", ":#204020"],
-        ["cursor", "brightpurple"], ["mirror", "white"] ])
+        ["cursor", "brightpurple"], ["mirror", "white"], ["ui-accent", "brightred"],
+        ["ui-status", "black:#c0c0c0"], ["ui-tab", "white:#303060"], ["offset", "aqua"] ])
         theme_color(c[0], c[1], true);
     frame();
     shot("colors.bmp");

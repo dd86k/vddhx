@@ -143,7 +143,6 @@ int main(string[] args)
     ctx.style.font  = render_font_ui();
     ctx.get_clipboard = &clipboardGet;  // omnibar Ctrl+C/X/V
     ctx.set_clipboard = &clipboardSet;
-    ui_style(ctx);
 
     // Before ui_init: the first tab uses the defaults.
     prefs_load();

@@ -24,7 +24,8 @@ import elevate : Elevated, elevate_denied, elevate_poll, elevate_request;
 import hexview;
 import structure;
 import structures.png : PngStructure, png_detect;
-import theme : Scheme, theme_bg, theme_edge, theme_fg, theme_role;
+import theme : Scheme, theme_alpha, theme_bg, theme_crumbs, theme_edge, theme_fg,
+    theme_hex, theme_omni, theme_role, theme_split, theme_style, theme_tabs;
 import uitext : ui_elide;
 import omnibar;
 import bindings;
@@ -400,10 +401,6 @@ ptrdiff_t ui_pane_index(const(Pane)* p)
 /// Main window, parent for native dialogs. Set by main.
 __gshared SDL_Window* uiWindow;
 
-/// Grid background. Near black: byte colors (dim zeros especially) are tuned
-/// for it.
-enum mu_Color CANVAS = mu_Color(0, 0, 0, 255);
-
 /// Brightness kept by matching bytes in a diff, percent. Dimmed, not grayed,
 /// so the class colors stay readable.
 enum int DIFF_MATCH_KEEP = 42;
@@ -418,11 +415,10 @@ mu_Color diff_dim(mu_Color c)
         c.a);
 }
 
-/// Apply app style over ddui defaults. Call once after mu_init.
-/// ddui's MU_COLOR_PANELBG is transparent, so set the canvas explicitly.
-public void ui_style(mu_Context* ctx)
+/// Apply theme colors over ddui's style. Per frame, so edits show at once.
+void ui_style(mu_Context* ctx)
 {
-    ctx.style.colors[MU_COLOR_PANELBG] = CANVAS;
+    theme_style(ctx.style.colors);
 }
 
 /// Status message, replacing the readout until the next key or click (empty
@@ -557,9 +553,6 @@ View* newView(Document* d)
 Pane* newPane()
 {
     Pane* p = new Pane;
-
-    // Active tab blends into the grid canvas. Per pane since ui_style runs once.
-    p.tabs.content = CANVAS;
     return p;
 }
 
@@ -1472,27 +1465,20 @@ void wireView(View* v)
 /// Pane under an in-flight file drag, or null. See ui_drop_hover.
 __gshared Pane* dropPane;
 
-/// Focused pane outline, same accent as tabs and omnibar. Faint so it doesn't
-/// compete with the bytes.
-enum mu_Color FOCUS_EDGE = mu_Color(110, 170, 255, 130);
+/// Focused pane outline opacity. Faint so it doesn't compete with the bytes.
+enum ubyte FOCUS_EDGE_ALPHA = 130;
 /// Ditto, width.
 enum int FOCUS_EDGE_W = 2;
 
-/// Tooltip background, lighter than the strip so it reads as floating.
-enum mu_Color TIP_BACK = mu_Color(48, 48, 58, 255);
-enum mu_Color TIP_EDGE = mu_Color(80, 80, 95, 255);
-enum mu_Color TIP_TEXT = mu_Color(215, 215, 225, 255);
-/// Text inset.
+/// Tooltip text inset.
 enum int TIP_PAD = 5;
 /// Gap below the tab.
 enum int TIP_DROP = 2;
 /// Window edge margin.
 enum int TIP_MARGIN = 4;
 
-/// Edge of the pane a file or tab is dragged over.
-enum mu_Color DROP_EDGE = mu_Color(110, 170, 255, 255);
-/// Ditto, translucent pane wash.
-enum mu_Color DROP_WASH = mu_Color(110, 170, 255, 40);
+/// Wash opacity over the pane a file or tab is dragged over.
+enum ubyte DROP_WASH_ALPHA = 40;
 /// Ditto, edge width.
 enum int DROP_EDGE_W = 2;
 
@@ -4955,6 +4941,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
 {
     winW = width;
     winH = height;
+    ui_style(ctx);
     if (redrawWanted)
     {
         redrawWanted = false;
@@ -5047,7 +5034,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         static immutable int[1] srow = [ -1 ];
         mu_layout_row(ctx, 1, srow.ptr, statusH);
         mu_Rect sr = mu_layout_next(ctx);
-        mu_draw_rect(ctx, sr, mu_Color(30, 30, 40, 255));
+        mu_draw_rect(ctx, sr, theme_bg(Scheme.ui_status));
 
         int th = ctx.text_height(ctx.style.font);
         int ty = sr.y + (sr.h - th) / 2;
@@ -5055,7 +5042,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
         if (statusLen)
         {
             mu_draw_text(ctx, ctx.style.font, cast(string) statusText[0 .. statusLen],
-                mu_Vec2(sr.x + 4, ty), mu_Color(200, 200, 150, 255));
+                mu_Vec2(sr.x + 4, ty), theme_fg(Scheme.ui_status_message));
         }
         else if (ui_on_settings() == false) // no caret
         {
@@ -5083,7 +5070,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
                 offset, focusedView.hex.insertMode ? "INS" : "OVR",
                 focusedDoc.endian == Endian.bigEndian ? "BE" : "LE", selected, marked);
             mu_draw_text(ctx, ctx.style.font, cast(string) status,
-                mu_Vec2(sr.x + 4, ty), mu_Color(170, 170, 185, 255));
+                mu_Vec2(sr.x + 4, ty), theme_fg(Scheme.ui_status));
         }
 
         // Last, so the title matches this frame's edits.
@@ -5104,6 +5091,7 @@ public void ui_frame(mu_Context* ctx, int width, int height)
     int chosen;
     const(OmniItem)[] rows = ui_omni_active() ? ui_omni_items() : null;
     omni_tag(omni, mode == OmniMode.find ? FIND_TAG[findGoal] : null);
+    omni.colors = theme_omni();
     final switch (omni_frame(ctx, omni, rows, width, height, chosen))
     {
     case OmniAction.none:     ui_struct_preview(mode);
@@ -5184,7 +5172,7 @@ void ui_panes(mu_Context* ctx, int statusH)
         {
             mu_Rect sr = mu_Rect(x, grid.y, SPLIT_WIDTH, grid.h);
             x += SPLIT_WIDTH;
-            int dx = split_bar_x(ctx, "vbar", sr);
+            int dx = split_bar_x(ctx, "vbar", sr, theme_split());
             if (dx && split_resize(colWeights[0 .. n], i, dx, avail, PANE_MIN))
                 foreach (size_t j, Column* q; columns)
                     q.weight = colWeights[j];
@@ -5193,7 +5181,8 @@ void ui_panes(mu_Context* ctx, int statusH)
 
     // Focus outline after all panes (painted on top). Only with several panes.
     if (ui_pane_count() > 1 && ui_pane_index(focused) >= 0)
-        ui_outline(ctx, focused.rect, FOCUS_EDGE, FOCUS_EDGE_W);
+        ui_outline(ctx, focused.rect,
+            theme_alpha(theme_fg(Scheme.ui_accent), FOCUS_EDGE_ALPHA), FOCUS_EDGE_W);
 
     // Drop target highlight, after the loop so it paints over the panel. Validate
     // the pane: it may have closed during the drag.
@@ -5330,7 +5319,7 @@ void ui_column(mu_Context* ctx, Column* c, mu_Rect r, ref TabRequest req,
         {
             mu_Rect sr = mu_Rect(r.x, y, r.w, SPLIT_WIDTH);
             y += SPLIT_WIDTH;
-            int dy = split_bar_y(ctx, "hbar", sr);
+            int dy = split_bar_y(ctx, "hbar", sr, theme_split());
             if (dy && split_resize(paneWeights[0 .. n], i, dy, avail, PANE_MIN_H))
                 foreach (size_t j, Pane* q; c.panes)
                     q.weight = paneWeights[j];
@@ -5341,8 +5330,9 @@ void ui_column(mu_Context* ctx, Column* c, mu_Rect r, ref TabRequest req,
 /// Drop target highlight (wash and edge), for file and tab drops.
 void ui_mark_pane(mu_Context* ctx, mu_Rect r)
 {
-    mu_draw_rect(ctx, r, DROP_WASH);
-    ui_outline(ctx, r, DROP_EDGE, DROP_EDGE_W);
+    mu_Color accent = theme_fg(Scheme.ui_accent);
+    mu_draw_rect(ctx, r, theme_alpha(accent, DROP_WASH_ALPHA));
+    ui_outline(ctx, r, accent, DROP_EDGE_W);
 }
 
 /// Whether a tooltip delay is pending. Public since the loop sleeps when idle
@@ -5385,9 +5375,10 @@ void ui_tip(mu_Context* ctx)
     if (r.y + r.h > winH - TIP_MARGIN)
         r.y = tip.rect.y - TIP_DROP - r.h;
 
-    mu_draw_rect(ctx, r, TIP_BACK);
-    ui_outline(ctx, r, TIP_EDGE, 1);
-    mu_draw_text(ctx, font, text, mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD), TIP_TEXT);
+    mu_draw_rect(ctx, r, theme_bg(Scheme.ui_tooltip));
+    ui_outline(ctx, r, theme_fg(Scheme.ui_tooltip_border), 1);
+    mu_draw_text(ctx, font, text, mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD),
+        theme_fg(Scheme.ui_tooltip));
 }
 
 /// Field tooltip: structure name of the byte under the pointer after the hover
@@ -5440,10 +5431,10 @@ void ui_span_tip(mu_Context* ctx)
     if (r.y + r.h > winH - TIP_MARGIN)
         r.y = ctx.mouse_pos.y - TIP_DROP - r.h;
 
-    mu_draw_rect(ctx, r, TIP_BACK);
-    ui_outline(ctx, r, TIP_EDGE, 1);
+    mu_draw_rect(ctx, r, theme_bg(Scheme.ui_tooltip));
+    ui_outline(ctx, r, theme_fg(Scheme.ui_tooltip_border), 1);
     mu_draw_text(ctx, font, cast(string) path,
-        mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD), TIP_TEXT);
+        mu_Vec2(r.x + TIP_PAD, r.y + TIP_PAD), theme_fg(Scheme.ui_tooltip));
 }
 
 /// Rect outline, `w` px, drawn inside.
@@ -5469,6 +5460,9 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
 
     // Only the focused pane lights its accent.
     p.tabs.unfocused = p !is focused;
+    // Active tab blends into the grid canvas.
+    p.tabs.content = theme_bg(Scheme.ui_canvas);
+    p.tabs.colors  = theme_tabs();
 
     // Pane number for Ctrl+1..9, only with several panes.
     p.tabs.badge = ui_pane_count() > 1 ? ui_ordinal(ui_pane_index(p) + 1) : null;
@@ -5502,9 +5496,7 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     }
 
     v.hex.minimap = prefs.minimap;
-    v.hex.selColor    = theme_bg(Scheme.selection);
-    v.hex.caretColor  = theme_fg(Scheme.cursor);
-    v.hex.mirrorColor = theme_fg(Scheme.mirror);
+    v.hex.colors = theme_hex();
 
     // Charset is per document; rebind each frame so moved tabs follow.
     v.hex.textFn    = &ui_charset_text;
@@ -5521,7 +5513,7 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
     // Breadcrumbs under the tabs, above the grid (like VS Code). Always shown,
     // even unparsed, so the grid doesn't shift.
     if (prefs.crumbs)
-        crumb_bar(ctx, cast(string) viewCrumbs(v), CANVAS);
+        crumb_bar(ctx, cast(string) viewCrumbs(v), theme_bg(Scheme.ui_canvas), theme_crumbs());
 
     // The editor's size is authoritative across frames and panes.
     if (v.doc.editor)
