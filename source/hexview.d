@@ -131,7 +131,7 @@ private enum
     MINIMAP_VIEW_ALPHA = 70,    // marker wash opacity
     SCROLLBAR_WIDTH = 14,       // plain scrollbar (minimap off)
     SCROLLBAR_THUMB_MIN = 24,   // min thumb height
-    WASH_EDGE_LIFT = 200,       // wash outline brightness, percent
+    WASH_EDGE_LIFT = 200,       // wash outline contrast, percent
     SPAN_PAD = 1,               // border inset, so it boxes the cells instead of looking like a gridline
     MARGIN_HEX  = 2,            // hex cell bleed
     MARGIN_TEXT = 1,            // text cell bleed
@@ -141,6 +141,8 @@ private enum
 /// Colors other than the bytes'. Defaults suit a black panel.
 struct HexColors
 {
+    /// Panel background, drawn by the owner. Wash outlines move away from it.
+    mu_Color canvas = mu_Color(0, 0, 0, 255);
     /// Selection wash, grid and minimap. Highest priority: see hex_draw_row.
     mu_Color selection = mu_Color(48, 84, 140, 255);
     mu_Color caret  = mu_Color(120, 170, 235, 255);  /// Caret outline, hex lane.
@@ -1722,13 +1724,13 @@ mu_Color hex_map_wash(ref const(HexView) v, long index, int cells, long total)
     size_t selLow  = hex_sel_low(v);
     size_t selHigh = hex_sel_high(v);
     if (v.active && selLow != selHigh && cast(long) selHigh >= start && cast(long) selLow < end)
-        return hex_wash_lift(v.colors.selection);
+        return hex_wash_edge(v.colors.selection, v.colors.canvas);
 
     if (v.backSpanFn is null)
         return mu_Color(0, 0, 0, 0);
 
     mu_Color wash = v.backSpanFn(start, end - start, cast(void*) v.backUser);
-    return wash.a ? hex_wash_lift(wash) : wash;
+    return wash.a ? hex_wash_edge(wash, v.colors.canvas) : wash;
 }
 
 unittest
@@ -2097,7 +2099,7 @@ void hex_wash_fill(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) l
     }
 }
 
-// Outline washed cells with a lifted wash color; survives the selection fill
+// Outline washed cells with a stronger wash color (hex_wash_edge); survives the selection fill
 // (see hex_draw_row). Edges are dropped between same-wash neighbours, so runs
 // outline as one region across rows. Rows above and below are queried via
 // backSpanFn (offset-only; hex_byte is invalid off-window). No backSpanFn, no
@@ -2131,7 +2133,7 @@ void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
             bool top    = hex_coleq(here, above) == false;
             bool bottom = hex_coleq(here, below) == false;
             bool onL    = hex_coleq(here, left) == false;
-            mu_Color edge = hex_wash_lift(here);
+            mu_Color edge = hex_wash_edge(here, v.colors.canvas);
 
             // Joined hex cells extend over the gap, matching the fill.
             int hx0 = originX + hex_col_for(lay, i) * charW;
@@ -2233,24 +2235,30 @@ unittest
     assert(hex_span_joins(false, a, true, b) == false);
 }
 
-// Brighter version of a wash, for its outline. Scaled, not blended to white,
-// to keep the hue.
-mu_Color hex_wash_lift(mu_Color c)
+/// Outline color of wash `c`: brighter on a dark `canvas`, darker on a light
+/// one. Scaled, not blended to white or black, to keep the hue.
+mu_Color hex_wash_edge(mu_Color c, mu_Color canvas)
 {
-    return mu_Color(hex_lift(c.r), hex_lift(c.g), hex_lift(c.b), 255);
+    bool light = (canvas.r * 30 + canvas.g * 59 + canvas.b * 11) / 100 >= 128;
+    return mu_Color(hex_lift(c.r, light), hex_lift(c.g, light), hex_lift(c.b, light), 255);
 }
 
-ubyte hex_lift(ubyte v)
+/// Channel `v` scaled by WASH_EDGE_LIFT, up or (`down`) down, clamped.
+ubyte hex_lift(ubyte v, bool down)
 {
-    int n = v * WASH_EDGE_LIFT / 100;
+    int n = down ? v * 100 / WASH_EDGE_LIFT : v * WASH_EDGE_LIFT / 100;
     return cast(ubyte)(n > 255 ? 255 : n);
 }
 
 unittest
 {
+    enum mu_Color BLACK = mu_Color(0, 0, 0, 255);
+    enum mu_Color WHITE = mu_Color(255, 255, 255, 255);
     // Clamps instead of wrapping.
-    assert(hex_coleq(hex_wash_lift(mu_Color(125, 85, 22, 255)), mu_Color(250, 170, 44, 255)));
-    assert(hex_coleq(hex_wash_lift(mu_Color(200, 0, 0, 128)), mu_Color(255, 0, 0, 255)));
+    assert(hex_coleq(hex_wash_edge(mu_Color(125, 85, 22, 255), BLACK), mu_Color(250, 170, 44, 255)));
+    assert(hex_coleq(hex_wash_edge(mu_Color(200, 0, 0, 128), BLACK), mu_Color(255, 0, 0, 255)));
+    // Darker on a light canvas.
+    assert(hex_coleq(hex_wash_edge(mu_Color(250, 170, 44, 255), WHITE), mu_Color(125, 85, 22, 255)));
 }
 
 // Draw the cell edges not shared with neighbours, `weight` px, inset by

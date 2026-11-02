@@ -401,18 +401,24 @@ ptrdiff_t ui_pane_index(const(Pane)* p)
 /// Main window, parent for native dialogs. Set by main.
 __gshared SDL_Window* uiWindow;
 
-/// Brightness kept by matching bytes in a diff, percent. Dimmed, not grayed,
-/// so the class colors stay readable.
+/// Contrast kept by matching bytes in a diff, percent. Faded, not grayed, so
+/// the class colors stay readable.
 enum int DIFF_MATCH_KEEP = 42;
 
-/// Ditto: `c` dimmed, alpha kept.
-mu_Color diff_dim(mu_Color c)
+/// Ditto: `c` faded toward `canvas`, alpha kept.
+mu_Color diff_dim(mu_Color c, mu_Color canvas)
 {
-    return mu_Color(
-        cast(ubyte)(c.r * DIFF_MATCH_KEEP / 100),
-        cast(ubyte)(c.g * DIFF_MATCH_KEEP / 100),
-        cast(ubyte)(c.b * DIFF_MATCH_KEEP / 100),
-        c.a);
+    static ubyte fade(ubyte v, ubyte to) => cast(ubyte)(to + (v - to) * DIFF_MATCH_KEEP / 100);
+    return mu_Color(fade(c.r, canvas.r), fade(c.g, canvas.g), fade(c.b, canvas.b), c.a);
+}
+
+unittest
+{
+    // Black canvas: plain scaling.
+    assert(diff_dim(mu_Color(200, 100, 0, 255), mu_Color(0, 0, 0, 255)) == mu_Color(84, 42, 0, 255));
+    // White canvas: toward white.
+    assert(diff_dim(mu_Color(0, 100, 255, 255), mu_Color(255, 255, 255, 255))
+        == mu_Color(148, 190, 255, 255));
 }
 
 /// Apply theme colors over ddui's style. Per frame, so edits show at once.
@@ -1064,7 +1070,7 @@ mu_Color hexColor(size_t offset, ubyte value, void* user)
         ubyte other;
         if (diff_peer_byte(v, offset, other) && other != value)
             return theme_fg(Scheme.diff_changed);
-        return diff_dim(byteColor(v, offset, value));
+        return diff_dim(byteColor(v, offset, value), theme_bg(Scheme.ui_canvas));
     }
 
     return byteColor(v, offset, value);

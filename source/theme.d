@@ -156,8 +156,8 @@ enum Scheme
 /// First scheme of the UI group.
 enum Scheme SCHEME_UI = Scheme.ui_canvas;
 
-/// Scheme name, label and default colors. A part with alpha 0 isn't drawn,
-/// so a color for it is refused.
+/// Scheme name, label and dark theme colors. A side with alpha 0 isn't drawn,
+/// in any theme, so a color for it is refused.
 struct SchemeInfo
 {
     string name;    /// rc name, ddhx's where it has the scheme.
@@ -166,7 +166,7 @@ struct SchemeInfo
     mu_Color bg;    /// Wash, face, or track.
 }
 
-/// All schemes, in Scheme order.
+/// All schemes, in Scheme order. Their colors are the dark theme.
 immutable SchemeInfo[] SCHEMES = [
     SchemeInfo("normal",       "Printable",    mu_Color(220, 220, 220, 255)),   // off-white
     SchemeInfo("zero",         "Zero",         mu_Color(90, 90, 100, 255)),     // charcoal
@@ -178,7 +178,7 @@ immutable SchemeInfo[] SCHEMES = [
     SchemeInfo("selection",    "Selection",    mu_Color.init, HexColors.init.selection),
     // Amber wash, which no byte class uses. Dark so white text stays readable
     // (~6.6:1 vs <2:1 for bright amber). The panel brightens it for outlines
-    // and the minimap (hex_wash_lift).
+    // and the minimap (hex_wash_edge).
     SchemeInfo("bookmark",     "Bookmark",
         mu_Color(255, 255, 255, 255), mu_Color(125, 85, 22, 255)),
     SchemeInfo("diff-changed", "Diff changed", mu_Color(255, 95, 95, 255)),
@@ -245,16 +245,16 @@ immutable SchemeInfo[] SCHEMES = [
 ];
 static assert(SCHEMES.length == Scheme.max + 1);
 
-/// Glyph or outline color of `s`.
+/// Glyph, outline or thumb color of `s`: its override, else the theme's.
 mu_Color theme_fg(Scheme s)
 {
-    return colors[s][0];
+    return custom[s][0].a ? custom[s][0] : base[s][0];
 }
 
-/// Wash color of `s`, alpha 0 if it has none.
+/// Wash, face or track color of `s`, alpha 0 if it has none.
 mu_Color theme_bg(Scheme s)
 {
-    return colors[s][1];
+    return custom[s][1].a ? custom[s][1] : base[s][1];
 }
 
 /// Hex view colors other than the bytes'.
@@ -270,6 +270,7 @@ HexColors theme_hex()
     c.track     = theme_bg(Scheme.scrollbar);
     c.view      = theme_fg(Scheme.minimap_view);
     c.viewWash  = theme_bg(Scheme.minimap_view);
+    c.canvas    = theme_bg(Scheme.ui_canvas);
     return c;
 }
 
@@ -339,8 +340,8 @@ void theme_style(ref mu_Color[MU_COLOR_MAX] c)
     c[MU_COLOR_SELECTION]   = theme_bg(Scheme.ui_text_selection);
 }
 
-/// Apply rc line `color SCHEME COLOR` if `apply`, else only check it.
-/// Returns: False for an unknown scheme or a bad color.
+/// Apply rc line `color SCHEME COLOR` as an override if `apply`, else only
+/// check it. Returns: False for an unknown scheme or a bad color.
 bool theme_color(string scheme, string spec, bool apply)
 {
     ptrdiff_t i = theme_index(scheme);
@@ -350,45 +351,73 @@ bool theme_color(string scheme, string spec, bool apply)
     if (theme_parse(cast(Scheme) i, spec, c) == false)
         return false;
     if (apply)
-        colors[i] = c;
+        custom[i] = c;
     return true;
 }
 
-/// Set `s` from Settings, `spec` in rc syntax. False if `spec` is bad.
+/// Set `s` from Settings, `spec` in rc syntax. Sides matching the theme are
+/// left to follow it. False if `spec` is bad.
 bool theme_set(Scheme s, string spec)
 {
     mu_Color[2] c;
     if (theme_parse(s, spec, c) == false)
         return false;
-    colors[s] = c;
+    foreach (size_t side; 0 .. 2)
+        if (c[side] == base[s][side])
+            c[side] = mu_Color.init;
+    custom[s] = c;
     theme_edit();
     return true;
 }
 
-/// Colors of `s` in rc syntax, default parts included.
+/// Colors of `s` in rc syntax, theme sides included.
 string theme_spec(Scheme s)
 {
     return theme_text(s, true);
 }
 
-/// Give `s` its default colors.
+/// Drop the overrides of `s`, back to the theme's colors.
 void theme_reset(Scheme s)
 {
-    colors[s] = [ SCHEMES[s].fg, SCHEMES[s].bg ];
+    custom[s] = [ mu_Color.init, mu_Color.init ];
     theme_edit();
 }
 
-/// Reset every scheme.
+/// Drop every override. The theme stays.
 void theme_reset_all()
 {
-    theme_defaults();
+    custom = custom.init;
     theme_edit();
 }
 
-/// Load the default colors, dropping all others.
+/// Back to the default theme without overrides, nothing edited.
 void theme_defaults()
 {
-    colors = theme_initial();
+    base = THEMES[0].colors;
+    current = 0;
+    custom = custom.init;
+    edited = changed = false;
+}
+
+/// Switch to built-in theme `name`, keeping overrides. False if unknown.
+bool theme_use(string name)
+{
+    foreach (size_t i, ref immutable ThemeInfo t; THEMES)
+    {
+        if (t.name == name)
+        {
+            base = t.colors;
+            current = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Name of the theme in use.
+string theme_current()
+{
+    return THEMES[current].name;
 }
 
 /// Whether colors were edited (Settings) since loading, so the rc's color
@@ -406,7 +435,7 @@ bool theme_changed()
     return was;
 }
 
-/// rc lines for the schemes that differ from the defaults, in Scheme order.
+/// rc lines for the overrides, in Scheme order.
 string[] theme_lines()
 {
     string[] lines;
@@ -418,6 +447,19 @@ string[] theme_lines()
     }
     return lines;
 }
+
+/// Built-in theme: name and the colors of every scheme.
+struct ThemeInfo
+{
+    string name;    /// rc name.
+    /// Foreground then background, by scheme. Alpha 0 where SCHEMES has it.
+    mu_Color[2][SCHEMES.length] colors;
+}
+
+/// Built-in themes. The first is the default.
+immutable ThemeInfo[] THEMES = [
+    ThemeInfo("dark", theme_initial()),
+];
 
 private:
 
@@ -448,13 +490,17 @@ immutable NamedColor[] PALETTE = [
     NamedColor("white",         mu_Color(255, 255, 255, 255)),
 ];
 
-/// Current colors by scheme: glyph or outline, then wash.
-__gshared mu_Color[2][SCHEMES.length] colors = theme_initial();
+/// Theme colors by scheme: foreground, then background.
+__gshared mu_Color[2][SCHEMES.length] base = theme_initial();
+/// Overrides from color lines and Settings, alpha 0 where unset.
+__gshared mu_Color[2][SCHEMES.length] custom;
+/// Index of the theme in use, in THEMES.
+__gshared size_t current;
 
 /// Edited in Settings: since loading, and since the last theme_changed.
 __gshared bool edited, changed;
 
-/// Default colors of every scheme.
+/// Dark theme colors of every scheme, from SCHEMES.
 mu_Color[2][SCHEMES.length] theme_initial()
 {
     mu_Color[2][SCHEMES.length] c;
@@ -479,8 +525,8 @@ ptrdiff_t theme_index(string name)
     return -1;
 }
 
-/// Parse ddhx's FG:BG into `c` for scheme `s`. Either side may be empty or
-/// `default`. False on a bad color, or one for a part `s` doesn't draw.
+/// Parse ddhx's FG:BG into `c` for scheme `s`. A side empty or `default` is
+/// left unset (alpha 0). False on a bad color, or one for a side `s` doesn't draw.
 bool theme_parse(Scheme s, string spec, out mu_Color[2] c)
 {
     import std.string : indexOf;
@@ -490,16 +536,16 @@ bool theme_parse(Scheme s, string spec, out mu_Color[2] c)
     ptrdiff_t i = indexOf(spec, ':');
     string fg = i >= 0 ? spec[0 .. i] : spec;
     string bg = i >= 0 ? spec[i + 1 .. $] : null;
-    return theme_part(fg, SCHEMES[s].fg, c[0]) && theme_part(bg, SCHEMES[s].bg, c[1]);
+    return theme_part(fg, SCHEMES[s].fg.a != 0, c[0]) &&
+        theme_part(bg, SCHEMES[s].bg.a != 0, c[1]);
 }
 
-/// One side of FG:BG into `c`, `def` when empty. False if bad or not drawn.
-bool theme_part(string text, mu_Color def, out mu_Color c)
+/// One side of FG:BG into `c`, unset when empty. False if bad or not `drawn`.
+bool theme_part(string text, bool drawn, out mu_Color c)
 {
-    c = def;
     if (text.length == 0 || text == "default")
         return true;
-    if (def.a == 0)
+    if (drawn == false)
         return false;
     return theme_value(text, c);
 }
@@ -543,21 +589,22 @@ string theme_name(mu_Color c)
     return format("#%02x%02x%02x", c.r, c.g, c.b);
 }
 
-/// Colors of `s` as FG:BG, leaving out default parts unless `all`. Parts `s`
-/// doesn't draw are always left out.
+/// Colors of `s` as FG:BG: overrides, plus the theme's sides if `all`. Sides
+/// `s` doesn't draw are always left out.
 string theme_text(Scheme s, bool all)
 {
-    string fg = theme_side(colors[s][0], SCHEMES[s].fg, all);
-    string bg = theme_side(colors[s][1], SCHEMES[s].bg, all);
+    string fg = theme_side(s, 0, all);
+    string bg = theme_side(s, 1, all);
     return bg.length ? fg ~ ":" ~ bg : fg;
 }
 
-/// One side for theme_text.
-string theme_side(mu_Color c, mu_Color def, bool all)
+/// One side for theme_text, null if left out.
+string theme_side(Scheme s, size_t side, bool all)
 {
-    if (def.a == 0 || (all == false && c == def))
+    mu_Color c = custom[s][side];
+    if (base[s][side].a == 0 || (c.a == 0 && all == false))
         return null;
-    return theme_name(c);
+    return theme_name(c.a ? c : base[s][side]);
 }
 
 unittest
@@ -599,6 +646,32 @@ unittest
     assert(theme_tabs().accent == mu_Color(205, 49, 49, 255));
     assert(theme_split().held == mu_Color(205, 49, 49, 255));
     assert(theme_color("ui-button", "red", false) == false);
+}
+
+unittest
+{
+    scope (exit) theme_defaults();
+
+    assert(theme_current() == "dark");
+    assert(theme_use("dark"));
+    assert(theme_use("nope") == false);
+
+    // Unset sides follow the theme, overrides survive a theme change.
+    assert(theme_color("bookmark", ":red", true));
+    base[Scheme.bookmark] = [ mu_Color(1, 2, 3, 255), mu_Color(4, 5, 6, 255) ];
+    base[Scheme.zero][0] = mu_Color(7, 8, 9, 255);
+    assert(theme_fg(Scheme.bookmark) == mu_Color(1, 2, 3, 255));
+    assert(theme_bg(Scheme.bookmark) == mu_Color(205, 49, 49, 255));
+    assert(theme_fg(Scheme.zero) == mu_Color(7, 8, 9, 255));
+    assert(theme_lines() == [ "color bookmark :red" ]);
+    assert(theme_spec(Scheme.bookmark) == "#010203:red");
+
+    // Settings: a side equal to the theme's stays unset.
+    assert(theme_set(Scheme.bookmark, "#010203:blue"));
+    assert(theme_lines() == [ "color bookmark :blue" ]);
+    theme_reset(Scheme.bookmark);
+    assert(theme_lines().length == 0);
+    assert(theme_bg(Scheme.bookmark) == mu_Color(4, 5, 6, 255));
 }
 
 
