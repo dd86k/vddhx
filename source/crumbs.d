@@ -2,6 +2,8 @@
 /// Authors: dd86k <dd@dax.moe>
 module crumbs;
 
+import std.string : indexOf, lastIndexOf;
+
 import ddui;
 import uitext : ui_elide;
 
@@ -39,8 +41,6 @@ int crumb_bar_height(mu_Context* ctx)
 void crumb_bar(mu_Context* ctx, string trail, mu_Color back,
     CrumbColors colors = CrumbColors.init)
 {
-    import std.string : indexOf, lastIndexOf;
-
     mu_Font font = ctx.style.font;
     int fill = -1;
     mu_layout_row(ctx, 1, &fill, crumb_bar_height(ctx));

@@ -6,8 +6,10 @@
 /// Authors: dd86k <dd@dax.moe>
 module hexview;
 
-import ddui;
 import core.time : MonoTime, msecs;
+import std.math : exp2;
+
+import ddui;
 
 /// Caret key bits, above ddui's MU_KEY_* (to 1 << 5) so both share
 /// ctx.key_down. Mapped by main.d. Bitmask to match ddui's key input.
@@ -1168,8 +1170,6 @@ MonoTime edgeLast;
 // Rows per second for a pointer `past` pixels beyond the grid, doubling every two rows.
 double hex_edge_rate(int past, int rowH)
 {
-    import std.math : exp2;
-
     double rows = cast(double)(past < 0 ? -past : past) / rowH;
     return exp2(rows < 74 ? 3 + rows / 2 : 40.0);
 }

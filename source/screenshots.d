@@ -14,21 +14,34 @@ module screenshots;
 version (Screenshots):
 
 import core.stdc.string : strncmp, strlen;
-import std.string : fromStringz;
+import core.thread : Thread;
+import core.time : msecs;
+import std.algorithm.iteration : filter;
+import std.algorithm.searching : canFind, startsWith;
+import std.array : array;
+import std.conv : text;
+import std.file : exists, mkdirRecurse, tempDir, write, thisExePath;
+import std.path : buildPath;
+import std.process : spawnProcess, wait;
+import std.random : Xorshift, uniform;
+import std.string : fromStringz, toStringz;
+
 import bindbc.sdl;
+
+import bindings : bind_capture;
+import ddhx.charset : ASCII;
 import ddlogger;
 import ddui;
 import hexview : HexBase, HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
-import preferences : prefs;
-import bindings : bind_capture;
-import theme : theme_color, theme_defaults, theme_use;
+import keys : keys_run;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
+import preferences : prefs;
 import render;
+import theme : theme_color, theme_defaults, theme_use;
 import ui;
-import ddhx.charset : ASCII;
-import keys : keys_run;
+import worker : worker_pump;
 
 /// Relative to the working directory.
 enum SCREENSHOT_DIR = "screenshots";
@@ -36,7 +49,6 @@ enum SCREENSHOT_DIR = "screenshots";
 /// Create the output directory. Never throws (called from the event loop).
 bool screenshot_mkdir(string dir)
 {
-    import std.file : exists, mkdirRecurse;
     if (exists(dir))
         return true;
     try
@@ -67,10 +79,6 @@ private struct Fixtures
 /// Write the fixtures. Seeded PRNG so runs produce identical pixels.
 private Fixtures screenshot_fixtures()
 {
-    import std.file : mkdirRecurse, tempDir, write;
-    import std.path : buildPath;
-    import std.random : Xorshift, uniform;
-
     string dir = buildPath(tempDir, "vddhx-shots");
     mkdirRecurse(dir);
 
@@ -108,11 +116,6 @@ private Fixtures screenshot_fixtures()
 /// ui.d's module state has no teardown.
 private int screenshot_all(string[] args)
 {
-    import std.algorithm.iteration : filter;
-    import std.array : array;
-    import std.file : thisExePath;
-    import std.process : spawnProcess, wait;
-
     // Strip set selectors; added back one at a time.
     string[] base = args[1 .. $]
         .filter!(a => a != "--all" && a != "--readme" && a != "--keys")
@@ -138,7 +141,6 @@ private int screenshot_all(string[] args)
 /// `SDL_VIDEODRIVER=offscreen dub run -b screenshots -- --screenshot`.
 int screenshot_run(string[] args)
 {
-    import std.algorithm.searching : canFind, startsWith;
     if (args.canFind("--all"))
         return screenshot_all(args);
     const bool readme = args.canFind("--readme");
@@ -201,9 +203,6 @@ int screenshot_run(string[] args)
     // Wait out background walks so the shot shows the result.
     void frame()
     {
-        import core.thread : Thread;
-        import core.time : msecs;
-        import worker : worker_pump;
         while (ui_jobs_busy())
         {
             Thread.sleep(1.msecs);
@@ -224,8 +223,6 @@ int screenshot_run(string[] args)
 
         // Throw, don't return a fallback: callers click at +3, and (2, 2) is the File
         // menu, which left a dropdown over every later shot.
-        import std.conv : text;
-        import std.string : fromStringz;
         throw new Exception(text("no drawn label matching \"", label.fromStringz, '"'));
     }
 
@@ -249,8 +246,6 @@ int screenshot_run(string[] args)
     // Report failures here; callers ignore the result.
     bool shot(string name)
     {
-        import std.path : buildPath;
-        import std.string : toStringz;
         SDL_SetRenderDrawColor(renderer, 30, 30, 46, 255);
         SDL_RenderClear(renderer);
         render_commands(renderer, &ctx);
@@ -322,8 +317,6 @@ int screenshot_run(string[] args)
 
     // Hovering a byte shows its field. Needs real time (tooltip delay).
     {
-        import core.thread : Thread;
-        import core.time : msecs;
         // Three frames: the grid is a nested panel, so hover_root needs one more, and
         // the delay starts after.
         mu_input_mousemove(&ctx, 240, 87);
@@ -555,8 +548,6 @@ int screenshot_run(string[] args)
 
     // Tab hover shows the full path. Needs real time (tooltip delay).
     {
-        import core.thread : Thread;
-        import core.time : msecs;
         mu_Vec2 rest = find("other.bin");
         mu_input_mousemove(&ctx, rest.x + 3, rest.y + 3); frame(); frame();
         Thread.sleep(600.msecs);

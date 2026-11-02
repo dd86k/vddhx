@@ -8,6 +8,7 @@ module framestats;
 version (FrameStats):
 
 import core.time : MonoTime, Duration, seconds;
+
 import ddlogger;
 import ddui;
 

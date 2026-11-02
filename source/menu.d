@@ -4,6 +4,7 @@
 module menu;
 
 import core.stdc.string : strlen;
+
 import ddui;
 
 // One shared popup ("!menu"), moved under the active trigger. 0 when closed.

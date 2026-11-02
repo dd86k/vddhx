@@ -1,21 +1,28 @@
 /// Main loop.
 module main;
 
+import core.stdc.errno : errno;
+import core.stdc.stdlib : malloc;
+import core.stdc.string : strerror;
 import core.time : MonoTime, Duration, nsecs;
 import std.format : format;
+import std.stdio : write;
 import std.string : fromStringz, toStringz;
-import ddlogger;
+
 import bindbc.sdl;
+
 import about : VERSION, COMPILER, HOMEPAGE, LICENSE;
+import ddlogger;
 import ddui;
 import elevate : ELEVATE_ARG, elevate_helper;
 import icon : icon_apply;
+import input : input_event;
 import loader;
 import logging : logging_init, logging_sdl;
-import input : input_event;
+import preferences : prefs_load;
 import render;
 import ui;
-import preferences : prefs_load;
+
 version (Screenshots) import screenshots;
 version (FrameStats) import framestats;
 
@@ -126,12 +133,9 @@ int main(string[] args)
     SDL_StartTextInput(window);
 
     // mu_Context is (or was?) too large for the default MSVC stack, which is 1 MiB.
-    import core.stdc.stdlib : malloc;
     mu_Context *ctx = cast(mu_Context*) malloc(mu_Context.sizeof);
     if (ctx == null)
     {
-        import core.stdc.string : strerror;
-        import core.stdc.errno : errno;
         logCritical("malloc: %s", strerror(errno).fromStringz);
         return 1;
     }
@@ -364,8 +368,6 @@ private bool console_attach()
 // GUI subsystem has no stdout, this tries attach the console on Windows before printing.
 private int cli_print(string text)
 {
-    import std.stdio : write;
-
     version (Windows)
     {
         if (console_attach() == false)

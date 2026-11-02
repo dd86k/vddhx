@@ -5,14 +5,24 @@
 /// Authors: dd86k <dd@dax.moe>
 module theme;
 
+import std.algorithm.sorting : sort;
+import std.array : array, split, join;
+import std.ascii : isAlphaNum, isHexDigit;
+import std.conv : to;
+import std.file : readText, exists, SpanMode, dirEntries, isDir, mkdirRecurse,
+    rename, write;
+import std.format : format;
+import std.path : baseName, stripExtension, buildPath, dirName;
+import std.string : lineSplitter, strip, indexOf;
+
+import crumbs : CrumbColors;
 import ddlogger;
 import ddui;
-
-import structure;
-import crumbs : CrumbColors;
 import hexview : HexColors;
 import omnibar : OmniColors;
+import os.path : getUserConfigFolder;
 import split : SplitColors;
+import structure;
 import tabbar : TabColors;
 
 /// Glyph color for `role`. StructureRole.none has no color: the caller
@@ -420,10 +430,6 @@ void theme_defaults()
 /// file line is logged and skipped. False if there is no such theme.
 bool theme_use(string name)
 {
-    import std.file : readText;
-    import std.string : lineSplitter;
-    import std.array : array;
-
     ptrdiff_t i = theme_find(name);
     if (i >= 0)
     {
@@ -452,8 +458,6 @@ bool theme_use(string name)
 /// Whether theme `name` exists, built-in or as a user file.
 bool theme_exists(string name)
 {
-    import std.file : exists;
-
     if (theme_find(name) >= 0)
         return true;
     string path = theme_path(name);
@@ -542,10 +546,6 @@ const(string)[] theme_list()
 /// Look for user theme files again.
 void theme_scan()
 {
-    import std.algorithm.sorting : sort;
-    import std.file : SpanMode, dirEntries, exists, isDir;
-    import std.path : baseName, stripExtension;
-
     scanned = true;
     string[] users;
     string dir = theme_dir();
@@ -773,9 +773,6 @@ ptrdiff_t theme_find(string name)
 /// User theme folder, or null.
 string theme_dir()
 {
-    import std.path : buildPath;
-    import os.path : getUserConfigFolder;
-
     string dir = getUserConfigFolder();
     return dir ? buildPath(dir, "vddhx", "themes") : null;
 }
@@ -783,8 +780,6 @@ string theme_dir()
 /// File of user theme `name`, or null if the name or folder is bad.
 string theme_path(string name)
 {
-    import std.path : buildPath;
-
     string dir = theme_dir();
     if (dir is null || theme_name_ok(name) == false)
         return null;
@@ -794,8 +789,6 @@ string theme_path(string name)
 /// Whether `name` is fit for a file name: letters, digits, - and _.
 bool theme_name_ok(string name)
 {
-    import std.ascii : isAlphaNum;
-
     if (name.length == 0 || name.length > 64)
         return false;
     foreach (char c; name)
@@ -807,9 +800,6 @@ bool theme_name_ok(string name)
 /// Words of a theme file line, null for blank lines and comments.
 string[] theme_words(string line)
 {
-    import std.array : split;
-    import std.string : strip;
-
     string text = strip(line);
     return text.length && text[0] != '#' ? split(text) : null;
 }
@@ -904,10 +894,6 @@ string[] theme_merge(const(string)[] text, string[] colors)
 /// Write `text` to `path` via a temp file. Errors are logged.
 bool theme_write(string path, const(string)[] text)
 {
-    import std.array : join;
-    import std.file : mkdirRecurse, rename, write;
-    import std.path : dirName;
-
     try
     {
         mkdirRecurse(dirName(path));
@@ -936,8 +922,6 @@ ptrdiff_t theme_index(string name)
 /// left unset (alpha 0). False on a bad color, or one for a side `s` doesn't draw.
 bool theme_parse(Scheme s, string spec, out mu_Color[2] c)
 {
-    import std.string : indexOf;
-
     if (spec.length == 0)
         return false;
     ptrdiff_t i = indexOf(spec, ':');
@@ -960,9 +944,6 @@ bool theme_part(string text, bool drawn, out mu_Color c)
 /// Color name or `#rrggbb` into `c`. False if neither.
 bool theme_value(string text, out mu_Color c)
 {
-    import std.ascii : isHexDigit;
-    import std.conv : to;
-
     foreach (ref immutable NamedColor n; PALETTE)
     {
         if (n.name == text)
@@ -988,8 +969,6 @@ bool theme_value(string text, out mu_Color c)
 /// Palette name of `c`, else `#rrggbb`.
 string theme_name(mu_Color c)
 {
-    import std.format : format;
-
     foreach (ref immutable NamedColor n; PALETTE)
         if (n.color == c)
             return n.name;

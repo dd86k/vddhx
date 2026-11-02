@@ -3,6 +3,7 @@
 module loader;
 
 import bindbc.sdl : staticBinding;
+
 import ddlogger;
 
 static if (staticBinding)

@@ -7,6 +7,7 @@
 module split;
 
 import core.stdc.string : strlen;
+
 import ddui;
 
 /// Splitter bar width, the gap between panes.

@@ -3,11 +3,19 @@
 /// Authors: dd86k <dd@dax.moe>
 module logging;
 
+import core.thread : Thread;
+import std.conv : to;
+import std.file : exists, mkdirRecurse, rename;
 import std.format : format;
+import std.path : buildPath, dirName;
 import std.string : fromStringz;
-import ddlogger;
+import std.system : os;
+
 import bindbc.sdl;
+
 import about : VERSION, COMPILER;
+import ddlogger;
+import os.path : getHomeFolder, getUserConfigFolder;
 
 private enum string APPNAME = "vddhx";
 private enum string FILENAME = "vddhx.log";
@@ -47,9 +55,6 @@ void logging_sdl(LogLevel level)
 // One file per session; previous kept as .old so a crash log survives relaunch.
 private string openFile(LogLevel level)
 {
-    import std.file : exists, mkdirRecurse, rename;
-    import std.path : buildPath, dirName;
-
     string base = stateFolder();
     if (base is null)
         return null;
@@ -82,8 +87,6 @@ private string openFile(LogLevel level)
 // XDG: logs go under state, not config.
 private string stateFolder()
 {
-    import os.path : getHomeFolder, getUserConfigFolder;
-
     version (Windows)
         return getUserConfigFolder();
     else
@@ -101,9 +104,6 @@ private string stateFolder()
 
 private string platform()
 {
-    import std.conv : to;
-    import std.system : os;
-
     version (Posix)
     {
         import core.sys.posix.sys.utsname : utsname, uname;
@@ -124,8 +124,6 @@ private string versionText(int v)
 extern (C) private void onSdlLog(void* user, int category, SDL_LogPriority priority,
     const(char)* message) nothrow
 {
-    import core.thread : Thread;
-
     // A failing appender allocates its exception; SDL threads unknown to druntime
     // must not allocate.
     if (Thread.getThis() is null)

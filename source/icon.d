@@ -12,7 +12,9 @@ import std.file : exists, thisExePath;
 import std.path : buildPath, dirName;
 import std.process : environment;
 import std.string : fromStringz, toStringz;
+
 import bindbc.sdl;
+
 import ddlogger;
 
 /// Only Wayland reads alternate sizes; others take one surface and scale it,

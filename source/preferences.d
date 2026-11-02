@@ -6,12 +6,22 @@
 /// Authors: dd86k <dd@dax.moe>
 module preferences;
 
+import std.algorithm.searching : any, canFind;
+import std.array : array, replace, join;
+import std.ascii : isWhite;
+import std.conv : to;
+import std.file : readText, mkdirRecurse, rename, write;
+import std.path : dirName, buildPath;
+import std.string : lineSplitter, strip;
 import std.system : Endian;
-import ddlogger;
-import ddhx.charset : Charset, ASCII, findCharset;
-import hexview : HEX_COLUMNS_MAX, HexBase;
+
 import bindings : bind_defaults, bind_edited, bind_key, bind_lines, bind_valid, unbind_key;
+import ddhx.charset : Charset, ASCII, findCharset;
+import ddlogger;
+import hexview : HEX_COLUMNS_MAX, HexBase;
+import os.path : findConfig, getSystemFolder, getUserConfigFolder;
 import theme : theme_color, theme_defaults, theme_exists;
+import utils : Argument, arguments;
 
 /// Mode new tabs start in. Read-only only sets the tab's starting state.
 enum WriteMode { overwrite, insert, readonly }
@@ -61,11 +71,6 @@ private __gshared string savePath;
 /// and skipped.
 void prefs_load()
 {
-    import std.file : readText;
-    import std.string : lineSplitter;
-    import std.array : array;
-    import os.path : findConfig;
-
     savePath = prefs_user_path();
     bind_defaults();
     theme_defaults();
@@ -103,9 +108,6 @@ string prefs_theme_name(ref const(Prefs) p, bool dark)
 /// Returns: False if the file could not be written.
 bool prefs_save()
 {
-    import std.file : mkdirRecurse, rename, write;
-    import std.path : dirName;
-
     if (savePath is null)
     {
         logWarn("no place to save settings");
@@ -143,7 +145,6 @@ bool prefs_set(ref Prefs p, string key, string value)
     switch (key)
     {
     case "columns":
-        import std.conv : to;
         if (value == "auto" || value == "autoresize") // ddhx takes both
         {
             p.columns = 0;
@@ -191,7 +192,6 @@ bool prefs_set(ref Prefs p, string key, string value)
     case "minimap":     return prefs_bool(value, p.minimap);
     case "breadcrumbs": return prefs_bool(value, p.crumbs);
     case "fontsize":
-        import std.conv : to;
         int pt;
         try
             pt = to!int(value);
@@ -220,8 +220,6 @@ bool prefs_set(ref Prefs p, string key, string value)
 /// One key's value in file syntax.
 string prefs_get(ref const(Prefs) p, string key)
 {
-    import std.conv : to;
-
     switch (key)
     {
     case "columns":     return p.columns ? to!string(p.columns) : "auto";
@@ -247,10 +245,6 @@ private:
 /// or quotes, double-quoted with escapes if it also has a single quote.
 string prefs_quote(string value)
 {
-    import std.algorithm.searching : any, canFind;
-    import std.ascii : isWhite;
-    import std.array : replace;
-
     if (value.length == 0)
         return value;
     if (value.any!(c => isWhite(c) || c == '"' || c == '\'') == false && value[0] != '#')
@@ -273,18 +267,12 @@ bool prefs_bool(string value, ref bool field)
 
 bool prefs_system(string path)
 {
-    import std.path : buildPath;
-    import os.path : getSystemFolder;
-
     string sys = getSystemFolder();
     return sys !is null && path == buildPath(sys, APPNAME, FILENAME);
 }
 
 string prefs_user_path()
 {
-    import std.path : buildPath;
-    import os.path : getUserConfigFolder;
-
     string dir = getUserConfigFolder();
     return dir ? buildPath(dir, APPNAME, FILENAME) : null;
 }
@@ -292,9 +280,6 @@ string prefs_user_path()
 // Key set by a line, null for blank lines and comments.
 string prefs_line_key(string line, out string value)
 {
-    import std.string : strip;
-    import utils : Argument, arguments;
-
     string text = strip(line);
     if (text.length == 0 || text[0] == '#')
         return null;
@@ -370,9 +355,6 @@ void prefs_merge(ref string[] text, ref const(Prefs) p)
 // Parameters after the command aren't supported yet.
 bool prefs_bind(string line, bool apply)
 {
-    import std.string : strip;
-    import utils : Argument, arguments;
-
     Argument[] args;
     try
         args = arguments(strip(line));
@@ -388,9 +370,6 @@ bool prefs_bind(string line, bool apply)
 // Apply rc line `line` (color), false if bad.
 bool prefs_color(string line)
 {
-    import std.string : strip;
-    import utils : Argument, arguments;
-
     Argument[] args;
     try
         args = arguments(strip(line));
@@ -424,7 +403,6 @@ void prefs_replace(ref string[] text, string[] repl, bool function(string) owned
 
 string prefs_text(const(string)[] text)
 {
-    import std.array : join;
     return text.length ? join(text, "\n") ~ "\n" : "";
 }
 

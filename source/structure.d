@@ -12,6 +12,7 @@
 /// Authors: dd86k <dd@dax.moe>
 module structure;
 
+import std.conv : to;
 import std.system : Endian;
 
 import ddhx.charset : Charset, ASCII;
@@ -67,7 +68,6 @@ StructureRole structure_classify(ubyte value, immutable(Charset)* set = &ASCII)
 /// field names.
 string structure_role_name(StructureRole role)
 {
-    import std.conv : to;
     return role != StructureRole.none ? role.to!string() : null;
 }
 

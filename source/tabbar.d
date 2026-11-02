@@ -5,6 +5,7 @@ module tabbar;
 import core.stdc.string : strlen;
 import std.format : sformat;
 import std.math : abs;
+
 import ddui;
 import uitext : ui_elide;
 

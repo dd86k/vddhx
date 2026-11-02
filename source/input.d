@@ -4,10 +4,13 @@ module input;
 
 import std.ascii : isAlphaNum;
 import std.string : fromStringz;
+import std.utf : decode, UTFException;
+
 import bindbc.sdl;
+
+import bindings;
 import ddui;
 import hexview;
-import bindings;
 import omnibar : OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_KEY_UP, OMNI_KEY_DOWN, OMNI_KEY_PAGEUP, OMNI_KEY_PAGEDOWN;
 import ui;
@@ -233,8 +236,6 @@ private bool typing(mu_Context* ctx)
 /// The one character in `text`, or 0.
 private dchar textChar(const(char)* text)
 {
-    import std.utf : decode, UTFException;
-
     if (text is null || text[0] == 0)
         return 0;
     const(char)[] s = text.fromStringz;

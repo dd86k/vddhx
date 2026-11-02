@@ -6,7 +6,16 @@
 /// Authors: dd86k <dd@dax.moe>
 module bindings;
 
+import std.algorithm.searching : startsWith;
+import std.algorithm.sorting : sort;
+import std.array : split, join;
+import std.ascii : isAlphaNum, isPrintable, toUpper;
+import std.conv : to;
+import std.uni : toLower;
+import std.utf : decode, UTFException;
+
 import bindbc.sdl;
+
 import ui;
 
 /// Chord modifier bits.
@@ -151,11 +160,7 @@ void bind_defaults()
 /// Returns: False if it names no key.
 bool bind_parse(string spec, out Chord c)
 {
-    import std.ascii : isAlphaNum, isPrintable;
     static import std.ascii;
-    import std.uni : toLower;
-    import std.algorithm.searching : startsWith;
-    import std.utf : decode, UTFException;
 
     // Modifiers in any order, like ddhx. A lone "+" is the key.
     ubyte mods;
@@ -222,8 +227,6 @@ bool bind_parse(string spec, out Chord c)
 /// `c` in rc syntax, e.g. "ctrl+shift+s".
 string bind_name(Chord c)
 {
-    import std.conv : to;
-
     string s;
     if (c.mods & MOD_CTRL)  s ~= "ctrl+";
     if (c.mods & MOD_ALT)   s ~= "alt+";
@@ -238,9 +241,6 @@ string bind_name(Chord c)
 /// `c` for display, e.g. "Ctrl+Shift+S".
 string bind_label(Chord c)
 {
-    import std.ascii : toUpper;
-    import std.conv : to;
-
     string s;
     if (c.mods & MOD_CTRL)  s ~= "Ctrl+";
     if (c.mods & MOD_ALT)   s ~= "Alt+";
@@ -429,8 +429,6 @@ bool bind_changed()
 /// rc lines for the bindings that differ from the defaults, in list order.
 string[] bind_lines()
 {
-    import std.algorithm.sorting : sort;
-
     string[] lines;
     foreach (ref immutable Command cmd; BINDABLE)
     {
@@ -532,8 +530,6 @@ int bind_command_id(string name)
 /// Default chords of `c`. The table is checked by a unittest.
 Chord[] bind_default_chords(ref immutable Command c)
 {
-    import std.array : split;
-
     Chord[] chords;
     foreach (string spec; split(c.keys))
     {
@@ -580,9 +576,6 @@ string bind_quote(string name)
 /// Refresh the key labels: defaults first, then the rest by name.
 void bind_rebuild()
 {
-    import std.algorithm.sorting : sort;
-    import std.array : join;
-
     firstKeys = new string[CMD_COUNT];
     allKeys = new string[CMD_COUNT];
     foreach (ref immutable Command cmd; BINDABLE)

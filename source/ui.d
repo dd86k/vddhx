@@ -3,47 +3,55 @@ module ui;
 
 import core.atomic : atomicLoad, atomicStore;
 import core.time : Duration, MonoTime, msecs;
+import std.algorithm.comparison : min;
+import std.array : Appender, appender;
 import std.ascii : toLower;
-import std.string : fromStringz, toStringz, strip;
+import std.conv : ConvException, to;
+import std.file : rename, exists, remove, isFile, getSize, readText, write;
+import std.format : format, sformat, formattedWrite;
+import std.path : baseName, absolutePath, buildNormalizedPath;
+import std.stdio : File;
+import std.string : fromStringz, toStringz, strip, indexOfAny;
+import std.system : Endian;
+import std.traits : EnumMembers;
+
 import bindbc.sdl;
-import ddlogger;
-import ddui;
-import ddhx.document : DocCaps, FileDocument, IDocument, OFlags;
-import ddhx.editor : IDocumentEditor;
-import ddhx.editor.piecev4 : PieceV4DocumentEditor;
+
 import about : about_open, about_frame;
-import settings : settings_page;
-import preferences : prefs, prefs_save, prefs_theme_name, WriteMode, FONT_SIZE_MAX,
-    FONT_SIZE_MIN;
-import elite : elite_frame, elite_animating;
 import address : Address, address_parse;
-import edit : EditRequest, edit_parse, edit_range;
+import bindings;
 import bookmarks;
 import crumbs;
+import ddhx.charset : Charset, charsets, ASCII;
+import ddhx.document : DocCaps, FileDocument, IDocument, OFlags;
+import ddhx.editor : IDocumentEditor;
+import ddhx.editor.base : PieceInfo;
+import ddhx.editor.piecev4 : PieceV4DocumentEditor;
+import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector;
+import ddlogger;
+import ddui;
 import disks : DISKS_LISTED, Disk, disks_list, disks_size;
+import edit : EditRequest, edit_parse, edit_range;
 import elevate : Elevated, elevate_denied, elevate_poll, elevate_request;
+import elite : elite_frame, elite_animating;
 import hexview;
+import omnibar;
+import patterns : PatternRange;
+import preferences : prefs, prefs_save, prefs_theme_name, WriteMode, FONT_SIZE_MAX,
+    FONT_SIZE_MIN;
+import render : render_font_mono, render_font_spec, render_font_ui, render_set_font,
+    render_set_size;
+import search;
+import settings : settings_page;
+import split;
 import structure;
 import structures.png : PngStructure, png_detect;
+import tabbar;
 import theme : Scheme, theme_alpha, theme_bg, theme_crumbs, theme_edge, theme_fg,
     theme_hex, theme_omni, theme_role, theme_split, theme_stamp, theme_style,
     theme_tabs, theme_use;
 import uitext : ui_elide;
-import omnibar;
-import bindings;
-import search;
-import patterns : PatternRange;
-import split;
-import tabbar;
 import worker : BackgroundWorker, worker_pump, worker_wake;
-import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector;
-import ddhx.charset : Charset, charsets, ASCII;
-import std.system : Endian;
-import render : render_font_mono, render_font_spec, render_font_ui, render_set_font,
-    render_set_size;
-import std.array : Appender, appender;
-import std.format : format, sformat, formattedWrite;
-import std.path : baseName;
 
 // NOTE: Use ref locals once DMD 2.111 is the minimum; until then, pointers.
 
@@ -1775,7 +1783,6 @@ Document* ui_find_document(string path)
 /// resolved, since that needs the filesystem and deleted files would differ.
 string ui_path_key(string path)
 {
-    import std.path : absolutePath, buildNormalizedPath;
     try
         return buildNormalizedPath(absolutePath(path));
     catch (Exception)
@@ -1853,9 +1860,6 @@ bool scratchEmpty(ref Document d)
 /// copy, leaving the edits pending.
 bool saveTo(ref Document d, string path)
 {
-    import std.stdio : File;
-    import std.file : rename, exists, remove, isFile;
-
     if (d.editor is null)
         return false;
 
@@ -1914,9 +1918,6 @@ bool saveTo(ref Document d, string path)
 /// access after an elevated reopen).
 bool saveInPlace(ref Document d)
 {
-    import ddhx.editor.base : PieceInfo;
-    import std.algorithm.comparison : min;
-
     FileDocument src = cast(FileDocument) d.editor.document();
     if (src is null || src.writable() == false)
     {
@@ -3340,7 +3341,6 @@ struct Offset
     /// Write the text to `sink`.
     void toString(scope void delegate(const(char)[]) sink) const
     {
-        import std.format : formattedWrite;
         final switch (base)
         {
         case HexBase.hex: sink.formattedWrite(pad ? "0x%08x" : "0x%x", at); break;
@@ -3422,8 +3422,6 @@ const(char)* ui_columns_label()
 /// Returns: False if invalid, `cols` untouched.
 bool ui_columns_parse(const(char)[] typed, out int cols)
 {
-    import std.conv : ConvException, to;
-
     const(char)[] text = strip(typed);
     if (text.length == 0)
         return false;
@@ -4124,8 +4122,6 @@ __gshared string[] deviceLabels, deviceDetails;
 /// Disk rows, plus the typed text as a path row once it looks like one.
 void ui_device_rows(scope void delegate(string, string, int, bool, bool, string) put)
 {
-    import std.string : indexOfAny;
-
     const(char)[] query = omni_query(omni);
     if (query.indexOfAny(`/\:`) >= 0)
         put(ui_row_text(query), "open this path", cast(int) deviceRows.length, false, true, null);
@@ -4288,7 +4284,6 @@ void ui_charset_rows(scope void delegate(string, string, int, bool, bool, string
 void ui_address_rows(scope void delegate(string, string, int, bool, bool, string) put)
 {
     HexBase current = settingPreview.active ? settingPreview.offsetBase : focusedView.hex.offsetBase;
-    import std.traits : EnumMembers;
     foreach (HexBase base; EnumMembers!HexBase)
     {
         string detail = ui_address_name(base);
@@ -4781,8 +4776,6 @@ Document* ui_marks_target()
 /// Add the bookmarks in file `path` to the dialog's document. All or nothing.
 void ui_marks_load(string path)
 {
-    import std.file : getSize, readText;
-
     Document* d = ui_marks_target();
     if (d is null)
         return;
@@ -4823,8 +4816,6 @@ void ui_marks_load(string path)
 /// Write the dialog's document bookmarks to `path`, replacing it.
 void ui_marks_save(string path)
 {
-    import std.file : write;
-
     Document* d = ui_marks_target();
     if (d is null)
         return;

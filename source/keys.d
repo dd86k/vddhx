@@ -6,13 +6,16 @@ module keys;
 
 version (Screenshots):
 
-import std.file : exists, read, remove, write;
+import std.file : exists, read, remove, write, mkdirRecurse, tempDir;
 import std.path : buildPath;
+import std.stdio : File;
 import std.string : toStringz;
+
 import bindbc.sdl;
+
+import bindings;
 import ddlogger;
 import ddui;
-import bindings;
 import input : input_event;
 import omnibar : OmniMode;
 import render : render_size;
@@ -431,8 +434,6 @@ enum size_t DIFF_B = 0x200;
 /// Write test files to the temp dir, delete old outputs, return their paths.
 Files keys_files()
 {
-    import std.file : mkdirRecurse, tempDir;
-
     string dir = buildPath(tempDir, "vddhx-keys");
     mkdirRecurse(dir);
 
@@ -637,8 +638,6 @@ void keys_write(ref const(Files) f)
 
 void keys_refresh(ref const(Files) f)
 {
-    import std.stdio : File;
-
     ui_open(f.drop);
     frame();
     press(SDLK_HOME, CTRL);

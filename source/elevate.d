@@ -8,6 +8,8 @@ module elevate;
 
 import core.atomic : atomicLoad, atomicStore, cas;
 import core.thread : Thread;
+import std.file : thisExePath;
+
 import ddhx.document : INVALID_OSHANDLE, OSHANDLE;
 import os.error : OSException;
 
@@ -81,7 +83,6 @@ private shared bool running, finished;
 
 private string selfPath()
 {
-    import std.file : thisExePath;
     return thisExePath();
 }
 

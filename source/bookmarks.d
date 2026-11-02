@@ -6,6 +6,15 @@
 /// Authors: dd86k <dd@dax.moe>
 module bookmarks;
 
+import std.algorithm.mutation : SwapStrategy;
+import std.algorithm.sorting : sort;
+import std.array : appender, Appender;
+import std.conv : ConvException, parse;
+import std.format : formattedWrite;
+import std.string : tr, indexOfAny, lineSplitter, strip, stripLeft;
+
+import address : address_number;
+
 /// Represents a bookmark at a position with length, and optional name.
 struct Bookmark
 {
@@ -182,10 +191,6 @@ void bookmark_shift(ref Bookmark[] list, long at, long shift)
 /// A name goes in a third field, which ddhx ignores on load.
 string bookmark_format(const(Bookmark)[] list)
 {
-    import std.array : appender, Appender;
-    import std.format : formattedWrite;
-    import std.string : tr;
-
     Appender!string text = appender!string;
     text.put("# ddhx bookmarks\n");
     foreach (ref const(Bookmark) b; list)
@@ -202,12 +207,6 @@ string bookmark_format(const(Bookmark)[] list)
 /// '#' comments are skipped. Returns null, or the error with its line in `line`.
 string bookmark_parse(const(char)[] text, out Bookmark[] list, out size_t line)
 {
-    import std.algorithm.mutation : SwapStrategy;
-    import std.algorithm.sorting : sort;
-    import std.conv : ConvException, parse;
-    import std.string : indexOfAny, lineSplitter, strip, stripLeft;
-    import address : address_number;
-
     foreach (const(char)[] raw; lineSplitter(text))
     {
         ++line;

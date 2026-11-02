@@ -8,12 +8,12 @@
 // Colors are copied from hex_classify and ui.d
 module mkicon;
 
-import std.file : write, mkdirRecurse;
+import std.bitmanip : nativeToBigEndian, nativeToLittleEndian;
 import std.conv : text;
+import std.file : write, mkdirRecurse;
 import std.format : format;
 import std.stdio : writeln;
 import std.zlib : compress, crc32;
-import std.bitmanip : nativeToBigEndian, nativeToLittleEndian;
 
 private: // Shuts up dscanner on a lot of things. This is just a script
 

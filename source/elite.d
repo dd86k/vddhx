@@ -9,7 +9,9 @@ module elite;
 
 import core.time : MonoTime;
 import std.math : sin, cos;
+
 import bindbc.sdl;
+
 import ddui;
 
 /// Custom ddui command for the ship panel. Pushed by elite_frame, dispatched by

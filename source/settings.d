@@ -6,16 +6,20 @@
 /// Authors: dd86k <dd@dax.moe>
 module settings;
 
+import core.stdc.string : strlen;
+import std.format : sformat;
+import std.string : strip, toStringz;
 import std.system : Endian;
-import ddui;
-import ddhx.charset : Charset, charsets;
-import preferences;
+
 import bindings;
+import ddhx.charset : Charset, charsets;
+import ddui;
+import hexview : HexBase;
+import preferences;
 import theme : SCHEMES, SCHEME_UI, Scheme, SchemeInfo, theme_bg, theme_changed,
     theme_copy, theme_current, theme_editable, theme_fg, theme_file, theme_list,
     theme_overridden, theme_parent, theme_reset, theme_reset_all, theme_save,
     theme_scan, theme_set, theme_spec;
-import hexview : HexBase;
 import ui : ui_font_dialog, ui_fonts, ui_system_dark, ui_theme_apply, ui_zoom;
 
 private enum int CATEGORY_W = 120;
@@ -88,7 +92,6 @@ bool settings_category(mu_Context* ctx, string name, bool selected)
 
 void settings_note(Args...)(mu_Context* ctx, string fmt, Args args)
 {
-    import std.format : sformat;
     char[512] buf = void;
     const(char)[] text = sformat(buf, fmt, args);
     static immutable int[1] full = [ -1 ];
@@ -114,8 +117,6 @@ struct ValueBox
 /// Text box for one saved key, true when a valid value was committed to prefs.
 bool settings_value(mu_Context* ctx, ref ValueBox box, string key)
 {
-    import core.stdc.string : strlen;
-
     mu_Id id = mu_get_id(ctx, key.ptr, key.length);
     if (ctx.focus != id && box.editing == false)
     {
@@ -147,8 +148,6 @@ struct FontBox
 /// Font row for the UI or hex panel (`mono`): text box, Browse, Clear.
 void settings_font(mu_Context* ctx, ref FontBox box, string label, bool mono)
 {
-    import core.stdc.string : strlen;
-
     static immutable int[4] row = [ LABEL_W, FIELD_W, BROWSE_W, CLEAR_W ];
     mu_layout_row(ctx, 4, row.ptr, 0);
     mu_label(ctx, label);
@@ -168,7 +167,6 @@ void settings_font(mu_Context* ctx, ref FontBox box, string label, bool mono)
     if ((res & MU_RES_SUBMIT) || (box.editing && ctx.focus != id))
     {
         box.editing = false;
-        import std.string : strip;
         *spec = strip(box.buf[0 .. strlen(box.buf.ptr)]).idup;
         ui_fonts(true);
     }
@@ -346,8 +344,6 @@ struct ColorBox
 /// themes are shown read-only with Save Copy, user themes are edited in place.
 void settings_colors(mu_Context* ctx)
 {
-    import std.format : sformat;
-
     __gshared ColorBox[SCHEMES.length] boxes;
 
     bool editable = theme_editable();
@@ -421,9 +417,6 @@ void settings_colors(mu_Context* ctx)
 /// .vddhxrc then selects.
 void settings_copy(mu_Context* ctx)
 {
-    import core.stdc.string : strlen;
-    import std.string : strip;
-
     __gshared char[64] name = 0;
     __gshared string error;
 
@@ -464,8 +457,6 @@ struct ThemeNames
 string settings_theme(mu_Context* ctx, ref ThemeNames names, ref int index,
     string current, bool withAuto)
 {
-    import std.string : toStringz;
-
     const(string)[] themes = theme_list();
     if (themes !is names.shown || names.list.length == 0)
     {
@@ -500,9 +491,6 @@ void settings_swatch(mu_Context* ctx, mu_Color c)
 /// Text box with scheme `s`'s colors. Bad input is dropped.
 void settings_scheme(mu_Context* ctx, ref ColorBox box, Scheme s)
 {
-    import core.stdc.string : strlen;
-    import std.string : strip;
-
     mu_Id id = mu_get_id(ctx, &box, box.sizeof);
     if (ctx.focus != id && box.editing == false)
     {

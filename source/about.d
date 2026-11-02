@@ -2,16 +2,21 @@
 /// Authors: dd86k <dd@dax.moe>
 module about;
 
+import std.algorithm.searching : canFind;
+import std.array : Appender;
+import std.ascii : isAlphaNum;
 import std.format : format;
 import std.math : sqrt;
-import std.string : toStringz;
-import bindbc.sdl : SDL_OpenURL, SDL_GetVersion,
-    SDL_VERSIONNUM_MAJOR, SDL_VERSIONNUM_MINOR, SDL_VERSIONNUM_MICRO;
+import std.string : toStringz, fromStringz;
+
+import bindbc.sdl : SDL_OpenURL, SDL_GetVersion, SDL_VERSIONNUM_MAJOR,
+    SDL_VERSIONNUM_MINOR, SDL_VERSIONNUM_MICRO, SDL_GetError;
+
 import ddlogger;
 import ddui;
 import elite : elite_open;
-import logging : logging_folder;
 import hexview : hex_classify;
+import logging : logging_folder;
 import theme : Scheme, theme_fg;
 
 /// Application version. Lives here only; dub.sdl has none (dub uses git tags).
@@ -68,10 +73,6 @@ private string logsShown()
 /// `path` as a file:// URL for SDL_OpenURL.
 private string fileUrl(string path)
 {
-    import std.algorithm.searching : canFind;
-    import std.array : Appender;
-    import std.ascii : isAlphaNum;
-
     Appender!string url;
     url.put("file://");
     version (Windows)
@@ -155,8 +156,6 @@ void about_frame(mu_Context* ctx, int width, int height)
     {
         if (SDL_OpenURL(HOMEPAGE.toStringz) == false)
         {
-            import std.string : fromStringz;
-            import bindbc.sdl : SDL_GetError;
             logError("SDL_OpenURL: %s", SDL_GetError().fromStringz);
         }
     }
@@ -171,8 +170,6 @@ void about_frame(mu_Context* ctx, int width, int height)
     {
         if (about_link(ctx, logsShown()) && SDL_OpenURL(fileUrl(folder).toStringz) == false)
         {
-            import std.string : fromStringz;
-            import bindbc.sdl : SDL_GetError;
             logError("SDL_OpenURL: %s", SDL_GetError().fromStringz);
         }
     }

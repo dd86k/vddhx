@@ -9,9 +9,11 @@ import core.stdc.string : strlen;
 import std.file : exists, isFile;
 import std.format : format;
 import std.math : ceil, lround;
-import std.path : buildPath;
+import std.path : buildPath, expandTilde;
 import std.string : fromStringz, toStringz;
+
 import bindbc.sdl; // re-exports TTF_* in the static config
+
 import ddlogger;
 import ddui;
 import elite : MU_COMMAND_SHIP, elite_draw;
@@ -457,8 +459,6 @@ TTF_Font* openDefault(bool mono)
 /// Face from a font setting: file path, then font name. Null if none.
 TTF_Font* openCustom(string role, string spec)
 {
-    import std.path : expandTilde;
-
     string path = expandTilde(spec);
     if (TTF_Font* f = openPath(role, path, 0))
         return f;
