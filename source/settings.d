@@ -12,7 +12,9 @@ import ddhx.charset : Charset, charsets;
 import preferences;
 import bindings;
 import theme : SCHEMES, SCHEME_UI, Scheme, SchemeInfo, theme_bg, theme_changed,
-    theme_fg, theme_reset, theme_reset_all, theme_set, theme_spec;
+    theme_copy, theme_current, theme_editable, theme_fg, theme_file, theme_list,
+    theme_overridden, theme_parent, theme_reset, theme_reset_all, theme_save,
+    theme_scan, theme_set, theme_spec, theme_use;
 import hexview : HexBase;
 import ui : ui_font_dialog, ui_fonts, ui_zoom;
 
@@ -45,7 +47,10 @@ void settings_page(mu_Context* ctx)
     mu_layout_row(ctx, 1, full.ptr, 0);
     foreach (size_t i, string name; CATEGORY_NAMES)
         if (settings_category(ctx, name, category == i))
+        {
             category = cast(Category) i;
+            theme_scan(); // theme files may have come or gone
+        }
     ctx.style.spacing = spacing;
     mu_end_panel(ctx);
 
@@ -268,10 +273,18 @@ void settings_defaults(mu_Context* ctx)
 void settings_appearance(mu_Context* ctx)
 {
     __gshared int minimap, crumbs;
+    __gshared int themeIndex;
     __gshared ValueBox fontsize;
     __gshared FontBox font, monofont;
 
     bool changed;
+
+    settings_label(ctx, "Theme");
+    if (settings_theme(ctx, themeIndex) && theme_use(theme_list()[themeIndex]))
+    {
+        prefs.theme = theme_list()[themeIndex];
+        changed = true;
+    }
 
     settings_label(ctx, "Text size");
     if (settings_value(ctx, fontsize, "fontsize"))
@@ -309,25 +322,43 @@ struct ColorBox
     char[40] buf;
     bool editing;
 }
-
-/// Colors page: each scheme's swatches, its colors in rc syntax, Reset for
-/// its defaults.
+/// Colors page: each scheme's swatches and colors in rc syntax. Built-in
+/// themes are shown read-only with Save Copy, user themes are edited in place.
 void settings_colors(mu_Context* ctx)
 {
+    import std.format : sformat;
+
     __gshared ColorBox[SCHEMES.length] boxes;
 
-    settings_note(ctx, "Same as `color SCHEME FG:BG`. A name (red, brightblue...) or #rrggbb.");
-    settings_note(ctx, "A side left empty takes its default. "
-        ~ "Swatches show the foreground and background.");
-
-    static immutable int[1] one = [ BROWSE_W ];
-    mu_layout_row(ctx, 1, one.ptr, 0);
-    if (mu_button(ctx, "Reset All"))
+    bool editable = theme_editable();
+    if (editable)
     {
-        foreach (ref ColorBox box; boxes)
-            box.editing = false;
-        theme_reset_all();
+        settings_note(ctx, "Theme %s, based on %s. Same syntax as `color SCHEME FG:BG`.",
+            theme_current(), theme_parent());
+        settings_note(ctx, "A name (red, brightblue...) or #rrggbb. "
+            ~ "A side left empty takes the base theme's.");
+        static immutable int[1] one = [ BROWSE_W ];
+        mu_layout_row(ctx, 1, one.ptr, 0);
+        if (mu_button(ctx, "Reset All"))
+        {
+            foreach (ref ColorBox box; boxes)
+                box.editing = false;
+            theme_reset_all();
+        }
     }
+    else
+    {
+        settings_note(ctx, "Theme %s is built in and can't be edited. Save a copy to edit it.",
+            theme_current());
+        settings_copy(ctx);
+    }
+
+    bool overrides;
+    foreach (size_t i; 0 .. SCHEMES.length)
+        overrides = overrides || theme_overridden(cast(Scheme) i);
+    if (overrides)
+        settings_note(ctx, "* Set by a color line in %s, which wins over the theme.",
+            prefs_path() ? prefs_path() : ".vddhxrc");
 
     static immutable int[5] row = [ LABEL_W, SWATCH_W, SWATCH_W, FIELD_W, CLEAR_W ];
     foreach (size_t i, ref immutable SchemeInfo info; SCHEMES)
@@ -336,9 +367,15 @@ void settings_colors(mu_Context* ctx)
         if (i == 0 || s == SCHEME_UI)
             settings_note(ctx, s == SCHEME_UI ? "UI" : "Hex View");
         mu_layout_row(ctx, 5, row.ptr, 0);
-        mu_label(ctx, info.label);
+        char[48] label = void;
+        mu_label(ctx, cast(string) sformat(label, theme_overridden(s) ? "%s *" : "%s", info.label));
         settings_swatch(ctx, theme_fg(s));
         settings_swatch(ctx, theme_bg(s));
+        if (editable == false)
+        {
+            mu_label(ctx, theme_spec(s));
+            continue;
+        }
         mu_push_id(ctx, info.name.ptr, cast(int) info.name.length);
         settings_scheme(ctx, boxes[i], s);
         if (mu_button(ctx, "Reset"))
@@ -349,7 +386,65 @@ void settings_colors(mu_Context* ctx)
         mu_pop_id(ctx);
     }
 
-    settings_saved(ctx, theme_changed());
+    __gshared bool failed;
+    if (theme_changed())
+        failed = theme_save() == false;
+    if (editable == false)
+        return;
+    if (failed)
+        settings_note(ctx, "Could not save to %s", theme_file());
+    else
+        settings_note(ctx, "Saved to %s", theme_file());
+}
+
+/// Name box and Save Copy button: the theme in use as a new user theme, which
+/// .vddhxrc then selects.
+void settings_copy(mu_Context* ctx)
+{
+    import core.stdc.string : strlen;
+    import std.string : strip;
+
+    __gshared char[64] name = 0;
+    __gshared string error;
+
+    static immutable int[2] row = [ FIELD_W, BROWSE_W ];
+    mu_layout_row(ctx, 2, row.ptr, 0);
+    bool submit = (mu_textbox(ctx, name.ptr, cast(int) name.length) & MU_RES_SUBMIT) != 0;
+    if (mu_button(ctx, "Save Copy") || submit)
+    {
+        string text = strip(name[0 .. strlen(name.ptr)]).idup;
+        error = theme_copy(text);
+        if (error is null)
+        {
+            prefs.theme = text;
+            prefs_save();
+            name[] = 0;
+        }
+    }
+    if (error.length)
+        settings_note(ctx, "%s", error);
+}
+
+/// Theme dropdown over theme_list, true on change.
+bool settings_theme(mu_Context* ctx, ref int index)
+{
+    import std.string : toStringz;
+
+    __gshared const(string)[] shown;
+    __gshared const(char)*[] names;
+    const(string)[] list = theme_list();
+    if (list !is shown)
+    {
+        shown = list;
+        names.length = list.length;
+        foreach (size_t i, string n; list)
+            names[i] = toStringz(n);
+    }
+
+    foreach (size_t i, string n; list)
+        if (n == theme_current())
+            index = cast(int) i;
+    return (mu_dropdown(ctx, &index, names.ptr, cast(int) names.length) & MU_RES_CHANGE) != 0;
 }
 
 /// Filled square of color `c` in the next cell, nothing if `c` is unused.

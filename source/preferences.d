@@ -11,7 +11,7 @@ import ddlogger;
 import ddhx.charset : Charset, ASCII, findCharset;
 import hexview : HEX_COLUMNS_MAX, HexBase;
 import bindings : bind_defaults, bind_edited, bind_key, bind_lines, bind_valid, unbind_key;
-import theme : theme_color, theme_defaults, theme_edited, theme_lines;
+import theme : theme_color, theme_defaults, theme_exists, theme_use;
 
 /// Mode new tabs start in. Read-only only sets the tab's starting state.
 enum WriteMode { overwrite, insert, readonly }
@@ -36,6 +36,7 @@ struct Prefs
     int fontsize = FONT_SIZE;   /// Text size in points.
     string font;        /// UI font file or name, empty for the default.
     string monofont;    /// Hex panel font file or name, empty for the default.
+    string theme = "dark";    /// Theme name, built-in or a user file.
 }
 
 /// Ditto.
@@ -44,7 +45,7 @@ __gshared Prefs prefs;
 /// All keys, in the order a new file lists them.
 immutable string[] PREFS_KEYS = [
     "columns", "charset", "endian", "writemode", "address", "minimap",
-    "breadcrumbs", "fontsize", "font", "monofont",
+    "breadcrumbs", "fontsize", "font", "monofont", "theme",
 ];
 
 private enum string APPNAME = "vddhx";
@@ -85,6 +86,8 @@ void prefs_load()
 
     lines = text.lineSplitter.array;
     prefs_parse(prefs, lines, path);
+    if (theme_use(prefs.theme) == false)
+        logWarn("%s: theme %s could not be read", path, prefs.theme);
 }
 
 /// Write `prefs` back. Errors are logged, not thrown.
@@ -191,6 +194,11 @@ bool prefs_set(ref Prefs p, string key, string value)
         return true;
     case "font":        p.font = value;     return true;
     case "monofont":    p.monofont = value; return true;
+    case "theme":
+        if (theme_exists(value) == false)
+            return false;
+        p.theme = value;
+        return true;
     default:            return false;
     }
 }
@@ -212,6 +220,7 @@ string prefs_get(ref const(Prefs) p, string key)
     case "fontsize":    return to!string(p.fontsize);
     case "font":        return prefs_quote(p.font);
     case "monofont":    return prefs_quote(p.monofont);
+    case "theme":       return p.theme;
     default:            assert(false, key);
     }
 }
@@ -302,7 +311,7 @@ void prefs_parse(ref Prefs p, const(string)[] text, string path)
         }
         if (key == "color")
         {
-            if (prefs_color(line, true) == false)
+            if (prefs_color(line) == false)
                 logWarn("%s:%u: ignored: %s", path, i + 1, line);
             continue;
         }
@@ -312,14 +321,12 @@ void prefs_parse(ref Prefs p, const(string)[] text, string path)
 }
 
 // Rewrites each key's last line (the effective one). Missing keys are added
-// only when non-default, so an untouched file stays empty. Bindings and colors
-// edited in Settings replace their lines.
+// only when non-default, so an untouched file stays empty. Bindings edited in
+// Settings replace their lines. Colors aren't written: Settings edits themes.
 void prefs_merge(ref string[] text, ref const(Prefs) p)
 {
     if (bind_edited())
         prefs_replace(text, bind_lines(), (string l) => prefs_bind(l, false));
-    if (theme_edited())
-        prefs_replace(text, theme_lines(), (string l) => prefs_color(l, false));
 
     static immutable Prefs defaults;
 
@@ -362,8 +369,8 @@ bool prefs_bind(string line, bool apply)
     return false;
 }
 
-// Apply rc line `line` (color) if `apply`, else only check it.
-bool prefs_color(string line, bool apply)
+// Apply rc line `line` (color), false if bad.
+bool prefs_color(string line)
 {
     import std.string : strip;
     import utils : Argument, arguments;
@@ -374,7 +381,7 @@ bool prefs_color(string line, bool apply)
     catch (Exception)
         return false;
     if (args.length == 3 && args[0].text == "color")
-        return theme_color(args[1].text, args[2].text, apply);
+        return theme_color(args[1].text, args[2].text, true);
     return false;
 }
 
@@ -492,7 +499,8 @@ unittest
 
 unittest
 {
-    import theme : Scheme, SCHEMES, theme_defaults, theme_fg, theme_reset;
+    import ddui : mu_Color;
+    import theme : Scheme, theme_current, theme_defaults, theme_fg;
     scope (exit) theme_defaults();
 
     Prefs p;
@@ -503,14 +511,11 @@ unittest
         "color zero red",
     ];
     prefs_parse(p, text, "test");
-    assert(theme_fg(Scheme.zero) != SCHEMES[Scheme.zero].fg);
+    assert(theme_fg(Scheme.zero) == mu_Color(205, 49, 49, 255));
 
-    // Settings edits rewrite the valid lines where the first one was.
-    theme_reset(Scheme.zero);
-    prefs_replace(text, [ "color cursor white" ], (string l) => prefs_color(l, false));
-    assert(text == [
-        "color cursor white",
-        "# mine",
-        "color selection blue",
-    ]);
+    // Themes: built-in names only here, unknown ones ignored.
+    assert(prefs_set(p, "theme", "light"));
+    assert(p.theme == "light");
+    assert(theme_current() == "dark"); // applied by prefs_load
+    assert(prefs_set(p, "theme", "no-such-theme") == false);
 }

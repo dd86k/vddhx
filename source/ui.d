@@ -25,7 +25,8 @@ import hexview;
 import structure;
 import structures.png : PngStructure, png_detect;
 import theme : Scheme, theme_alpha, theme_bg, theme_crumbs, theme_edge, theme_fg,
-    theme_hex, theme_omni, theme_role, theme_split, theme_style, theme_tabs;
+    theme_hex, theme_omni, theme_role, theme_split, theme_stamp, theme_style,
+    theme_tabs;
 import uitext : ui_elide;
 import omnibar;
 import bindings;
@@ -5503,6 +5504,7 @@ void ui_pane(mu_Context* ctx, Pane* p, ref TabRequest req)
 
     v.hex.minimap = prefs.minimap;
     v.hex.colors = theme_hex();
+    v.hex.colorStamp = theme_stamp();
 
     // Charset is per document; rebind each frame so moved tabs follow.
     v.hex.textFn    = &ui_charset_text;

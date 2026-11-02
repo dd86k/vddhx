@@ -22,7 +22,7 @@ import hexview : HexBase, HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, 
     HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
 import preferences : prefs;
 import bindings : bind_capture;
-import theme : theme_color, theme_defaults;
+import theme : theme_color, theme_defaults, theme_use;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
 import render;
@@ -261,6 +261,16 @@ int screenshot_run(string[] args)
         return false;
     }
 
+    // Same state under the light theme, then back to dark.
+    void light(string name)
+    {
+        theme_use("light");
+        frame(); frame();
+        shot(name);
+        theme_defaults();
+        frame();
+    }
+
     // Readme pose, from the repo's files (run from the repo root). Extra tabs go
     // in the left pane since the omnibar covers the right pane's strip. Focus
     // returns to the left pane without a click, which would drop the selection.
@@ -308,6 +318,7 @@ int screenshot_run(string[] args)
     ui_open("assets/icon/vddhx-256.png");
     frame();
     shot("structure-png.bmp");
+    light("structure-png-light.bmp");
 
     // Hovering a byte shows its field. Needs real time (tooltip delay).
     {
@@ -328,6 +339,7 @@ int screenshot_run(string[] args)
     ui_omni_toggle(OMNI_STRUCTURE);
     frame(); frame();
     shot("omni-struct.bmp");
+    light("omni-struct-light.bmp");
 
     // The wheel scrolls the view, not the selection; an arrow key scrolls back to
     // the selection.
@@ -425,6 +437,7 @@ int screenshot_run(string[] args)
     frame();
     shot("colors.bmp");
     theme_defaults();
+    light("light.bmp");
     // Text lane copy; non-printables become dots.
     ui_copy_text();
     frame();
@@ -499,7 +512,8 @@ int screenshot_run(string[] args)
         switch (page)
         {
         case "Appearance": shot("settings-appearance.bmp"); break;
-        case "Colors":    shot("settings-colors.bmp"); break;
+        case "Colors":    shot("settings-colors.bmp");
+                           light("settings-colors-light.bmp"); break;
         case "Keys":
             shot("settings-keys.bmp");
             // First row waits for a key.
@@ -1070,6 +1084,7 @@ int screenshot_run(string[] args)
     tap(MU_KEY_RETURN);
     frame();
     shot("mark-named.bmp");
+    light("mark-named-light.bmp");
     ui_omni_toggle(OMNI_BOOKMARK);
     frame(); frame();
     shot("omni-marks-named.bmp");
@@ -1172,6 +1187,7 @@ int screenshot_run(string[] args)
     ui_compare_with(fix.diffB);
     frame();
     shot("diff.bmp");
+    light("diff-light.bmp");
 
     // Scrolling one side scrolls the other; offsets must still line up.
     mu_input_mousemove(&ctx, 300, 300); // over diff-b.bin's pane

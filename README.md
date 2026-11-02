@@ -74,13 +74,20 @@ bind ctrl+k find-next
 unbind ctrl+b
 ```
 
-Colors use ddhx's `color SCHEME FG:BG` lines, also editable in Settings > Colors.
-Values are ddhx's names (`red`, `brightblue`...) or `#rrggbb`:
+Colors come from a theme: `theme dark` (default), `theme light`, or a user theme
+file. Settings > Appearance picks one. Settings > Colors edits user themes, and
+saves a copy of a built-in one to start from. A theme file lives in the config
+folder as `themes/NAME.theme` (`~/.config/vddhx/themes/` on Linux) and holds
+its base theme plus ddhx's `color SCHEME FG:BG` lines:
 ```
+base light
 color zero gray
 color bookmark black:#d0a020
 color selection :#304060
 ```
+Values are ddhx's names (`red`, `brightblue`...) or `#rrggbb`. `color` lines in
+`.vddhxrc` still work, as in ddhx, and win over any theme.
+
 Schemes are ddhx's (`normal`, `zero`, `cursor`, `mirror`, `selection`, `bookmark`,
 `diff-changed`, `diff-missing`) plus the byte classes `whitespace`, `control` and
 `unmapped`. `normal` is printable bytes. The offset column, header, scrollbar,

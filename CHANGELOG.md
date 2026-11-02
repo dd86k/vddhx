@@ -39,6 +39,9 @@ Rules:
   bindable too (`bind h left`).
 - **Settings**: Colors. `color SCHEME FG:BG` in `.vddhxrc`, with ddhx's scheme
   and color names plus `#rrggbb`, or Settings > Colors.
+- **Themes**: built-in `dark` and `light`, plus user themes (`themes/NAME.theme`:
+  a `base` theme and `color` lines). `theme NAME` in `.vddhxrc`, or Settings >
+  Appearance. Settings > Colors edits user themes and copies built-in ones.
 
 ### Changed
 

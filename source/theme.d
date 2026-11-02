@@ -5,6 +5,7 @@
 /// Authors: dd86k <dd@dax.moe>
 module theme;
 
+import ddlogger;
 import ddui;
 
 import structure;
@@ -351,83 +352,145 @@ bool theme_color(string scheme, string spec, bool apply)
     if (theme_parse(cast(Scheme) i, spec, c) == false)
         return false;
     if (apply)
+    {
         custom[i] = c;
+        ++stamp;
+    }
     return true;
 }
 
-/// Set `s` from Settings, `spec` in rc syntax. Sides matching the theme are
-/// left to follow it. False if `spec` is bad.
+/// Whether a color line overrides `s`, so theme edits don't show.
+bool theme_overridden(Scheme s)
+{
+    return custom[s][0].a || custom[s][1].a;
+}
+
+/// Set `s` in the theme being edited, `spec` in rc syntax. An empty side
+/// takes the base theme's. False if `spec` is bad or the theme is built-in.
 bool theme_set(Scheme s, string spec)
 {
     mu_Color[2] c;
-    if (theme_parse(s, spec, c) == false)
+    if (editable == false || theme_parse(s, spec, c) == false)
         return false;
     foreach (size_t side; 0 .. 2)
-        if (c[side] == base[s][side])
-            c[side] = mu_Color.init;
-    custom[s] = c;
-    theme_edit();
+        base[s][side] = c[side].a ? c[side] : THEMES[parent].colors[s][side];
+    changed = true;
+    ++stamp;
     return true;
 }
 
-/// Colors of `s` in rc syntax, theme sides included.
+/// Colors of `s` as drawn, in rc syntax with both sides.
 string theme_spec(Scheme s)
 {
-    return theme_text(s, true);
+    string fg = SCHEMES[s].fg.a ? theme_name(theme_fg(s)) : null;
+    string bg = SCHEMES[s].bg.a ? theme_name(theme_bg(s)) : null;
+    return bg.length ? fg ~ ":" ~ bg : fg;
 }
 
-/// Drop the overrides of `s`, back to the theme's colors.
+/// Give `s` the base theme's colors, in the theme being edited.
 void theme_reset(Scheme s)
 {
-    custom[s] = [ mu_Color.init, mu_Color.init ];
-    theme_edit();
+    if (editable == false)
+        return;
+    base[s] = THEMES[parent].colors[s];
+    changed = true;
+    ++stamp;
 }
 
-/// Drop every override. The theme stays.
+/// Give every scheme the base theme's colors, in the theme being edited.
 void theme_reset_all()
 {
-    custom = custom.init;
-    theme_edit();
+    if (editable == false)
+        return;
+    base = THEMES[parent].colors;
+    changed = true;
+    ++stamp;
 }
 
 /// Back to the default theme without overrides, nothing edited.
 void theme_defaults()
 {
-    base = THEMES[0].colors;
-    current = 0;
+    theme_builtin(0);
     custom = custom.init;
-    edited = changed = false;
+    changed = false;
+    ++stamp;
 }
 
-/// Switch to built-in theme `name`, keeping overrides. False if unknown.
+/// Switch to theme `name`, built-in or a user file, keeping overrides. A bad
+/// file line is logged and skipped. False if there is no such theme.
 bool theme_use(string name)
 {
-    foreach (size_t i, ref immutable ThemeInfo t; THEMES)
+    import std.file : readText;
+    import std.string : lineSplitter;
+    import std.array : array;
+
+    ptrdiff_t i = theme_find(name);
+    if (i >= 0)
     {
-        if (t.name == name)
-        {
-            base = t.colors;
-            current = i;
-            return true;
-        }
+        theme_builtin(i);
+        return true;
     }
-    return false;
+
+    string path = theme_path(name);
+    if (path is null)
+        return false;
+    string text;
+    try
+        text = readText(path);
+    catch (Exception)
+        return false;
+
+    fileLines = text.lineSplitter.array;
+    theme_read(fileLines, path, base, parent);
+    active = name;
+    editable = true;
+    changed = false;
+    ++stamp;
+    return true;
+}
+
+/// Whether theme `name` exists, built-in or as a user file.
+bool theme_exists(string name)
+{
+    import std.file : exists;
+
+    if (theme_find(name) >= 0)
+        return true;
+    string path = theme_path(name);
+    return path !is null && exists(path);
 }
 
 /// Name of the theme in use.
 string theme_current()
 {
-    return THEMES[current].name;
+    return active;
 }
 
-/// Whether colors were edited (Settings) since loading, so the rc's color
-/// lines need rewriting.
-bool theme_edited()
+/// Name of the built-in theme the one in use starts from.
+string theme_parent()
 {
-    return edited;
+    return THEMES[parent].name;
 }
 
-/// Whether colors were edited since the last call. For Settings to save.
+/// Whether the theme in use is a user file, which Settings may edit.
+bool theme_editable()
+{
+    return editable;
+}
+
+/// File of the theme in use, null for a built-in one.
+string theme_file()
+{
+    return editable ? theme_path(active) : null;
+}
+
+/// Changes whenever any color does.
+uint theme_stamp()
+{
+    return stamp;
+}
+
+/// Whether the edited theme changed since the last call. For Settings to save.
 bool theme_changed()
 {
     bool was = changed;
@@ -435,17 +498,73 @@ bool theme_changed()
     return was;
 }
 
-/// rc lines for the overrides, in Scheme order.
-string[] theme_lines()
+/// Write the edited theme to its file, in place: comments and bad lines stay.
+/// Errors are logged. Returns: False if not written.
+bool theme_save()
 {
-    string[] lines;
-    foreach (size_t i, ref immutable SchemeInfo info; SCHEMES)
+    string path = theme_file();
+    if (path is null)
+        return false;
+    fileLines = theme_merge(fileLines, theme_lines());
+    return theme_write(path, fileLines);
+}
+
+/// Save the theme in use as user theme `name` and switch to it. Overrides
+/// stay out of the copy. Returns: Null, or why it failed.
+string theme_copy(string name)
+{
+    if (theme_name_ok(name) == false)
+        return "Use letters, digits, - and _ only.";
+    if (theme_exists(name))
+        return "A theme by that name exists.";
+    string path = theme_path(name);
+    if (path is null)
+        return "No config folder found.";
+
+    string[] text = editable ? theme_merge(fileLines, theme_lines()) : theme_merge(null, null);
+    if (theme_write(path, text) == false)
+        return "Could not write the file.";
+    fileLines = text;
+    active = name;
+    editable = true;
+    theme_scan();
+    return null;
+}
+
+/// Built-in theme names, then user themes found by the last theme_scan.
+const(string)[] theme_list()
+{
+    if (scanned == false)
+        theme_scan();
+    return listed;
+}
+
+/// Look for user theme files again.
+void theme_scan()
+{
+    import std.algorithm.sorting : sort;
+    import std.file : SpanMode, dirEntries, exists, isDir;
+    import std.path : baseName, stripExtension;
+
+    scanned = true;
+    string[] users;
+    string dir = theme_dir();
+    try
     {
-        string text = theme_text(cast(Scheme) i, false);
-        if (text.length)
-            lines ~= "color " ~ info.name ~ " " ~ text;
+        if (dir !is null && exists(dir) && isDir(dir))
+        {
+            foreach (string path; dirEntries(dir, "*" ~ THEME_EXT, SpanMode.shallow))
+            {
+                string name = stripExtension(baseName(path));
+                if (theme_name_ok(name) && theme_find(name) < 0)
+                    users ~= name;
+            }
+        }
     }
-    return lines;
+    catch (Exception e)
+        logWarn("%s: %s", dir, e.msg);
+    sort(users);
+    listed = theme_names() ~ users;
 }
 
 /// Built-in theme: name and the colors of every scheme.
@@ -459,9 +578,13 @@ struct ThemeInfo
 /// Built-in themes. The first is the default.
 immutable ThemeInfo[] THEMES = [
     ThemeInfo("dark", theme_initial()),
+    ThemeInfo("light", theme_table(LIGHT)),
 ];
 
 private:
+
+/// User theme file extension.
+enum string THEME_EXT = ".theme";
 
 /// Named color, ddhx's terminal names.
 struct NamedColor
@@ -490,15 +613,105 @@ immutable NamedColor[] PALETTE = [
     NamedColor("white",         mu_Color(255, 255, 255, 255)),
 ];
 
+/// One scheme's colors in a built-in theme table.
+struct ThemeEntry
+{
+    Scheme scheme;  /// Scheme set.
+    mu_Color fg;    /// Foreground, unset if SCHEMES has none.
+    mu_Color bg;    /// Background, ditto.
+}
+
+/// Opaque color.
+mu_Color rgb(ubyte r, ubyte g, ubyte b)
+{
+    return mu_Color(r, g, b, 255);
+}
+
+/// Light theme. Every scheme is set: dark colors would vanish on white.
+immutable ThemeEntry[] LIGHT = [
+    ThemeEntry(Scheme.normal,       rgb( 40,  40,  40)),
+    ThemeEntry(Scheme.zero,         rgb(175, 175, 185)),
+    ThemeEntry(Scheme.whitespace,   rgb( 30, 110, 160)),
+    ThemeEntry(Scheme.control,      rgb(175,  85,  30)),
+    ThemeEntry(Scheme.unmapped,     rgb( 60, 130,  50)),
+    ThemeEntry(Scheme.cursor,       rgb( 30, 100, 210)),
+    ThemeEntry(Scheme.mirror,       rgb( 30, 100, 210)),
+    ThemeEntry(Scheme.selection,    mu_Color.init, rgb(180, 210, 250)),
+    ThemeEntry(Scheme.bookmark,     rgb( 40,  30,   0), rgb(250, 220, 150)),
+    ThemeEntry(Scheme.diff_changed, rgb(205,  30,  30)),
+    ThemeEntry(Scheme.diff_missing, rgb( 20, 140,  50)),
+    ThemeEntry(Scheme.offset,       rgb(120, 120, 130)),
+    ThemeEntry(Scheme.header,       rgb(130, 130, 140)),
+    ThemeEntry(Scheme.scrollbar,    rgb(160, 170, 190), rgb(235, 235, 240)),
+    ThemeEntry(Scheme.minimap_view, rgb( 60, 100, 170), rgb(120, 150, 210)),
+
+    ThemeEntry(Scheme.structure_magic,      rgb(170, 120,   0)),
+    ThemeEntry(Scheme.structure_length,     rgb( 20, 120, 170)),
+    ThemeEntry(Scheme.structure_offset,     rgb( 60,  80, 200)),
+    ThemeEntry(Scheme.structure_count,      rgb(  0, 130, 110)),
+    ThemeEntry(Scheme.structure_flags,      rgb(150,  60, 170)),
+    ThemeEntry(Scheme.structure_scalar,     rgb( 70,  80, 100)),
+    ThemeEntry(Scheme.structure_text,       rgb( 60, 130,  40)),
+    ThemeEntry(Scheme.structure_timestamp,  rgb(190,  90,  30)),
+    ThemeEntry(Scheme.structure_checksum,   rgb(100, 100, 130)),
+    ThemeEntry(Scheme.structure_reserved,   rgb(150, 150, 160)),
+    ThemeEntry(Scheme.structure_data,       rgb( 90,  95, 110)),
+    ThemeEntry(Scheme.structure_edge,        rgb(100, 104, 116)),
+    ThemeEntry(Scheme.structure_edge_nested, rgb(150, 152, 162)),
+
+    ThemeEntry(Scheme.ui_canvas,          mu_Color.init, rgb(255, 255, 255)),
+    ThemeEntry(Scheme.ui_window,          rgb( 30,  30,  30), rgb(243, 243, 243)),
+    ThemeEntry(Scheme.ui_title,           rgb( 30,  30,  30), rgb(221, 221, 221)),
+    ThemeEntry(Scheme.ui_border,          rgb(200, 200, 200)),
+    ThemeEntry(Scheme.ui_button,          mu_Color.init, rgb(225, 225, 225)),
+    ThemeEntry(Scheme.ui_button_hover,    mu_Color.init, rgb(210, 210, 210)),
+    ThemeEntry(Scheme.ui_button_focus,    mu_Color.init, rgb(195, 195, 195)),
+    ThemeEntry(Scheme.ui_input,           mu_Color.init, rgb(240, 240, 240)),
+    ThemeEntry(Scheme.ui_input_hover,     mu_Color.init, rgb(233, 233, 233)),
+    ThemeEntry(Scheme.ui_input_focus,     mu_Color.init, rgb(226, 226, 226)),
+    ThemeEntry(Scheme.ui_scrollbar,       rgb(190, 190, 190), rgb(235, 235, 235)),
+    ThemeEntry(Scheme.ui_text_selection,  mu_Color.init, rgb(173, 214, 255)),
+    ThemeEntry(Scheme.ui_accent,          rgb(  0, 110, 210)),
+    ThemeEntry(Scheme.ui_link_hover,      rgb(  0,  80, 160)),
+    ThemeEntry(Scheme.ui_tab,             rgb( 90,  90, 100), rgb(228, 228, 232)),
+    ThemeEntry(Scheme.ui_tab_hover,       mu_Color.init, rgb(240, 240, 244)),
+    ThemeEntry(Scheme.ui_tab_close,       mu_Color.init, rgb(200, 200, 208)),
+    ThemeEntry(Scheme.ui_splitter,        mu_Color.init, rgb(215, 215, 222)),
+    ThemeEntry(Scheme.ui_splitter_hover,  mu_Color.init, rgb(180, 180, 192)),
+    ThemeEntry(Scheme.ui_tooltip,         rgb( 30,  30,  30), rgb(250, 250, 250)),
+    ThemeEntry(Scheme.ui_tooltip_border,  rgb(180, 180, 190)),
+    ThemeEntry(Scheme.ui_status,          rgb( 70,  70,  80), rgb(230, 230, 236)),
+    ThemeEntry(Scheme.ui_status_message,  rgb(120,  90,   0)),
+    ThemeEntry(Scheme.ui_breadcrumb,      rgb(120, 120, 130)),
+    ThemeEntry(Scheme.ui_breadcrumb_last, rgb( 40,  40,  50)),
+    ThemeEntry(Scheme.ui_list,            mu_Color.init, rgb(250, 250, 252)),
+    ThemeEntry(Scheme.ui_list_selected,   mu_Color.init, rgb(205, 225, 250)),
+    ThemeEntry(Scheme.ui_list_hover,      mu_Color.init, rgb(232, 232, 238)),
+    ThemeEntry(Scheme.ui_list_detail,     rgb(110, 110, 120)),
+    ThemeEntry(Scheme.ui_hint,            rgb(140, 140, 150)),
+    ThemeEntry(Scheme.ui_list_scrollbar,  rgb(170, 180, 200), rgb(230, 230, 236)),
+];
+
 /// Theme colors by scheme: foreground, then background.
 __gshared mu_Color[2][SCHEMES.length] base = theme_initial();
-/// Overrides from color lines and Settings, alpha 0 where unset.
+/// Overrides from color lines, alpha 0 where unset.
 __gshared mu_Color[2][SCHEMES.length] custom;
-/// Index of the theme in use, in THEMES.
-__gshared size_t current;
-
-/// Edited in Settings: since loading, and since the last theme_changed.
-__gshared bool edited, changed;
+/// Name of the theme in use.
+__gshared string active = "dark";
+/// Built-in theme the one in use starts from, in THEMES.
+__gshared size_t parent;
+/// The theme in use is a user file.
+__gshared bool editable;
+/// Lines of that file, kept so saving preserves comments.
+__gshared string[] fileLines;
+/// Edited in Settings since the last theme_changed.
+__gshared bool changed;
+/// Theme names for Settings, see theme_list.
+__gshared string[] listed;
+/// User themes were looked for.
+__gshared bool scanned;
+/// Bumped on every color change, see theme_stamp.
+__gshared uint stamp;
 
 /// Dark theme colors of every scheme, from SCHEMES.
 mu_Color[2][SCHEMES.length] theme_initial()
@@ -509,11 +722,205 @@ mu_Color[2][SCHEMES.length] theme_initial()
     return c;
 }
 
-/// Mark an edit from Settings.
-void theme_edit()
+/// Colors from a full table of `entries`. Every scheme must be there once,
+/// with the sides SCHEMES draws.
+mu_Color[2][SCHEMES.length] theme_table(immutable(ThemeEntry)[] entries)
 {
-    edited = true;
-    changed = true;
+    mu_Color[2][SCHEMES.length] c;
+    bool[SCHEMES.length] seen;
+    foreach (ref immutable ThemeEntry e; entries)
+    {
+        assert(seen[e.scheme] == false, SCHEMES[e.scheme].name ~ " twice");
+        assert((e.fg.a != 0) == (SCHEMES[e.scheme].fg.a != 0), SCHEMES[e.scheme].name ~ " fg");
+        assert((e.bg.a != 0) == (SCHEMES[e.scheme].bg.a != 0), SCHEMES[e.scheme].name ~ " bg");
+        seen[e.scheme] = true;
+        c[e.scheme] = [ e.fg, e.bg ];
+    }
+    foreach (size_t i, bool b; seen)
+        assert(b, SCHEMES[i].name ~ " missing");
+    return c;
+}
+
+/// Built-in theme names.
+string[] theme_names()
+{
+    string[] names;
+    foreach (ref immutable ThemeInfo t; THEMES)
+        names ~= t.name;
+    return names;
+}
+
+/// Use built-in theme `i`.
+void theme_builtin(size_t i)
+{
+    base = THEMES[i].colors;
+    parent = i;
+    active = THEMES[i].name;
+    editable = false;
+    fileLines = null;
+    ++stamp;
+}
+
+/// Index of built-in theme `name` in THEMES, or -1.
+ptrdiff_t theme_find(string name)
+{
+    foreach (size_t i, ref immutable ThemeInfo t; THEMES)
+        if (t.name == name)
+            return i;
+    return -1;
+}
+
+/// User theme folder, or null.
+string theme_dir()
+{
+    import std.path : buildPath;
+    import os.path : getUserConfigFolder;
+
+    string dir = getUserConfigFolder();
+    return dir ? buildPath(dir, "vddhx", "themes") : null;
+}
+
+/// File of user theme `name`, or null if the name or folder is bad.
+string theme_path(string name)
+{
+    import std.path : buildPath;
+
+    string dir = theme_dir();
+    if (dir is null || theme_name_ok(name) == false)
+        return null;
+    return buildPath(dir, name ~ THEME_EXT);
+}
+
+/// Whether `name` is fit for a file name: letters, digits, - and _.
+bool theme_name_ok(string name)
+{
+    import std.ascii : isAlphaNum;
+
+    if (name.length == 0 || name.length > 64)
+        return false;
+    foreach (char c; name)
+        if (isAlphaNum(c) == false && c != '-' && c != '_')
+            return false;
+    return true;
+}
+
+/// Words of a theme file line, null for blank lines and comments.
+string[] theme_words(string line)
+{
+    import std.array : split;
+    import std.string : strip;
+
+    string text = strip(line);
+    return text.length && text[0] != '#' ? split(text) : null;
+}
+
+/// Theme file `text` into `colors`, over its `base` theme (default the first),
+/// setting `from` to it. Bad lines are logged.
+void theme_read(const(string)[] text, string path,
+    ref mu_Color[2][SCHEMES.length] colors, ref size_t from)
+{
+    from = 0;
+    foreach (string line; text)
+    {
+        string[] w = theme_words(line);
+        if (w.length == 2 && w[0] == "base" && theme_find(w[1]) >= 0)
+            from = theme_find(w[1]);
+    }
+
+    colors = THEMES[from].colors;
+    foreach (size_t i, string line; text)
+    {
+        string[] w = theme_words(line);
+        if (w.length == 0)
+            continue;
+        if (w.length == 2 && w[0] == "base" && theme_find(w[1]) >= 0)
+            continue;
+        mu_Color[2] c;
+        ptrdiff_t s = w.length == 3 && w[0] == "color" ? theme_index(w[1]) : -1;
+        if (s < 0 || theme_parse(cast(Scheme) s, w[2], c) == false)
+        {
+            logWarn("%s:%u: ignored: %s", path, i + 1, line);
+            continue;
+        }
+        foreach (size_t side; 0 .. 2)
+            if (c[side].a)
+                colors[s][side] = c[side];
+    }
+}
+
+/// Theme file color lines for the sides that differ from the base theme.
+string[] theme_lines()
+{
+    string[] lines;
+    foreach (size_t i, ref immutable SchemeInfo info; SCHEMES)
+    {
+        string fg = theme_diff(cast(Scheme) i, 0);
+        string bg = theme_diff(cast(Scheme) i, 1);
+        if (fg.length || bg.length)
+            lines ~= "color " ~ info.name ~ " " ~ (bg.length ? fg ~ ":" ~ bg : fg);
+    }
+    return lines;
+}
+
+/// Side of `s` for theme_lines, null if it matches the base theme.
+string theme_diff(Scheme s, size_t side)
+{
+    mu_Color c = base[s][side];
+    return c == THEMES[parent].colors[s][side] ? null : theme_name(c);
+}
+
+/// `text` with its `base` and valid color lines swapped for the current ones,
+/// where the first of them was (else at the end).
+string[] theme_merge(const(string)[] text, string[] colors)
+{
+    string[] res;
+    bool placed;
+    foreach (string line; text)
+    {
+        string[] w = theme_words(line);
+        mu_Color[2] c;
+        bool owned = (w.length == 2 && w[0] == "base") ||
+            (w.length == 3 && w[0] == "color" && theme_index(w[1]) >= 0 &&
+             theme_parse(cast(Scheme) theme_index(w[1]), w[2], c));
+        if (owned == false)
+        {
+            res ~= line;
+            continue;
+        }
+        if (placed)
+            continue;
+        res ~= "base " ~ THEMES[parent].name;
+        res ~= colors;
+        placed = true;
+    }
+    if (placed == false)
+    {
+        res ~= "base " ~ THEMES[parent].name;
+        res ~= colors;
+    }
+    return res;
+}
+
+/// Write `text` to `path` via a temp file. Errors are logged.
+bool theme_write(string path, const(string)[] text)
+{
+    import std.array : join;
+    import std.file : mkdirRecurse, rename, write;
+    import std.path : dirName;
+
+    try
+    {
+        mkdirRecurse(dirName(path));
+        string tmp = path ~ ".tmp";
+        write(tmp, join(text, "\n") ~ "\n");
+        rename(tmp, path);
+    }
+    catch (Exception e)
+    {
+        logError("%s: %s", path, e.msg);
+        return false;
+    }
+    return true;
 }
 
 /// Index of scheme `name`, or -1.
@@ -589,30 +996,13 @@ string theme_name(mu_Color c)
     return format("#%02x%02x%02x", c.r, c.g, c.b);
 }
 
-/// Colors of `s` as FG:BG: overrides, plus the theme's sides if `all`. Sides
-/// `s` doesn't draw are always left out.
-string theme_text(Scheme s, bool all)
-{
-    string fg = theme_side(s, 0, all);
-    string bg = theme_side(s, 1, all);
-    return bg.length ? fg ~ ":" ~ bg : fg;
-}
-
-/// One side for theme_text, null if left out.
-string theme_side(Scheme s, size_t side, bool all)
-{
-    mu_Color c = custom[s][side];
-    if (base[s][side].a == 0 || (c.a == 0 && all == false))
-        return null;
-    return theme_name(c.a ? c : base[s][side]);
-}
-
 unittest
 {
     scope (exit) theme_defaults();
 
     assert(theme_color("zero", "red", true));
     assert(theme_fg(Scheme.zero) == mu_Color(205, 49, 49, 255));
+    assert(theme_overridden(Scheme.zero));
     assert(theme_color("bookmark", ":#102030", true));
     assert(theme_fg(Scheme.bookmark) == SCHEMES[Scheme.bookmark].fg);
     assert(theme_bg(Scheme.bookmark) == mu_Color(0x10, 0x20, 0x30, 255));
@@ -629,17 +1019,12 @@ unittest
     assert(theme_color("zero", "", false) == false);
     assert(theme_color("nope", "red", false) == false);
 
-    // Only changed parts are written.
-    assert(theme_lines() == [
-        "color zero red",
-        "color bookmark :#102030",
-        "color diff-changed #ffaa00",
-    ]);
     assert(theme_spec(Scheme.bookmark) == "white:#102030");
     assert(theme_spec(Scheme.selection) == ":#30548c");
 
     assert(theme_color("zero", "default", true));
     assert(theme_fg(Scheme.zero) == SCHEMES[Scheme.zero].fg);
+    assert(theme_overridden(Scheme.zero) == false);
 
     // UI schemes reach the widgets.
     assert(theme_color("ui-accent", "red", true));
@@ -653,27 +1038,107 @@ unittest
     scope (exit) theme_defaults();
 
     assert(theme_current() == "dark");
-    assert(theme_use("dark"));
-    assert(theme_use("nope") == false);
+    assert(theme_use("light"));
+    assert(theme_current() == "light");
+    assert(theme_bg(Scheme.ui_canvas) == mu_Color(255, 255, 255, 255));
+    assert(theme_use("../light") == false);
+    assert(theme_exists("dark"));
 
-    // Unset sides follow the theme, overrides survive a theme change.
+    // Overrides win over the theme and survive a switch.
     assert(theme_color("bookmark", ":red", true));
-    base[Scheme.bookmark] = [ mu_Color(1, 2, 3, 255), mu_Color(4, 5, 6, 255) ];
-    base[Scheme.zero][0] = mu_Color(7, 8, 9, 255);
-    assert(theme_fg(Scheme.bookmark) == mu_Color(1, 2, 3, 255));
+    assert(theme_use("dark"));
     assert(theme_bg(Scheme.bookmark) == mu_Color(205, 49, 49, 255));
-    assert(theme_fg(Scheme.zero) == mu_Color(7, 8, 9, 255));
-    assert(theme_lines() == [ "color bookmark :red" ]);
-    assert(theme_spec(Scheme.bookmark) == "#010203:red");
+    assert(theme_fg(Scheme.bookmark) == SCHEMES[Scheme.bookmark].fg);
 
-    // Settings: a side equal to the theme's stays unset.
-    assert(theme_set(Scheme.bookmark, "#010203:blue"));
-    assert(theme_lines() == [ "color bookmark :blue" ]);
-    theme_reset(Scheme.bookmark);
-    assert(theme_lines().length == 0);
-    assert(theme_bg(Scheme.bookmark) == mu_Color(4, 5, 6, 255));
+    // Built-in themes can't be edited.
+    assert(theme_set(Scheme.zero, "red") == false);
+    assert(theme_changed() == false);
 }
 
+unittest
+{
+    scope (exit) theme_defaults();
+
+    // A user theme file, minus the disk: base theme, then color lines.
+    string[] text = [
+        "# mine",
+        "color zero red",
+        "base light",
+        "color zero blue:green",
+        "color selection :#102030",
+        "color nope red",
+    ];
+    theme_read(text, "test", base, parent);
+    fileLines = text;
+    editable = true;
+    assert(parent == 1);
+    assert(base[Scheme.zero][0] == mu_Color(205, 49, 49, 255)); // bad line skipped
+    assert(base[Scheme.selection][1] == mu_Color(0x10, 0x20, 0x30, 255));
+    assert(base[Scheme.normal] == THEMES[1].colors[Scheme.normal]);
+
+    // Edits: an empty side takes the base theme's, Reset drops the line.
+    assert(theme_set(Scheme.cursor, "white"));
+    assert(theme_set(Scheme.bookmark, ":"));
+    assert(theme_changed());
+    theme_reset(Scheme.selection);
+    assert(theme_lines() == [ "color zero red", "color cursor white" ]);
+
+    // Saving keeps comments and bad lines, in place.
+    assert(theme_merge(fileLines, theme_lines()) == [
+        "# mine",
+        "base light",
+        "color zero red",
+        "color cursor white",
+        "color zero blue:green",
+        "color nope red",
+    ]);
+    assert(theme_merge(null, null) == [ "base light" ]);
+
+    assert(theme_name_ok("my-theme_2"));
+    assert(theme_name_ok("") == false);
+    assert(theme_name_ok("a/b") == false);
+    assert(theme_name_ok("a.b") == false);
+}
+
+version (Posix) unittest
+{
+    import std.file : exists, readText, rmdirRecurse, tempDir;
+    import std.path : buildPath;
+    import std.process : environment;
+
+    // A user theme on disk: copy, edit, save, reload, list.
+    string home = buildPath(tempDir(), "vddhx-theme-test");
+    string old = environment.get("XDG_CONFIG_HOME");
+    environment["XDG_CONFIG_HOME"] = home;
+    scope (exit)
+    {
+        if (old is null)
+            environment.remove("XDG_CONFIG_HOME");
+        else
+            environment["XDG_CONFIG_HOME"] = old;
+        if (exists(home))
+            rmdirRecurse(home);
+        theme_defaults();
+        theme_scan();
+    }
+
+    assert(theme_use("light"));
+    assert(theme_copy("mine") is null);
+    assert(theme_copy("mine") !is null); // taken
+    assert(theme_copy("dark") !is null); // built-in
+    assert(theme_current() == "mine" && theme_editable());
+    assert(theme_set(Scheme.zero, "red"));
+    assert(theme_save());
+    assert(readText(theme_file()) == "base light\ncolor zero red\n");
+
+    assert(theme_use("dark"));
+    assert(theme_fg(Scheme.zero) == SCHEMES[Scheme.zero].fg);
+    assert(theme_use("mine"));
+    assert(theme_parent() == "light");
+    assert(theme_fg(Scheme.zero) == mu_Color(205, 49, 49, 255));
+    assert(theme_bg(Scheme.ui_canvas) == mu_Color(255, 255, 255, 255));
+    assert(theme_list() == [ "dark", "light", "mine" ]);
+}
 
 unittest
 {

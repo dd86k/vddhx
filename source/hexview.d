@@ -196,6 +196,8 @@ struct HexView
 
     /// Colors other than the bytes'. Read per frame.
     HexColors colors;
+    /// Changes when byte colors do, to rebuild the minimap. Read per frame.
+    uint colorStamp;
 
     /// Optional per-byte color scheme. Null falls back to hex_classify.
     HexColorFn colorFn;
@@ -307,11 +309,12 @@ struct HexView
     uint windowRev;      // *revision at fill
     void* windowUser;    // readUser at fill
 
-    // Minimap cell colors (dominant class per segment). Rebuilt only on size or
-    // cell count change.
+    // Minimap cell colors (dominant class per segment). Rebuilt only on size,
+    // cell count or colorStamp change.
     mu_Color[] mapCells;
     size_t mapForSize;   // size at build
     int mapForCells;     // cell count at build
+    uint mapForStamp;    // colorStamp at build
     ubyte[] mapProbe;    // sampling scratch
 }
 
@@ -1791,7 +1794,7 @@ void hex_plainbar(mu_Context* ctx, ref HexView v, mu_Rect strip,
 void hex_build_minimap(ref HexView v, int cells)
 {
     size_t total = hex_total(v);
-    if (v.mapForSize == total && v.mapForCells == cells &&
+    if (v.mapForSize == total && v.mapForCells == cells && v.mapForStamp == v.colorStamp &&
         v.mapCells.length == cast(size_t) cells)
         return;
 
@@ -1799,6 +1802,7 @@ void hex_build_minimap(ref HexView v, int cells)
         v.mapCells.length = cells;
     v.mapForSize  = total;
     v.mapForCells = cells;
+    v.mapForStamp = v.colorStamp;
 
     if (total == 0)
         return;
