@@ -36,6 +36,16 @@ jobs:
       uses: dlang-community/setup-dlang@a6f7969b8b5dc3ff448c30f2c6749150795814f3 # v2 branch
       with:
         compiler: ${{ matrix.dc }}
+    # Posix and Windows dub paths, whichever exists gets cached.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.dub
+          ~/AppData/Local/dub
+        key: dub-test-${{ matrix.os }}-${{ matrix.dc }}-${{ hashFiles('dub.sdl') }}
+    # Verbose to log the HTTP status when a registry fetch fails.
+    - name: Fetch dependencies
+      run: dub upgrade --missing-only -v
     - name: Unit tests
       run: dub test
     # Makes sure binary runs even if tests are passing
