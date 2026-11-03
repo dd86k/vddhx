@@ -4951,7 +4951,7 @@ public void ui_omni_run(int id)
 /// Whether something animates and the loop must keep drawing.
 public bool ui_animating()
 {
-    return elite_animating() || ui_tip_pending() || hex_edge_scrolling();
+    return elite_animating() || ui_tip_pending() || hex_edge_scrolling() || hex_map_building();
 }
 
 /// Build one UI frame, between mu_begin and mu_end.

@@ -6,7 +6,7 @@
 /// Authors: dd86k <dd@dax.moe>
 module hexview;
 
-import core.time : MonoTime, msecs;
+import core.time : Duration, MonoTime, msecs;
 import std.math : exp2;
 
 import ddui;
@@ -128,6 +128,8 @@ private enum
     MINIMAP_WIDTH = 16,         // pixels
     MINIMAP_BLOCK = 3,          // pixels per cell
     MINIMAP_PROBE = 256,        // bytes sampled per cell
+    MINIMAP_SAMPLES = 4,        // evenly spaced reads per cell, sharing the probe budget
+    MINIMAP_BUDGET_MS = 8,      // minimap build time per frame, rest on later frames
     MINIMAP_VIEW_MIN = 14,      // min viewport marker height
     MINIMAP_VIEW_OUT = 2,       // marker overhang per side
     MINIMAP_VIEW_ALPHA = 70,    // marker wash opacity
@@ -312,8 +314,9 @@ struct HexView
     void* windowUser;    // readUser at fill
 
     // Minimap cell colors (dominant class per segment). Rebuilt only on size,
-    // cell count or colorStamp change.
+    // cell count or colorStamp change, a few cells per frame over the old colors.
     mu_Color[] mapCells;
+    int mapNext;         // next cell to build, mapForCells when done
     size_t mapForSize;   // size at build
     int mapForCells;     // cell count at build
     uint mapForStamp;    // colorStamp at build
@@ -378,6 +381,12 @@ unittest
 bool hex_edge_scrolling()
 {
     return edgeLast != MonoTime.init && MonoTime.currTime - edgeLast < 100.msecs;
+}
+
+/// Whether a minimap build is spread over frames; the loop must keep drawing.
+bool hex_map_building()
+{
+    return mapLast != MonoTime.init && MonoTime.currTime - mapLast < 100.msecs;
 }
 
 /// Scroll to the top. Call on loading a document so the caret isn't stranded.
@@ -1167,6 +1176,9 @@ unittest
 // can't keep the loop running.
 MonoTime edgeLast;
 
+// Last frame that left a minimap build unfinished. Ditto for a closed panel.
+MonoTime mapLast;
+
 // Rows per second for a pointer `past` pixels beyond the grid, doubling every two rows.
 double hex_edge_rate(int past, int rowH)
 {
@@ -1672,13 +1684,15 @@ void hex_minimap(mu_Context* ctx, ref HexView v, mu_Rect strip,
     if (total == 0 || cells <= 0)
         return;
 
-    hex_build_minimap(v, cells);
+    if (hex_build_minimap(v, cells, MINIMAP_BUDGET_MS.msecs) == false)
+        mapLast = MonoTime.currTime;
 
     foreach (i, c; v.mapCells)
     {
         int y = strip.y + cast(int) i * MINIMAP_BLOCK;
         mu_Rect cell = mu_Rect(strip.x, y, strip.w, MINIMAP_BLOCK);
-        mu_draw_rect(ctx, cell, c);
+        if (c.a) // not built yet
+            mu_draw_rect(ctx, cell, c);
 
         // Washes on top, same priority as the grid. Not cached in mapCells.
         mu_Color wash = hex_map_wash(v, cast(long) i, cells, cast(long) total);
@@ -1790,37 +1804,59 @@ void hex_plainbar(mu_Context* ctx, ref HexView v, mu_Rect strip,
 }
 
 // Rebuild minimap colors: sample each segment with a fixed budget, keep the
-// dominant color. Cost is `cells` small reads regardless of file size.
-void hex_build_minimap(ref HexView v, int cells)
+// dominant color. Cost is up to `cells * MINIMAP_SAMPLES` small reads regardless
+// of file size. Stops after `budget` (at least one cell) and resumes on the next
+// call, old colors showing meanwhile. Returns true once all cells are built.
+bool hex_build_minimap(ref HexView v, int cells, Duration budget = Duration.max)
 {
     size_t total = hex_total(v);
-    if (v.mapForSize == total && v.mapForCells == cells && v.mapForStamp == v.colorStamp &&
-        v.mapCells.length == cast(size_t) cells)
-        return;
+    if (v.mapForSize != total || v.mapForCells != cells || v.mapForStamp != v.colorStamp ||
+        v.mapCells.length != cast(size_t) cells)
+    {
+        if (v.mapCells.length != cast(size_t) cells)
+            v.mapCells.length = cells;
+        v.mapForSize  = total;
+        v.mapForCells = cells;
+        v.mapForStamp = v.colorStamp;
+        v.mapNext     = total ? 0 : cells;
+    }
 
-    if (v.mapCells.length != cast(size_t) cells)
-        v.mapCells.length = cells;
-    v.mapForSize  = total;
-    v.mapForCells = cells;
-    v.mapForStamp = v.colorStamp;
-
-    if (total == 0)
-        return;
+    if (v.mapNext >= cells)
+        return true;
     if (v.mapProbe.length < MINIMAP_PROBE)
         v.mapProbe.length = MINIMAP_PROBE;
 
-    long len = cast(long) total;
-    for (int c; c < cells; ++c)
+    MonoTime until = budget == Duration.max ? MonoTime.max : MonoTime.currTime + budget;
+    do
     {
-        long start = c * len / cells;
-        long end   = (c + 1) * len / cells;
-        // More cells than bytes: empty spans use the byte at `start`, else uncolored
-        // cells stripe the ribbon.
-        long span = end > start ? end - start : 1;
-        size_t take = span < MINIMAP_PROBE ? cast(size_t) span : MINIMAP_PROBE;
-        ubyte[] chunk = hex_probe(v, start, v.mapProbe[0 .. take]);
-        v.mapCells[c] = hex_dominant(v, chunk, start);
+        v.mapCells[v.mapNext] = hex_map_cell(v, v.mapNext, cells, cast(long) total);
+        ++v.mapNext;
     }
+    while (v.mapNext < cells && MonoTime.currTime < until);
+
+    return v.mapNext >= cells;
+}
+
+// Dominant color of minimap cell `c` of `cells` over `total` bytes.
+mu_Color hex_map_cell(ref HexView v, int c, int cells, long total)
+{
+    long start = c * total / cells;
+    long end   = (c + 1) * total / cells;
+    // More cells than bytes: empty spans use the byte at `start`, else uncolored
+    // cells stripe the ribbon.
+    long span = end > start ? end - start : 1;
+    if (span <= MINIMAP_PROBE)
+        return hex_dominant(v, hex_probe(v, start, v.mapProbe[0 .. cast(size_t) span]), start);
+
+    // Spread over the segment, first read at its head.
+    enum size_t SAMPLE = MINIMAP_PROBE / MINIMAP_SAMPLES;
+    HexVotes votes;
+    for (int k; k < MINIMAP_SAMPLES; ++k)
+    {
+        long pos = start + k * span / MINIMAP_SAMPLES;
+        votes.add(v, hex_probe(v, pos, v.mapProbe[0 .. SAMPLE]), pos);
+    }
+    return votes.best();
 }
 
 unittest
@@ -1829,7 +1865,7 @@ unittest
 
     HexView v;
     v.data = cast(const(ubyte)[]) "0123456789abcdef\x00\x01";
-    hex_build_minimap(v, CELLS);
+    hex_build_minimap(v, CELLS); // @suppress(dscanner.unused_result)
 
     // All cells colored despite 10x more cells than bytes.
     assert(v.mapCells.length == CELLS);
@@ -1840,6 +1876,38 @@ unittest
     assert(hex_coleq(v.mapCells[0], hex_dominant(v, v.data[0 .. 1], 0)));
     assert(hex_coleq(v.mapCells[CELLS - 1],
         hex_dominant(v, v.data[$ - 1 .. $], cast(long) v.data.length - 1)));
+}
+
+unittest
+{
+    // Zero header, text body: a head-only probe would see zeros.
+    ubyte[] data = new ubyte[](4096);
+    data[256 .. $] = cast(ubyte) 'A';
+
+    HexView v;
+    v.data = data;
+    hex_build_minimap(v, 1); // @suppress(dscanner.unused_result)
+    assert(hex_coleq(v.mapCells[0], hex_dominant(v, data[256 .. 257], 256)));
+}
+
+unittest
+{
+    HexView v;
+    v.data = cast(const(ubyte)[]) "\x00\x00AAAA";
+
+    // No budget: one cell per call, the rest on later calls.
+    assert(hex_build_minimap(v, 3, Duration.zero) == false);
+    assert(v.mapCells[0].a != 0);
+    assert(v.mapCells[1].a == 0);
+    assert(hex_build_minimap(v, 3, Duration.zero) == false);
+    assert(hex_build_minimap(v, 3, Duration.zero));
+    assert(hex_build_minimap(v, 3, Duration.zero)); // nothing to do
+
+    // Size change restarts and keeps the old colors.
+    mu_Color last = v.mapCells[2];
+    v.data = cast(const(ubyte)[]) "\x00\x00AAAAAA";
+    assert(hex_build_minimap(v, 3, Duration.zero) == false);
+    assert(hex_coleq(v.mapCells[2], last));
 }
 
 // Read up to buf.length bytes at `pos`; returns what's available.
@@ -1857,40 +1925,55 @@ ubyte[] hex_probe(ref HexView v, long pos, ubyte[] buf)
     return buf[0 .. n];
 }
 
-// Dominant color of a sample, via the panel's scheme so ribbon and grid
-// match. Class only; washes are added by hex_map_wash.
-mu_Color hex_dominant(ref const(HexView) v, const(ubyte)[] chunk, long baseOff)
+// Color votes over one or more samples, via the panel's scheme so ribbon and
+// grid match. Class only; washes are added by hex_map_wash.
+struct HexVotes
 {
-    if (chunk.length == 0)
-        return mu_Color(0, 0, 0, 0);
-
-    HexColorFn colorFn = v.colorFn ? v.colorFn : &hex_classify;
-    void* user = cast(void*) v.colorUser;
-
     // Few colors from hex_classify; extras past the cap don't vote.
-    mu_Color[8] pal = void;
+    mu_Color[8] pal;
     int[8] hits;
     int n;
 
-    foreach (i, b; chunk)
+    /// Count each byte of `chunk`, read at document offset `baseOff`.
+    void add(ref const(HexView) v, const(ubyte)[] chunk, long baseOff)
     {
-        mu_Color c = colorFn(cast(size_t)(baseOff + i), b, user);
-        int j;
-        for (; j < n; ++j)
-            if (hex_coleq(pal[j], c)) { ++hits[j]; break; }
-        if (j == n && n < pal.length)
+        HexColorFn colorFn = v.colorFn ? v.colorFn : &hex_classify;
+        void* user = cast(void*) v.colorUser;
+
+        foreach (i, b; chunk)
         {
-            pal[n]  = c;
-            hits[n] = 1;
-            ++n;
+            mu_Color c = colorFn(cast(size_t)(baseOff + i), b, user);
+            int j;
+            for (; j < n; ++j)
+                if (hex_coleq(pal[j], c)) { ++hits[j]; break; }
+            if (j == n && n < pal.length)
+            {
+                pal[n]  = c;
+                hits[n] = 1;
+                ++n;
+            }
         }
     }
 
-    int best;
-    for (int j = 1; j < n; ++j)
-        if (hits[j] > hits[best])
-            best = j;
-    return pal[best];
+    /// Most counted color, or transparent if nothing was added.
+    mu_Color best() const
+    {
+        if (n == 0)
+            return mu_Color(0, 0, 0, 0);
+        int top;
+        for (int j = 1; j < n; ++j)
+            if (hits[j] > hits[top])
+                top = j;
+        return pal[top];
+    }
+}
+
+/// Dominant color of one sample at `baseOff`, transparent if empty.
+mu_Color hex_dominant(ref const(HexView) v, const(ubyte)[] chunk, long baseOff)
+{
+    HexVotes votes;
+    votes.add(v, chunk, baseOff);
+    return votes.best();
 }
 
 bool hex_coleq(mu_Color a, mu_Color b)
