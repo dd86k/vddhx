@@ -632,7 +632,7 @@ void tab_paint(mu_Context* ctx, ref const(TabBar) bar, ref const(TabItem) it,
     if (it.progress >= 0)
     {
         int barX = r.x + inset;
-        int barW = closeR.x + closeR.w - barX;
+        int barW = r.w - 2 * inset;
         int y = mu_min(textY + th + 1, r.y + r.h - TAB_BAR_H);
         mu_draw_rect(ctx, mu_Rect(barX, y, barW, TAB_BAR_H), bar.colors.close);
         mu_draw_rect(ctx, mu_Rect(barX, y, barW * mu_min(it.progress, 100) / 100, TAB_BAR_H),
