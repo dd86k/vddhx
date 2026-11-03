@@ -95,12 +95,24 @@ Schemes are ddhx's (`normal`, `zero`, `cursor`, `mirror`, `selection`, `bookmark
 minimap, structure fields (`structure-magic`...) and the UI (`ui-accent`,
 `ui-tab`...) have schemes too: Settings > Colors lists them all.
 
+## Diagnostics
+
 Each session logs to `vddhx.log`, the previous session's kept as `vddhx.log.old`:
 - Linux and macOS: `$XDG_STATE_HOME/vddhx/` (`~/.local/state/vddhx/`)
 - Windows: `%LOCALAPPDATA%\vddhx\`
 
-Help > About links to the folder. `--verbose` and `--trace` log more; please
-attach the log to bug reports.
+Help > About links to the folder. Please attach the log to bug reports.
+
+Options that help narrow a problem down:
+- `--verbose`: Log debugging messages.
+- `--trace`: Log everything, SDL's verbose messages included.
+- `--console`: Windows only, attach a console to see the log live.
+- `--builtin-font`: Use only the built-in font, skipping system fonts and
+  fontconfig. If text renders badly without it and fine with it, the system
+  fonts are at fault.
+
+For rendering or window problems, see [Variables](#variables) to pick another
+renderer or video backend.
 
 ## Hacking
 

@@ -26,6 +26,7 @@ Rules:
   Ctrl+0 goes back to the setting.
 - **Settings**: UI and hex fonts (`font`, `monofont`), by file or font name.
 - Built-in fonts, used when the system has none.
+- `--builtin-font` forces the built-in font, when system fonts render badly.
 - **Find**: "Find Backward..." (Ctrl+Shift+F in omnibar), like ddhx's
   `find-back`. Add direction label.
 - **Find**: Shift+Enter in the find box searches the other way.

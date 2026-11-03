@@ -36,6 +36,9 @@ private __gshared TTF_Font* fontMono;
 // Font setting each face was opened from, empty for the default.
 private __gshared string uiSpec, monoSpec;
 
+// Built-in face only: no system faces, fallbacks, or font settings.
+private __gshared bool builtinOnly;
+
 // Kept so render_quit can close them after the primaries.
 private __gshared TTF_Font*[8] fallbacks;
 private __gshared size_t fallbackCount;
@@ -192,6 +195,12 @@ SDL_Renderer* render_create(SDL_Window* window)
     return renderer;
 }
 
+/// Use only the built-in face, see `--builtin-font`. Call before render_init.
+void render_set_builtin(bool on) { builtinOnly = on; }
+
+/// Whether only the built-in face is used.
+bool render_builtin() => builtinOnly;
+
 /// Init SDL3_ttf, the text engine and font faces. Call once after
 /// render_create.
 /// Returns: null on success, else a user-facing reason.
@@ -230,10 +239,13 @@ string render_init(SDL_Renderer* renderer)
 
     // Probe glyphs are verified: fontconfig returns a best effort even when
     // nothing matches.
-    addFallback("CJK", ":lang=ja", '一', cjkNames);
-    addFallback("symbol",
-        format(":charset=%04X", cast(uint) icons[MU_ICON_CLOSE].code),
-        icons[MU_ICON_CLOSE].code, symNames);
+    if (builtinOnly == false)
+    {
+        addFallback("CJK", ":lang=ja", '一', cjkNames);
+        addFallback("symbol",
+            format(":charset=%04X", cast(uint) icons[MU_ICON_CLOSE].code),
+            icons[MU_ICON_CLOSE].code, symNames);
+    }
 
     resolveIcons();
     return null;
@@ -282,9 +294,12 @@ string render_font_spec(bool mono) => mono ? monoSpec : uiSpec;
 
 /// Replace the UI or hex panel face with `spec`: a font file, or a font name
 /// (fontconfig, else a file in the system font folders). Empty restores the
-/// default face. False if nothing opened, the current face stays.
+/// default face, as does any `spec` under `--builtin-font`. False if nothing
+/// opened, the current face stays.
 bool render_set_font(bool mono, string spec)
 {
+    if (builtinOnly)
+        spec = null;
     string* current = mono ? &monoSpec : &uiSpec;
     if (spec == *current)
         return true;
@@ -450,6 +465,8 @@ void resolveIcons()
 /// Default UI or mono face: system match, then the embedded one. Null if none.
 TTF_Font* openDefault(bool mono)
 {
+    if (builtinOnly)
+        return openEmbedded(mono ? "mono" : "UI");
     TTF_Font* f = mono ?
         openFace("mono", "monospace", 0, monoNames) :
         openFace("UI", "sans-serif", 0, uiNames);

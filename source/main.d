@@ -38,11 +38,13 @@ private enum HELP =
     "Usage: vddhx [OPTIONS] [FILE...]\n" ~
     "\n" ~
     "Options:\n" ~
-    "  --console     Windows: attach a console for logs\n" ~
-    "  --verbose     Log debugging messages\n" ~
-    "  --trace       Log everything, SDL's verbose messages included\n" ~
-    "  -h, --help    Print this help and exit\n" ~
-    "  --version     Print version information and exit\n";
+    "  --builtin-font  Use only the built-in font: monospace UI, no CJK or\n" ~
+    "                  symbol glyphs, font settings ignored\n" ~
+    "  --console       Windows: attach a console for logs\n" ~
+    "  --verbose       Log debugging messages\n" ~
+    "  --trace         Log everything, SDL's verbose messages included\n" ~
+    "  -h, --help      Print this help and exit\n" ~
+    "  --version       Print version information and exit\n";
 
 int main(string[] args)
 {
@@ -59,6 +61,7 @@ int main(string[] args)
         {
         case "-h", "--help":    return cli_print(HELP);
         case "--version":       return cli_print(VERSION_TEXT);
+        case "--builtin-font":  render_set_builtin(true); break;
         case "--console":       console = true; break;
         case "--verbose":       loglevel = LogLevel.debugging; break;
         case "--trace":         loglevel = LogLevel.trace; break;

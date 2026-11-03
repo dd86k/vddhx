@@ -16,6 +16,7 @@ import ddhx.charset : Charset, charsets;
 import ddui;
 import hexview : HexBase;
 import preferences;
+import render : render_builtin;
 import theme : SCHEMES, SCHEME_UI, Scheme, SchemeInfo, theme_bg, theme_changed,
     theme_copy, theme_current, theme_editable, theme_fg, theme_file, theme_list,
     theme_overridden, theme_parent, theme_reset, theme_reset_all, theme_save,
@@ -313,7 +314,10 @@ void settings_appearance(mu_Context* ctx)
 
     settings_font(ctx, font, "UI font", false);
     settings_font(ctx, monofont, "Hex font", true);
-    settings_note(ctx, "A font file or name, empty for the default.");
+    if (render_builtin())
+        settings_note(ctx, "Saved, but ignored: started with --builtin-font.");
+    else
+        settings_note(ctx, "A font file or name, empty for the default.");
 
     settings_label(ctx, "");
     minimap = prefs.minimap;

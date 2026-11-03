@@ -181,6 +181,9 @@ int screenshot_run(string[] args)
     }
     scope(exit) SDL_DestroyRenderer(renderer);
 
+    // Same faces on every machine. The readme shows the system's, it is not
+    // diffed anyway.
+    render_set_builtin(readme == false);
     string reason = render_init(renderer);
     if (reason.length)
     {
@@ -1044,12 +1047,15 @@ int screenshot_run(string[] args)
     frame();
 
     // Fonts swap between frames: the UI takes the mono face, the hex font is
-    // missing and stays.
+    // missing and stays. Font settings need the built-in mode off, and it goes
+    // back on before the reset so the default face is the built-in one again.
+    render_set_builtin(false);
     prefs.font = "assets/fonts/DejaVuSansMono.ttf";
     prefs.monofont = "No Such Font";
     ui_fonts(false);
     frame(); frame();
     shot("fonts.bmp");
+    render_set_builtin(true);
     prefs.font = prefs.monofont = null;
     ui_fonts(false);
     frame();
