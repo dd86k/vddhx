@@ -52,6 +52,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     keys_navigate();
     keys_marks_file(files);
     keys_write(files);
+    keys_file_write(files);
     keys_refresh(files);
     keys_diff(files);
     uiPickAuto = null;
@@ -419,10 +420,10 @@ void keys_quit()
 
 /// `nav`: zeros with needles at NEEDLE_A and NEEDLE_B. `drop`, `edit`: copies.
 /// `diff`: `nav` changed at DIFF_A and DIFF_B, plus a tail.
-/// `saved`, `fresh`, `marks`: don't exist yet.
+/// `saved`, `fresh`, `marks`: don't exist yet. `piece`: PIECE. `empty`: no bytes.
 struct Files
 {
-    string nav, drop, edit, saved, fresh, marks, diff;
+    string nav, drop, edit, saved, fresh, marks, diff, piece, empty;
 }
 
 enum size_t NAV_SIZE = 0x1000;
@@ -430,6 +431,8 @@ enum size_t NEEDLE_A = 0x100;
 enum size_t NEEDLE_B = 0x300;
 enum size_t DIFF_A = 0x10;
 enum size_t DIFF_B = 0x200;
+/// Contents of Files.piece.
+immutable ubyte[] PIECE = [ 0xde, 0xad, 0xbe, 0xef ];
 
 /// Write test files to the temp dir, delete old outputs, return their paths.
 Files keys_files()
@@ -450,6 +453,8 @@ Files keys_files()
     f.fresh = buildPath(dir, "fresh.bin");
     f.marks = buildPath(dir, "marks.txt");
     f.diff  = buildPath(dir, "diff.bin");
+    f.piece = buildPath(dir, "piece.bin");
+    f.empty = buildPath(dir, "empty.bin");
     write(f.nav, bytes);
     write(f.drop, bytes);
     write(f.edit, bytes);
@@ -458,6 +463,8 @@ Files keys_files()
     other[DIFF_A .. DIFF_A + 4] = 0xee;
     other[DIFF_B] = 0xee;
     write(f.diff, other);
+    write(f.piece, PIECE);
+    write(f.empty, null);
     foreach (string gone; [ f.saved, f.fresh, f.marks ])
         if (exists(gone))
             remove(gone);
@@ -634,6 +641,77 @@ void keys_write(ref const(Files) f)
     frame();
     expect(exists(f.fresh) && cast(ubyte[]) read(f.fresh) == [ cast(ubyte) 0x12 ], "Ctrl+S on a scratch buffer saves as");
     expect(ui_probe().path == f.fresh, "...and the tab adopts the path");
+}
+
+void keys_file_write(ref const(Files) f)
+{
+    void run(string command, string pick)
+    {
+        uiPickAuto = pick;
+        press(SDLK_P, CTRL | SHIFT);
+        type(command);
+        press(SDLK_RETURN);
+        frame();
+    }
+    bool shows(size_t at, const(ubyte)[] want)
+    {
+        foreach (size_t i, ubyte b; want)
+            if (ui_peek(at + i) != b)
+                return false;
+        return true;
+    }
+
+    // Scratch tab holding 0x12, caret on it.
+    press(SDLK_T, CTRL);
+    type("1");
+    type("2");
+    press(SDLK_HOME, CTRL);
+
+    run("Insert File", f.piece);
+    Probe p = ui_probe();
+    expect(p.size == 1 + PIECE.length && shows(0, PIECE) && ui_peek(PIECE.length) == 0x12,
+        "Insert File... splices the file in at the caret");
+    expect(p.anchor == 0 && p.cursor == PIECE.length - 1, "...and selects it");
+    press(SDLK_Z, CTRL);
+    expect(ui_probe().size == 1 && ui_peek(0) == 0x12, "one Ctrl+Z undoes it");
+
+    run("Replace with File", f.piece);
+    p = ui_probe();
+    expect(p.size == PIECE.length && shows(0, PIECE), "Replace with File... overwrites, growing past the end");
+    press(SDLK_Z, CTRL);
+    expect(ui_probe().size == 1 && ui_peek(0) == 0x12, "one Ctrl+Z undoes it");
+
+    // Now 12 34 56 78 9a bc.
+    static immutable ubyte[6] BASE = [ 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc ];
+    press(SDLK_END, CTRL);
+    foreach (string digit; [ "3", "4", "5", "6", "7", "8", "9", "a", "b", "c" ])
+        type(digit);
+    expect(ui_probe().size == BASE.length && shows(0, BASE), "replace with file: typed the base bytes");
+
+    press(SDLK_HOME, CTRL);
+    press(SDLK_RIGHT, SHIFT);
+    run("Replace with File", f.piece);
+    p = ui_probe();
+    expect(p.size == BASE.length && shows(0, PIECE[0 .. 2]) && shows(2, BASE[2 .. $]),
+        "Replace with File... over a selection stops at its end");
+    expect(p.anchor == 0 && p.cursor == 1, "...and selects what it wrote");
+    press(SDLK_Z, CTRL);
+    expect(shows(0, BASE), "one Ctrl+Z undoes it");
+
+    press(SDLK_HOME, CTRL);
+    foreach (_; 0 .. BASE.length - 1)
+        press(SDLK_RIGHT, SHIFT);
+    run("Replace with File", f.piece);
+    p = ui_probe();
+    expect(p.size == BASE.length && shows(0, PIECE) && shows(PIECE.length, BASE[PIECE.length .. $]),
+        "...a shorter file leaves the rest of the selection");
+    expect(p.anchor == 0 && p.cursor == PIECE.length - 1, "...and selects what it wrote");
+    press(SDLK_Z, CTRL);
+    expect(shows(0, BASE), "one Ctrl+Z undoes it");
+
+    press(SDLK_HOME, CTRL);
+    run("Insert File", f.empty);
+    expect(ui_probe().size == BASE.length, "an empty file is refused");
 }
 
 void keys_refresh(ref const(Files) f)

@@ -482,12 +482,14 @@ shared bool pendingReady;
 /// What the pending path is for. Main thread only.
 enum Pick
 {
-    open,      /// Open in a tab.
-    compare,   /// Diff against compareFrom.
-    marksLoad, /// Load bookmarks into marksFrom.
-    marksSave, /// Save the bookmarks of marksFrom.
-    font,      /// Set as the UI font.
-    monofont,  /// Set as the hex panel font.
+    open,        /// Open in a tab.
+    compare,     /// Diff against compareFrom.
+    marksLoad,   /// Load bookmarks into marksFrom.
+    marksSave,   /// Save the bookmarks of marksFrom.
+    replaceFile, /// Overwrite at the caret of fileWriteTo.
+    insertFile,  /// Insert at the caret of fileWriteTo.
+    font,        /// Set as the UI font.
+    monofont,    /// Set as the hex panel font.
 }
 /// Ditto.
 __gshared Pick pendingPick;
@@ -496,6 +498,8 @@ __gshared Pick pendingPick;
 __gshared View* compareFrom;
 /// Ditto for the bookmark dialogs.
 __gshared Document* marksFrom;
+/// Ditto for Insert File and Replace with File.
+__gshared View* fileWriteTo;
 
 /// Ditto for Save As. The callback does no GC work; the write happens on the
 /// main thread.
@@ -2574,7 +2578,8 @@ public enum
     CMD_SAVE, CMD_SAVE_AS,
     CMD_CLOSE_TAB, CMD_READONLY, CMD_REFRESH,
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE,
-    CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_GOTO, CMD_SELECT_RANGE,
+    CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_REPLACE_FILE, CMD_INSERT_FILE,
+    CMD_GOTO, CMD_SELECT_RANGE,
     CMD_FIND, CMD_FIND_BACK, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_MARK_ALL, CMD_INSPECT, CMD_STRUCTURE,
     CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
@@ -2617,6 +2622,8 @@ public immutable Entry[] COMMANDS = [
     Entry("Insert...",              "", CMD_INSERT,        "add splice pattern repeat"),
     Entry("Replace Range...",       "", CMD_REPLACE_RANGE, "fill overwrite pattern stamp repeat span"),
     Entry("Insert Range...",        "", CMD_INSERT_RANGE,  "add splice pattern repeat span"),
+    Entry("Replace with File...",   "", CMD_REPLACE_FILE,  "fill overwrite paste contents import read from"),
+    Entry("Insert File...",         "", CMD_INSERT_FILE,   "add splice paste contents import read from merge concat"),
     Entry("Go to Offset...",        "", CMD_GOTO,          "goto jump seek address position"),
     Entry("Find...",                "", CMD_FIND,          "search grep pattern bytes string"),
     Entry("Find Backward...",       "", CMD_FIND_BACK,     "search grep pattern back backward reverse"),
@@ -4615,6 +4622,148 @@ void ui_write_commit(const(char)[] typed)
     logDebugging("%s: %d byte(s) at %#x", verb, req.length, req.start);
 }
 
+/// Open dialog for Insert File (`insert`) or Replace with File, as ddhx's
+/// `insert-file` and `replace-file`.
+public void ui_file_write_dialog(bool insert)
+{
+    if (ui_on_settings())
+        return;
+    View* v = &focusedView();
+    if (v.doc.editor is null || ui_refuse_edit(v.doc))
+        return;
+    pendingPick = insert ? Pick.insertFile : Pick.replaceFile;
+    fileWriteTo = v;
+    ui_file_dialog(&ui_on_file_picked, false);
+}
+
+/// File bytes cut short at `limit`, for Replace with File over a selection.
+/// Owns the file: closing this closes it.
+final class CappedDocument : IDocument
+{
+    /// Source file.
+    IDocument file;
+    /// Bytes exposed, at most the file size.
+    long limit;
+
+    /// Wrap `file`, exposing its first `limit` bytes.
+    this(IDocument file, long limit)
+    {
+        this.file  = file;
+        this.limit = min(limit, file.size());
+    }
+
+    /// Source capabilities.
+    int caps() { return file.caps(); }
+    /// Capped size.
+    long size() { return limit; }
+
+    /// Read from the file, stopping at the cap.
+    ubyte[] readAt(long pos, ubyte[] buf)
+    {
+        if (pos >= limit)
+            return buf[0 .. 0];
+        if (buf.length > limit - pos)
+            buf = buf[0 .. cast(size_t)(limit - pos)];
+        return file.readAt(pos, buf);
+    }
+
+    /// Refused: source files are only read.
+    void writeAt(long pos, ubyte[] buf)
+    {
+        throw new Exception("file source is read-only");
+    }
+
+    /// Nothing to flush.
+    void flush() {}
+    /// Close the file.
+    void close() { file.close(); }
+}
+
+/// Insert or overwrite (`insert`) the bytes of the file at `path` at the
+/// selection start of fileWriteTo, then select them. A replace over a
+/// multi-byte selection stops at its end. The file is read as needed and stays
+/// open until the document closes.
+void ui_file_write(string path, bool insert)
+{
+    View* v = fileWriteTo;
+    fileWriteTo = null;
+    string verb = insert ? "insert file" : "replace with file";
+    if (v is null || ui_view_pane(v) is null)
+    {
+        logWarn("%s: the tab was closed before a file was chosen", verb);
+        return;
+    }
+    Document* d = v.doc;
+    if (d.editor is null || ui_refuse_edit(d))
+        return;
+
+    // Devices can be read while written to and change size.
+    try
+    {
+        if (isFile(path) == false)
+        {
+            ui_status("%s: %s is not a regular file", verb, ui_clip(baseName(path), 40));
+            return;
+        }
+    }
+    catch (Exception e)
+    {
+        ui_status("%s: %s", verb, ui_clip(e.msg, 60));
+        return;
+    }
+
+    IDocument src;
+    try
+        src = new FileDocument(path, OFlags.read | OFlags.exists | OFlags.share);
+    catch (Exception e)
+    {
+        ui_status("%s: %s", verb, ui_clip(e.msg, 60));
+        return;
+    }
+
+    if (src.size() <= 0)
+    {
+        src.close();
+        ui_status("%s: %s is empty", verb, ui_clip(baseName(path), 40));
+        return;
+    }
+
+    long total = d.editor.size();
+    long at    = v.hex.active ? cast(long) hex_sel_low(v.hex) : 0;
+    long high  = v.hex.active ? cast(long) hex_sel_high(v.hex) : 0;
+    if (at > total)
+        at = total;
+    if (high >= total)
+        high = total - 1; // exclude the append slot
+    if (insert == false && high > at)
+        src = new CappedDocument(src, high - at + 1);
+    long len = src.size();
+
+    try
+    {
+        if (insert)
+            d.editor.fileInsert(at, src);
+        else
+            d.editor.fileReplace(at, src);
+    }
+    catch (Exception e)
+    {
+        src.close(); // checks run before the editor keeps it
+        ui_status("%s: %s", verb, ui_clip(e.msg, 60));
+        logError("%s failed: %s", verb, e.msg);
+        return;
+    }
+    if (insert)
+        bookmark_shift(d.marks, at, len);
+    ++d.revision;
+    structureEdited(d, at);
+
+    v.hex.dataSize = d.editor.size();
+    ui_select_range(*v, cast(size_t) at, cast(size_t) len);
+    ui_status("%s %s byte(s) from %s at %s", insert ? "inserted" : "wrote", len,
+        ui_clip(baseName(path), 40), ui_offset(at, true));
+}
+
 /// Range selection being typed (ddhx's select): target view, its caret, and
 /// the last parse, reused while the text is unchanged.
 struct SelectPrompt
@@ -4910,6 +5059,8 @@ public void ui_omni_run(int id)
     case CMD_MARK_CLEAR: ui_mark_clear();      break;
     case CMD_MARK_LOAD:  ui_marks_load_dialog(); break;
     case CMD_MARK_SAVE:  ui_marks_save_dialog(); break;
+    case CMD_REPLACE_FILE: ui_file_write_dialog(false); break;
+    case CMD_INSERT_FILE:  ui_file_write_dialog(true);  break;
     // Reopens the box in another mode next frame; don't give the panel focus.
     case CMD_GOTO:      ui_omni_open(OMNI_ADDRESS);  return;
     case CMD_FIND:      ui_omni_open(OMNI_FIND);     return;
@@ -5012,6 +5163,8 @@ public void ui_frame(mu_Context* ctx, int width, int height)
             case Pick.compare:   ui_compare_with(picked); break;
             case Pick.marksLoad: ui_marks_load(picked); break;
             case Pick.marksSave: ui_marks_save(picked); break;
+            case Pick.replaceFile: ui_file_write(picked, false); break;
+            case Pick.insertFile:  ui_file_write(picked, true); break;
             case Pick.font:      prefs.font = picked;     ui_fonts(true); break;
             case Pick.monofont:  prefs.monofont = picked; ui_fonts(true); break;
             }

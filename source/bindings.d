@@ -82,6 +82,8 @@ immutable Command[] BINDABLE = [
     Command("insert",           CMD_INSERT,         ""),
     Command("replace-range",    CMD_REPLACE_RANGE,  ""),
     Command("insert-range",     CMD_INSERT_RANGE,   ""),
+    Command("replace-file",     CMD_REPLACE_FILE,   ""),
+    Command("insert-file",      CMD_INSERT_FILE,    ""),
     Command("goto",             CMD_GOTO,           "ctrl+g",               true),
     Command("goto-field",       CMD_STRUCTURE,      ""),
     Command("find",             CMD_FIND,           "ctrl+f",               true),

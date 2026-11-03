@@ -19,6 +19,8 @@ Rules:
   Names are kept.
 - "Replace..." and "Insert..." commands with their Range equivalent.
   Same syntax as ddhx.
+- "Insert File..." and "Replace with File..." commands, as ddhx's `insert-file`
+  and `replace-file`. Replace only with selection also supported.
 - **Settings**: Add `writemode readonly`.
 - Decimal and octal offsets: "Offset Format..." per view, `address` in Settings.
   Same values as ddhx.
