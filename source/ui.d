@@ -686,6 +686,7 @@ void ui_drop_document(Document* d)
     }
     if (d.editor)
     {
+        hex_map_release(cast(void*) d.editor); // minimap readers, before the editor goes
         IDocument[] held = (cast(PieceV4DocumentEditor) d.editor).documents();
         d.editor.close();
         foreach (IDocument doc; held)

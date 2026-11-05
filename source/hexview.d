@@ -6,7 +6,9 @@
 /// Authors: dd86k <dd@dax.moe>
 module hexview;
 
-import core.time : Duration, MonoTime, msecs;
+import core.atomic : atomicLoad, atomicStore;
+import core.thread : Thread;
+import core.time : MonoTime, msecs;
 import std.math : exp2;
 
 import ddui;
@@ -129,7 +131,7 @@ private enum
     MINIMAP_BLOCK = 3,          // pixels per cell
     MINIMAP_PROBE = 256,        // bytes sampled per cell
     MINIMAP_SAMPLES = 4,        // evenly spaced reads per cell, sharing the probe budget
-    MINIMAP_BUDGET_MS = 8,      // minimap build time per frame, rest on later frames
+    MINIMAP_SLOT = MINIMAP_PROBE / MINIMAP_SAMPLES, // bytes per sample
     MINIMAP_VIEW_MIN = 14,      // min viewport marker height
     MINIMAP_VIEW_OUT = 2,       // marker overhang per side
     MINIMAP_VIEW_ALPHA = 70,    // marker wash opacity
@@ -313,14 +315,18 @@ struct HexView
     uint windowRev;      // *revision at fill
     void* windowUser;    // readUser at fill
 
-    // Minimap cell colors (dominant class per segment). Rebuilt only on size,
-    // cell count or colorStamp change, a few cells per frame over the old colors.
+    // Minimap cell colors (dominant class per segment). Rebuilt on size, cell
+    // count or colorStamp change, and with readFn on any edit. With readFn, a
+    // HexMapReader reads the samples and cells recolor as they come in, over the
+    // old colors.
     mu_Color[] mapCells;
-    int mapNext;         // next cell to build, mapForCells when done
-    size_t mapForSize;   // size at build
-    int mapForCells;     // cell count at build
+    size_t mapForSize;   // size at build, without readFn
+    int mapForCells;     // cell count at build, without readFn
     uint mapForStamp;    // colorStamp at build
-    ubyte[] mapProbe;    // sampling scratch
+    ubyte[] mapProbe;    // sampling scratch, without readFn
+    HexMapReader mapReader; // sample reader, with readFn
+    int mapCoarse;       // cells colored from their first sample
+    int mapFine;         // cells colored from all samples
 }
 
 /// Copy a panel for a split view: caret, selection, scroll, columns and mode
@@ -339,6 +345,9 @@ HexView hex_split(ref HexView src)
     v.mapForSize  = 0;
     v.mapForCells = 0;
     v.mapProbe    = null;
+    v.mapReader   = null;
+    v.mapCoarse   = 0;
+    v.mapFine     = 0;
 
     return v;
 }
@@ -387,6 +396,30 @@ bool hex_edge_scrolling()
 bool hex_map_building()
 {
     return mapLast != MonoTime.init && MonoTime.currTime - mapLast < 100.msecs;
+}
+
+/// Wait for minimap readers within the frame. For the screenshot driver, whose
+/// shots must not depend on disk timing.
+__gshared bool hexMapWait;
+
+/// Stop the minimap readers reading through `readUser`, waiting out reads in
+/// flight. Call before closing what it reads. Panels still drawing restart
+/// theirs on the next frame.
+void hex_map_release(const(void)* readUser)
+{
+    foreach (HexMapReader r; mapReaders)
+        if (r.readUser is readUser)
+            r.halt();
+    hex_map_prune();
+}
+
+/// Whether a minimap reader is still reading.
+bool hex_map_reading()
+{
+    foreach (HexMapReader r; mapReaders)
+        if (r.idle() == false)
+            return true;
+    return false;
 }
 
 /// Scroll to the top. Call on loading a document so the caret isn't stranded.
@@ -1684,7 +1717,12 @@ void hex_minimap(mu_Context* ctx, ref HexView v, mu_Rect strip,
     if (total == 0 || cells <= 0)
         return;
 
-    if (hex_build_minimap(v, cells, MINIMAP_BUDGET_MS.msecs) == false)
+    bool done = true;
+    if (v.readFn)
+        done = hex_map_update(v, cells);
+    else
+        hex_build_minimap(v, cells);
+    if (done == false)
         mapLast = MonoTime.currTime;
 
     foreach (i, c; v.mapCells)
@@ -1803,60 +1841,235 @@ void hex_plainbar(mu_Context* ctx, ref HexView v, mu_Rect strip,
     }
 }
 
-// Rebuild minimap colors: sample each segment with a fixed budget, keep the
-// dominant color. Cost is up to `cells * MINIMAP_SAMPLES` small reads regardless
-// of file size. Stops after `budget` (at least one cell) and resumes on the next
-// call, old colors showing meanwhile. Returns true once all cells are built.
-bool hex_build_minimap(ref HexView v, int cells, Duration budget = Duration.max)
+/// Build every minimap color at once from `v.data`, sampling each segment with
+/// a fixed budget. For panels without readFn.
+void hex_build_minimap(ref HexView v, int cells)
 {
     size_t total = hex_total(v);
-    if (v.mapForSize != total || v.mapForCells != cells || v.mapForStamp != v.colorStamp ||
-        v.mapCells.length != cast(size_t) cells)
-    {
-        if (v.mapCells.length != cast(size_t) cells)
-            v.mapCells.length = cells;
-        v.mapForSize  = total;
-        v.mapForCells = cells;
-        v.mapForStamp = v.colorStamp;
-        v.mapNext     = total ? 0 : cells;
-    }
+    if (v.mapForSize == total && v.mapForCells == cells && v.mapForStamp == v.colorStamp &&
+        v.mapCells.length == cast(size_t) cells)
+        return;
 
-    if (v.mapNext >= cells)
-        return true;
+    v.mapCells.length = cells;
+    v.mapForSize  = total;
+    v.mapForCells = cells;
+    v.mapForStamp = v.colorStamp;
+
     if (v.mapProbe.length < MINIMAP_PROBE)
         v.mapProbe.length = MINIMAP_PROBE;
 
-    MonoTime until = budget == Duration.max ? MonoTime.max : MonoTime.currTime + budget;
-    do
+    ushort[MINIMAP_SAMPLES] got;
+    for (int c; c < cells; ++c)
     {
-        v.mapCells[v.mapNext] = hex_map_cell(v, v.mapNext, cells, cast(long) total);
-        ++v.mapNext;
+        for (int k; k < MINIMAP_SAMPLES; ++k)
+        {
+            long pos;
+            ubyte[] slot = hex_map_slot(v.mapProbe, c, k, cells, cast(long) total, pos);
+            got[k] = slot.length ? cast(ushort) hex_probe(v, pos, slot).length : 0;
+        }
+        v.mapCells[c] = hex_map_vote(v, v.mapProbe, got, MINIMAP_SAMPLES, c, cells, cast(long) total);
     }
-    while (v.mapNext < cells && MonoTime.currTime < until);
-
-    return v.mapNext >= cells;
 }
 
-// Dominant color of minimap cell `c` of `cells` over `total` bytes.
-mu_Color hex_map_cell(ref HexView v, int c, int cells, long total)
+/// Slot in `cell` (one cell's MINIMAP_PROBE bytes) for sample `k` of minimap
+/// cell `c` of `cells` over `total` bytes, empty if the cell has no such
+/// sample. Its document offset goes to `pos`.
+inout(ubyte)[] hex_map_slot(inout(ubyte)[] cell, int c, int k, int cells, long total, out long pos)
 {
     long start = c * total / cells;
     long end   = (c + 1) * total / cells;
     // More cells than bytes: empty spans use the byte at `start`, else uncolored
     // cells stripe the ribbon.
     long span = end > start ? end - start : 1;
-    if (span <= MINIMAP_PROBE)
-        return hex_dominant(v, hex_probe(v, start, v.mapProbe[0 .. cast(size_t) span]), start);
+    if (span <= MINIMAP_PROBE) // whole span as the first sample
+    {
+        pos = start;
+        return k == 0 ? cell[0 .. cast(size_t) span] : cell[0 .. 0];
+    }
 
     // Spread over the segment, first read at its head.
-    enum size_t SAMPLE = MINIMAP_PROBE / MINIMAP_SAMPLES;
+    pos = start + k * span / MINIMAP_SAMPLES;
+    return cell[k * MINIMAP_SLOT .. (k + 1) * MINIMAP_SLOT];
+}
+
+/// Color of minimap cell `c` from its first `samples` samples in `cell`, `got`
+/// holding the bytes read per sample.
+mu_Color hex_map_vote(ref const(HexView) v, const(ubyte)[] cell, const(ushort)[] got,
+    int samples, int c, int cells, long total)
+{
     HexVotes votes;
-    for (int k; k < MINIMAP_SAMPLES; ++k)
+    for (int k; k < samples; ++k)
     {
-        long pos = start + k * span / MINIMAP_SAMPLES;
-        votes.add(v, hex_probe(v, pos, v.mapProbe[0 .. SAMPLE]), pos);
+        long pos;
+        const(ubyte)[] slot = hex_map_slot(cell, c, k, cells, total, pos);
+        votes.add(v, slot[0 .. got[k]], pos);
     }
     return votes.best();
+}
+
+/// Reads minimap samples on its own thread so the ribbon fills without the UI
+/// waiting on the disk. A first pass reads one sample per cell, a second the
+/// rest. Only reads: colors are picked on the UI thread (hex_map_update), since
+/// color hooks touch UI state.
+final class HexMapReader
+{
+    HexReadFn readFn;   /// Byte source, called from the reader thread.
+    void* readUser;     /// Forwarded to readFn.
+    long total;         /// Document size at start.
+    uint rev;           /// Owner's edit counter at start.
+    int cells;          /// Cell count at start.
+    ubyte[] samples;    /// MINIMAP_PROBE bytes per cell.
+    ushort[] got;       /// Bytes read per sample, MINIMAP_SAMPLES per cell.
+    shared int coarse;  /// Cells with their first sample in.
+    shared int fine;    /// Cells with all samples in.
+    shared bool halted; /// Stop request, checked between cells.
+    shared bool failed; /// readFn threw, the reader gave up.
+    Thread thread;      /// Reader thread.
+
+    /// Whether the reader has finished, stopped or failed.
+    bool idle()
+    {
+        return atomicLoad(fine) >= cells || atomicLoad(halted) || atomicLoad(failed);
+    }
+
+    /// Stop and wait out the read in flight.
+    void halt()
+    {
+        atomicStore(halted, true);
+        thread.join(false);
+    }
+
+    /// Reader thread body.
+    private void run()
+    {
+        try
+        {
+            for (int c; c < cells; ++c)
+            {
+                if (atomicLoad(halted))
+                    return;
+                read(c, 0);
+                atomicStore(coarse, c + 1);
+            }
+            for (int c; c < cells; ++c)
+            {
+                if (atomicLoad(halted))
+                    return;
+                for (int k = 1; k < MINIMAP_SAMPLES; ++k)
+                    read(c, k);
+                atomicStore(fine, c + 1);
+            }
+        }
+        catch (Exception)
+            atomicStore(failed, true);
+    }
+
+    /// Read sample `k` of cell `c` into its slot.
+    private void read(int c, int k)
+    {
+        ubyte[] cell = samples[c * MINIMAP_PROBE .. (c + 1) * MINIMAP_PROBE];
+        long pos;
+        ubyte[] slot = hex_map_slot(cell, c, k, cells, total, pos);
+        got[c * MINIMAP_SAMPLES + k] = slot.length ? cast(ushort) readFn(pos, slot, readUser).length : 0;
+    }
+}
+
+/// Running minimap readers, for hex_map_release. UI thread only.
+HexMapReader[] mapReaders;
+
+/// Start a minimap reader for `cells` cells over `total` bytes, reusing the
+/// buffers of `old` (stopped) when they fit.
+HexMapReader hex_map_start(HexReadFn fn, void* user, long total, uint rev, int cells,
+    HexMapReader old)
+{
+    hex_map_prune();
+
+    HexMapReader r = new HexMapReader;
+    r.readFn   = fn;
+    r.readUser = user;
+    r.total    = total;
+    r.rev      = rev;
+    r.cells    = cells;
+    size_t n = cast(size_t) cells;
+    if (old && old.got.length == n * MINIMAP_SAMPLES)
+    {
+        r.samples = old.samples;
+        r.got     = old.got;
+    }
+    else
+    {
+        r.samples = new ubyte[](n * MINIMAP_PROBE);
+        r.got     = new ushort[](n * MINIMAP_SAMPLES);
+    }
+
+    r.thread = new Thread(&r.run);
+    r.thread.isDaemon = true; // don't hold up exit
+    r.thread.start();
+    mapReaders ~= r;
+    return r;
+}
+
+/// Drop finished and stopped readers from mapReaders.
+void hex_map_prune()
+{
+    size_t n;
+    foreach (HexMapReader r; mapReaders)
+    {
+        if (r.idle() == false)
+            mapReaders[n++] = r;
+        else
+            r.thread.join(false); // done or about to be
+    }
+    mapReaders.length = n;
+}
+
+/// Start, poll or restart the panel's minimap reader and recolor the cells
+/// whose samples came in. For panels with readFn. Returns true once every cell
+/// has its final color.
+bool hex_map_update(ref HexView v, int cells)
+{
+    long total = cast(long) hex_total(v);
+    uint rev   = v.revision ? *v.revision : 0;
+    HexMapReader r = v.mapReader;
+    // Any edit restarts it: samples read before it may be stale.
+    if (r is null || r.total != total || r.rev != rev || r.cells != cells ||
+        r.readFn != v.readFn || r.readUser != v.readUser || (atomicLoad(r.halted) && atomicLoad(r.fine) < cells))
+    {
+        if (r)
+            r.halt();
+        if (v.mapCells.length != cast(size_t) cells)
+            v.mapCells.length = cells; // old colors stay until replaced
+        r = v.mapReader = hex_map_start(v.readFn, v.readUser, total, rev, cells, r);
+        v.mapCoarse   = 0;
+        v.mapFine     = 0;
+        v.mapForStamp = v.colorStamp;
+    }
+    if (hexMapWait)
+        while (r.idle() == false)
+            Thread.sleep(1.msecs);
+    if (v.mapForStamp != v.colorStamp) // samples are current, recolor them
+    {
+        v.mapCoarse   = 0;
+        v.mapFine     = 0;
+        v.mapForStamp = v.colorStamp;
+    }
+
+    // Fine first: coarse can only be ahead of it.
+    int fine   = atomicLoad(r.fine);
+    int coarse = atomicLoad(r.coarse);
+    for (int c = v.mapCoarse > fine ? v.mapCoarse : fine; c < coarse; ++c)
+        v.mapCells[c] = hex_map_vote(v, r.samples[c * MINIMAP_PROBE .. (c + 1) * MINIMAP_PROBE],
+            r.got[c * MINIMAP_SAMPLES .. (c + 1) * MINIMAP_SAMPLES], 1, c, cells, total);
+    if (coarse > v.mapCoarse)
+        v.mapCoarse = coarse;
+    for (; v.mapFine < fine; ++v.mapFine)
+    {
+        int c = v.mapFine;
+        v.mapCells[c] = hex_map_vote(v, r.samples[c * MINIMAP_PROBE .. (c + 1) * MINIMAP_PROBE],
+            r.got[c * MINIMAP_SAMPLES .. (c + 1) * MINIMAP_SAMPLES], MINIMAP_SAMPLES, c, cells, total);
+    }
+
+    return v.mapFine >= cells || atomicLoad(r.failed);
 }
 
 unittest
@@ -1865,7 +2078,7 @@ unittest
 
     HexView v;
     v.data = cast(const(ubyte)[]) "0123456789abcdef\x00\x01";
-    hex_build_minimap(v, CELLS); // @suppress(dscanner.unused_result)
+    hex_build_minimap(v, CELLS);
 
     // All cells colored despite 10x more cells than bytes.
     assert(v.mapCells.length == CELLS);
@@ -1886,28 +2099,67 @@ unittest
 
     HexView v;
     v.data = data;
-    hex_build_minimap(v, 1); // @suppress(dscanner.unused_result)
+    hex_build_minimap(v, 1);
     assert(hex_coleq(v.mapCells[0], hex_dominant(v, data[256 .. 257], 256)));
 }
 
 unittest
 {
+    // Reader thread over a slice; `user` points at it. Slow, so release lands
+    // mid-way.
+    static ubyte[] readMem(long pos, ubyte[] buf, void* user)
+    {
+        const(ubyte)[] src = *cast(const(ubyte)[]*) user;
+        Thread.sleep(1.msecs);
+        if (pos >= src.length)
+            return buf[0 .. 0];
+        size_t n = src.length - cast(size_t) pos;
+        if (n > buf.length)
+            n = buf.length;
+        buf[0 .. n] = src[cast(size_t) pos .. cast(size_t) pos + n];
+        return buf[0 .. n];
+    }
+
+    enum int CELLS = 16;
+    ubyte[] src = new ubyte[](CELLS * 4096);
+    foreach (int c; 0 .. CELLS)
+        src[c * 4096 + 256 .. (c + 1) * 4096] = cast(ubyte) 'A'; // zero head, text body
+
     HexView v;
-    v.data = cast(const(ubyte)[]) "\x00\x00AAAA";
+    v.readFn   = &readMem;
+    v.readUser = cast(void*) &src;
+    v.dataSize = src.length;
 
-    // No budget: one cell per call, the rest on later calls.
-    assert(hex_build_minimap(v, 3, Duration.zero) == false);
-    assert(v.mapCells[0].a != 0);
-    assert(v.mapCells[1].a == 0);
-    assert(hex_build_minimap(v, 3, Duration.zero) == false);
-    assert(hex_build_minimap(v, 3, Duration.zero));
-    assert(hex_build_minimap(v, 3, Duration.zero)); // nothing to do
+    // Released mid-way: stops, and the next update starts over.
+    assert(hex_map_update(v, CELLS) == false);
+    HexMapReader first = v.mapReader;
+    hex_map_release(v.readUser);
+    assert(first.idle());
+    assert(hex_map_reading() == false);
+    assert(hex_map_update(v, CELLS) == false);
+    assert(v.mapReader !is first);
 
-    // Size change restarts and keeps the old colors.
-    mu_Color last = v.mapCells[2];
-    v.data = cast(const(ubyte)[]) "\x00\x00AAAAAA";
-    assert(hex_build_minimap(v, 3, Duration.zero) == false);
-    assert(hex_coleq(v.mapCells[2], last));
+    while (hex_map_update(v, CELLS) == false)
+        Thread.sleep(1.msecs);
+    mu_Color text = hex_dominant(v, src[256 .. 257], 256);
+    foreach (mu_Color c; v.mapCells)
+        assert(hex_coleq(c, text)); // all samples voted
+    assert(hex_map_update(v, CELLS)); // nothing to do
+
+    // An edit, same size: read again.
+    uint rev = 1;
+    v.revision = &rev;
+    assert(hex_map_update(v, CELLS) == false);
+    while (hex_map_update(v, CELLS) == false)
+        Thread.sleep(1.msecs);
+    ++rev;
+    assert(hex_map_update(v, CELLS) == false);
+
+    // Size change: new reader, old colors kept meanwhile.
+    v.dataSize = src.length - 1;
+    assert(hex_map_update(v, CELLS) == false);
+    assert(hex_coleq(v.mapCells[CELLS - 1], text));
+    hex_map_release(v.readUser);
 }
 
 // Read up to buf.length bytes at `pos`; returns what's available.

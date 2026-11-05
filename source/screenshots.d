@@ -33,7 +33,7 @@ import ddhx.charset : ASCII;
 import ddlogger;
 import ddui;
 import hexview : HexBase, HEX_KEY_HOME, HEX_KEY_END, HEX_KEY_DEL, HEX_KEY_UNDO, HEX_KEY_REDO,
-    HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN;
+    HEX_KEY_LEFT, HEX_KEY_RIGHT, HEX_KEY_UP, HEX_KEY_DOWN, hexMapWait;
 import keys : keys_run;
 import omnibar : OMNI_COMMAND, OMNI_ADDRESS, OMNI_FIND, OMNI_INSPECT,
     OMNI_BOOKMARK, OMNI_STRUCTURE, OMNI_HELP, OMNI_KEY_DOWN;
@@ -202,6 +202,8 @@ int screenshot_run(string[] args)
 
     // Discard on close instead of the native Save prompt, which would block.
     uiConfirmAuto = ConfirmAuto.discard;
+    // Whole minimap every frame, so a shot never catches it half read.
+    hexMapWait = true;
 
     // Wait out background walks so the shot shows the result.
     void frame()
