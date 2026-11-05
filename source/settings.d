@@ -139,6 +139,12 @@ bool settings_value(mu_Context* ctx, ref ValueBox box, string key)
     return prefs_set(prefs, key, cast(string) box.buf[0 .. strlen(box.buf.ptr)]);
 }
 
+/// ID from the address of text box state `box`, stable while its text changes.
+mu_Id settings_box_id(mu_Context* ctx, const(void)* box)
+{
+    return mu_get_id(ctx, &box, box.sizeof);
+}
+
 // Font setting box, committed like ValueBox. Paths need the room.
 struct FontBox
 {
@@ -154,7 +160,7 @@ void settings_font(mu_Context* ctx, ref FontBox box, string label, bool mono)
     mu_label(ctx, label);
 
     string* spec = mono ? &prefs.monofont : &prefs.font;
-    mu_Id id = mu_get_id(ctx, &box, box.sizeof);
+    mu_Id id = settings_box_id(ctx, &box);
     if (ctx.focus != id && box.editing == false)
     {
         size_t n = spec.length < box.buf.length ? spec.length : box.buf.length - 1;
@@ -172,7 +178,7 @@ void settings_font(mu_Context* ctx, ref FontBox box, string label, bool mono)
         ui_fonts(true);
     }
 
-    mu_push_id(ctx, &box, box.sizeof);
+    mu_push_id(ctx, &id, id.sizeof);
     if (mu_button(ctx, "Browse..."))
         ui_font_dialog(mono);
     // Drop a pending edit too, or the blur commits it next frame.
@@ -495,7 +501,7 @@ void settings_swatch(mu_Context* ctx, mu_Color c)
 /// Text box with scheme `s`'s colors. Bad input is dropped.
 void settings_scheme(mu_Context* ctx, ref ColorBox box, Scheme s)
 {
-    mu_Id id = mu_get_id(ctx, &box, box.sizeof);
+    mu_Id id = settings_box_id(ctx, &box);
     if (ctx.focus != id && box.editing == false)
     {
         string text = theme_spec(s);
