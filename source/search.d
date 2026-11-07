@@ -216,9 +216,11 @@ size_t search_least(ref const(Needle) needle)
 
 /// Find `needle` starting at `from` (first offset forward, last offset
 /// `backward`), wrapping around. Linear scan by window, no index or cache.
+/// Backward, matches before the wrap must end by `stop` (exclusive), like
+/// ddhx's find-prev, which skips matches overlapping the selection.
 /// Returns: Match offset or -1, with `length` the match length (0 if none).
 long search_find(ref const(Needle) needle, long from, long size, bool backward,
-    out size_t length, ref SearchContext ctx)
+    out size_t length, ref SearchContext ctx, long stop = long.max)
 {
     if (needle.length == 0 || ctx.read is null)
         return -1;
@@ -242,7 +244,7 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
         if (from < 0)
             return search_range(needle, 0, last, size, true, length, ctx);
 
-        long hit = search_range(needle, 0, from, size, true, length, ctx);
+        long hit = search_range(needle, 0, from, size, true, length, ctx, null, stop);
         if (hit < 0 && from < last) // wrap
             hit = search_range(needle, from + 1, last, size, true, length, ctx);
         return hit;
@@ -630,13 +632,13 @@ const(char)[] search_strip(const(char)[] text)
 /// Try every offset in [lo, hi]; return the first match, or the last if
 /// `wantLast` (backward search; the walk is still forward).
 /// With `each`, every match not overlapping the previous one goes to it
-/// instead, until it returns false.
+/// instead, until it returns false. Matches end by `stop` (exclusive).
 ///
 /// Not ddhx's `matchPattern`: it takes a haystack, so runs couldn't reach past
 /// the buffer. Stretches are streamed separately, so runs span the document.
 long search_range(ref const(Needle) needle, long lo, long hi, long size,
     bool wantLast, out size_t length, ref SearchContext ctx,
-    scope bool delegate(long at, size_t length) each = null)
+    scope bool delegate(long at, size_t length) each = null, long stop = long.max)
 {
     if (lo > hi)
         return -1;
@@ -651,7 +653,7 @@ long search_range(ref const(Needle) needle, long lo, long hi, long size,
     {
         long at = wantLast ? hi : lo;
         Chain chain = search_chain(needle, segs, 0, at, size, ctx);
-        if (chain.end >= 0)
+        if (chain.end >= 0 && chain.end <= stop)
         {
             length = cast(size_t)(chain.end - at);
             return at;
@@ -711,6 +713,8 @@ long search_range(ref const(Needle) needle, long lo, long hi, long size,
                 }
                 end = chain.end;
             }
+            if (end > stop)
+                break scan; // later starts end later too
 
             if (each)
             {
@@ -936,6 +940,44 @@ unittest
     assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == -1);
     assert(search_parse(`utf8:'hello world, and then some more text than fits'`, n));
     assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == -1);
+}
+
+// Backward end bound: matches before the selection must end by its start.
+unittest
+{
+    static immutable(ubyte)[] data;
+    static ubyte[] reader(long pos, ubyte[] buf, void* user)
+    {
+        if (pos >= data.length)
+            return null;
+        size_t n = data.length - cast(size_t) pos;
+        if (n > buf.length) n = buf.length;
+        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
+        return buf[0 .. n];
+    }
+
+    Needle n;
+    size_t len;
+    data = cast(immutable(ubyte)[]) "AAAAAAAA";
+    long size = cast(long) data.length;
+    assert(search_parse("utf8:AAA", n));
+    // "AAA" selected at 4: 3 overlaps it, 1 is the first that ends by 4.
+    assert(search_find(n, 3, size, true, len, *search_context(&reader, null)) == 3);
+    assert(search_find(n, 3, size, true, len, *search_context(&reader, null), 4) == 1);
+    // Nothing ends by 2, so it wraps to the last match.
+    assert(search_find(n, 1, size, true, len, *search_context(&reader, null), 2) == 5);
+
+    data = cast(immutable(ubyte)[]) "AXYBAXB.";
+    size = cast(long) data.length;
+    assert(search_parse("utf8:A * utf8:B", n));
+    assert(search_find(n, 3, size, true, len, *search_context(&reader, null), 4) == 0);
+    assert(len == 4);
+    assert(search_find(n, 3, size, true, len, *search_context(&reader, null), 3) == 4); // wrapped
+    assert(len == 3);
+    // Leading run: the last start whose match ends by the bound.
+    assert(search_parse("* utf8:B", n));
+    assert(search_find(n, 5, size, true, len, *search_context(&reader, null), 5) == 3);
+    assert(len == 1);
 }
 
 unittest

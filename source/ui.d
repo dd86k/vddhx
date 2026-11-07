@@ -3562,8 +3562,7 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         // Prefix rows complete, like Tab.
         if (ui_omni_complete(mode, id))
             break;
-        // Remember the pattern for Find Next. Search starts past the caret so repeats
-        // advance.
+        // Remember the pattern for Find Next.
         Needle needle;
         if (ui_find_needle(needle))
         {
@@ -3572,10 +3571,10 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
             final switch (ui_find_goal(transfer))
             {
             case FindGoal.next:
-                ui_find_step(focusedView, false, cast(long) focusedView.hex.cursor + 1);
+                ui_find_step(focusedView, false);
                 break;
             case FindGoal.back:
-                ui_find_step(focusedView, true, cast(long) hex_sel_low(focusedView.hex) - 1);
+                ui_find_step(focusedView, true);
                 break;
             case FindGoal.markAll:
                 ui_mark_all();
@@ -3794,9 +3793,14 @@ public bool ui_job_cancel()
     return true;
 }
 
-/// Search `v`'s document for the last pattern from `from` and select the match.
-/// Always reports in the status bar; silence would look like a dropped key.
-void ui_find_step(ref View v, bool backward, long from)
+/// Search `v`'s document for the last pattern past the selection and select
+/// the match. Always reports in the status bar, silence would look like a
+/// dropped key.
+///
+/// Same bounds as ddhx's find-next/find-prev: forward starts past the
+/// selection, backward only takes matches ending before it. A caret alone
+/// bounds nothing going back.
+void ui_find_step(ref View v, bool backward)
 {
     if (haveNeedle == false)
     {
@@ -3810,10 +3814,13 @@ void ui_find_step(ref View v, bool backward, long from)
     // search since '*' varies.
     Needle needle = lastNeedle;
     long size = cast(long) hex_total(v.hex);
+    long low  = cast(long) hex_sel_low(v.hex);
+    long from = backward ? low - 1 : cast(long) hex_sel_high(v.hex) + 1;
+    long stop = backward && v.hex.anchor != v.hex.cursor ? low : long.max;
     long at = -1;
     size_t length;
     ui_job(&v, (ref SearchContext ctx) {
-        at = search_find(needle, from, size, backward, length, ctx);
+        at = search_find(needle, from, size, backward, length, ctx, stop);
     }, (View* w) {
         if (at < 0)
         {
@@ -3921,17 +3928,13 @@ void ui_mark_all()
     });
 }
 
-/// Repeat the last search from the caret, offset so it doesn't refind the same
+/// Repeat the last search past the selection, so it doesn't refind the same
 /// match.
 public void ui_find_repeat(bool backward)
 {
     if (ui_on_settings())
         return;
-    // The caret is on the match's last byte; going back from it would refind it.
-    long from = backward
-        ? cast(long) hex_sel_low(focusedView.hex) - 1
-        : cast(long) focusedView.hex.cursor + 1;
-    ui_find_step(focusedView, backward, from);
+    ui_find_step(focusedView, backward);
 }
 
 /// ddhx skip-back/forward: move past the run of identical elements at the

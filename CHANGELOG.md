@@ -54,6 +54,8 @@ Rules:
 - Arrow keys and Home/End work after clicking outside the grid, without
   clicking back into it.
 - Shortcuts need their exact modifiers: Ctrl+Alt+N no longer acts as Ctrl+N.
+- **Find**: Find Previous skips matches overlapping the selection, and Find
+  Next resumes past the whole selection, like ddhx.
 
 ## v0.1.1
 
