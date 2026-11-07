@@ -1,7 +1,8 @@
-/// Byte-pattern search over a document, through a read hook (testable on an
-/// array).
+/// Byte-pattern search over a document: find box parsing, and the find, skip
+/// and diff walks.
 ///
-/// Syntax and parsing are ddhx's (`utils.arguments`, `patterns.pattern`).
+/// Syntax and parsing are ddhx's (`utils.arguments`, `patterns.pattern`), and
+/// so is matching (`searches.search`).
 /// Patterns require a prefix; no bare text, since it would have to guess
 /// the encoding.
 ///
@@ -21,15 +22,22 @@
 /// Quotes only affect escaping, never the encoding.
 /// Scalars use the caller's byte order (the document setting); byte strings
 /// ignore it.
+///
+/// NOTE: A '*' reaches at least 64 KiB, like ddhx: a match has to fit in one
+/// of its search windows.
 /// Authors: dd86k <dd@dax.moe>
 module search;
 
 import core.atomic : atomicLoad;
+import std.algorithm.comparison : min;
 import std.system : Endian;
 
+import ddhx.editor.base : IDocumentEditor;
 import patterns : pattern, Pattern, patternpfx, PatternType,
     PatternRange, PATTERN_GLOB_MANY, PATTERN_GLOB_ONE, PATTERN_HAS_GLOB,
     PATTERN_HAS_RANGE, PATTERN_RANGE, PATTERN_RANGE_TAIL;
+import searches : ddhx_search = search, SearchResult, SearchAction,
+    SEARCH_DIFF, SEARCH_REVERSE, SEARCH_ALIGNED, SEARCH_RESULT_NOT_FOUND;
 import utils : Argument, arguments;
 
 /// Needle sentinels (ddhx's): any one byte, and any run including empty.
@@ -59,40 +67,35 @@ struct Needle
     PatternRange[SEARCH_MAX] ranges;
 }
 
-/// Read into `buf` from `pos`, return what was read. Same shape as the hex
-/// panel's.
-alias SearchReadFn = ubyte[] function(long pos, ubyte[] buf, void* user);
-
-/// Reader and buffers for a walk. Caller-owned so walks can run concurrently.
+/// Document and buffers for a walk. Caller-owned so walks can run concurrently.
 struct SearchContext
 {
-    SearchReadFn read;
-    void* user;
+    IDocumentEditor editor;
     /// Checked per window. Results of a canceled walk are meaningless.
     shared(bool)* cancel;
     /// Called per window with 0-100.
     void delegate(int percent) progress;
-    /// Candidate window.
+    /// Diff window for `editor`.
     ubyte[] window;
-    /// Read-ahead for runs; used at the same time as `window`.
-    ubyte[] runWindow;
+    /// Diff window for the peer, used at the same time as `window`.
+    ubyte[] peerWindow;
     /// Copy of the element being skipped over.
     ubyte[SEARCH_ELEMENT_MAX] element;
 
     private long total, done;
 }
 
-/// Context with default window sizes.
-SearchContext* search_context(SearchReadFn read, void* user)
+/// Context over `editor` with default window sizes.
+SearchContext* search_context(IDocumentEditor editor)
 {
     SearchContext* ctx = new SearchContext;
-    ctx.read      = read;
-    ctx.user      = user;
-    ctx.window    = new ubyte[SEARCH_WINDOW];
-    ctx.runWindow = new ubyte[SEARCH_WINDOW];
+    ctx.editor     = editor;
+    ctx.window     = new ubyte[SEARCH_WINDOW];
+    ctx.peerWindow = new ubyte[SEARCH_WINDOW];
     return ctx;
 }
 
+/// Diff window size.
 enum size_t SEARCH_WINDOW = 64 * 1024;
 
 /// Parse a pattern; scalars are encoded in `endian`. Syntax: see module header.
@@ -215,14 +218,14 @@ size_t search_least(ref const(Needle) needle)
 }
 
 /// Find `needle` starting at `from` (first offset forward, last offset
-/// `backward`), wrapping around. Linear scan by window, no index or cache.
+/// `backward`), wrapping around.
 /// Backward, matches before the wrap must end by `stop` (exclusive), like
 /// ddhx's find-prev, which skips matches overlapping the selection.
 /// Returns: Match offset or -1, with `length` the match length (0 if none).
 long search_find(ref const(Needle) needle, long from, long size, bool backward,
     out size_t length, ref SearchContext ctx, long stop = long.max)
 {
-    if (needle.length == 0 || ctx.read is null)
+    if (needle.length == 0 || ctx.editor is null)
         return -1;
 
     size_t least = search_least(needle);
@@ -237,64 +240,57 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
 
     ctx.total = last + 1; // both halves of the wrap cover each start once
     ctx.done  = 0;
+    Pattern pat = search_pattern(needle);
+    SearchResult hit;
 
     if (backward)
     {
-        // Before offset 0 (caret at 0 going back): search all, take the last match.
+        // Before offset 0 (caret at 0 going back): the last match anywhere.
         if (from < 0)
-            return search_range(needle, 0, last, size, true, length, ctx);
-
-        long hit = search_range(needle, 0, from, size, true, length, ctx, null, stop);
-        if (hit < 0 && from < last) // wrap
-            hit = search_range(needle, from + 1, last, size, true, length, ctx);
-        return hit;
+            hit = search_pass(pat, last, size, true, long.min, ctx);
+        else
+        {
+            hit = search_pass(pat, from, min(stop, size), true, long.min, ctx);
+            if (hit.pos < 0 && from < last && search_halted(ctx) == false) // wrap, down to from + 1
+            {
+                hit = search_pass(pat, last, size, true, from + 1, ctx);
+                if (hit.pos <= from)
+                    hit.pos = -1;
+            }
+        }
+    }
+    else
+    {
+        if (from < 0)
+            from = 0;
+        hit = search_pass(pat, from, size, false, long.max, ctx);
+        if (hit.pos < 0 && from > 0 && search_halted(ctx) == false) // wrap, up to from
+        {
+            hit = search_pass(pat, 0, size, false, from, ctx);
+            if (hit.pos >= from)
+                hit.pos = -1;
+        }
     }
 
-    if (from < 0)
-        from = 0;
-    long hit = search_range(needle, from, last, size, false, length, ctx);
-    if (hit < 0 && from > 0)
-        hit = search_range(needle, 0, from - 1, size, false, length, ctx);
-    return hit;
+    if (hit.pos < 0)
+        return -1;
+    length = cast(size_t) hit.len;
+    return hit.pos;
 }
 
 /// Pass every match of `needle` to `each`, first to last, without overlaps.
 /// `each` returns false to stop.
 void search_all(ref const(Needle) needle, long size,
-    scope bool delegate(long at, size_t length) each, ref SearchContext ctx)
+    bool delegate(long at, size_t length) each, ref SearchContext ctx)
 {
-    if (needle.length == 0 || ctx.read is null)
+    if (needle.length == 0 || ctx.editor is null || search_least(needle) == 0)
         return;
 
-    size_t least = search_least(needle);
-    if (least == 0)
-        return; // runs only: see search_matchable
-
-    long last = size - cast(long) least; // last possible start
-    if (last < 0)
-        return;
-
-    ctx.total = last + 1;
+    ctx.total = size;
     ctx.done  = 0;
-
-    // Leading run: each match reaches back to where the last one ended, so one
-    // attempt per match.
-    if (needle.data[0] == SEARCH_RUN)
-    {
-        size_t length;
-        long at;
-        while (at <= last && search_range(needle, at, last, size, false, length, ctx) >= 0)
-        {
-            if (each(at, length) == false)
-                return;
-            at += cast(long) length;
-            search_advance(ctx, cast(long) length);
-        }
-        return;
-    }
-
-    size_t length;
-    search_range(needle, 0, last, size, false, length, ctx, each);
+    Pattern pat = search_pattern(needle);
+    search_pass(pat, 0, size, false, long.max, ctx, (SearchResult hit) =>
+        each(hit.pos, cast(size_t) hit.len) ? SearchAction.next : SearchAction.stop);
 }
 
 /// Max element size for a skip (the comparison copy); larger selections need
@@ -313,7 +309,7 @@ enum size_t SEARCH_ELEMENT_MAX = 4096;
 long search_skip(long from, long len, long size, bool backward,
     ref SearchContext ctx)
 {
-    if (ctx.read is null || size <= 0 || len < 1 || len > cast(long) SEARCH_ELEMENT_MAX)
+    if (ctx.editor is null || size <= 0 || len < 1 || len > cast(long) SEARCH_ELEMENT_MAX)
         return -1;
 
     // Caret on the append slot or selection past a delete: use the last element
@@ -324,74 +320,42 @@ long search_skip(long from, long len, long size, bool backward,
         return -1; // document shorter than one element
 
     size_t n = cast(size_t) len;
-    ubyte[] want = ctx.read(from, ctx.element[0 .. n], ctx.user);
+    ubyte[] want = ctx.editor.view(from, ctx.element[0 .. n]);
     if (want.length < n)
         return -1;
 
-    // Whole elements per window so none is split.
-    long step = cast(long)((ctx.window.length / n) * n);
     ctx.total = backward ? from : size - from - len;
     ctx.done  = 0;
+    long start = backward ? from - len : from + len;
+    SearchResult hit;
+    try hit = ddhx_search(ctx.editor, Pattern.fromBytes(want), start,
+        backward ? SEARCH_DIFF | SEARCH_ALIGNED | SEARCH_REVERSE : SEARCH_DIFF | SEARCH_ALIGNED,
+        null, size, 1, search_meter(&ctx, start, backward, backward ? long.min : long.max));
+    catch (SearchHalt)
+        return -1;
 
-    if (backward)
-    {
-        long end = from; // one past the last byte to check
-        while (end - len >= 0)
-        {
-            if (search_halted(ctx))
-                return -1;
-            long room = ((end - from % len) / len) * len; // aligned bytes below
-            long take = room > step ? step : room;
-            long pos = end - take;
-            ubyte[] have = ctx.read(pos, ctx.window[0 .. cast(size_t) take], ctx.user);
-            if (have.length < n)
-                break;
-            search_advance(ctx, cast(long) have.length);
-            foreach_reverse (size_t b; 0 .. have.length / n)
-                if (have[b * n .. (b + 1) * n] != ctx.element[0 .. n])
-                    return pos + cast(long)(b * n);
-            end = pos;
-        }
-        return from % len; // hit start: lowest aligned element
-    }
-
-    long pos = from + len;
-    while (pos + len <= size)
-    {
-        if (search_halted(ctx))
-            return -1;
-        long room = ((size - pos) / len) * len;
-        long take = room > step ? step : room;
-        ubyte[] have = ctx.read(pos, ctx.window[0 .. cast(size_t) take], ctx.user);
-        if (have.length < n)
-            break;
-        search_advance(ctx, cast(long) have.length);
-        foreach (size_t b; 0 .. have.length / n)
-            if (have[b * n .. (b + 1) * n] != ctx.element[0 .. n])
-                return pos + cast(long)(b * n);
-        pos += cast(long)((have.length / n) * n);
-    }
-    // Hit end: last aligned element that fits.
-    return from + ((size - len - from) / len) * len;
+    if (hit.pos >= 0)
+        return hit.pos;
+    // Hit an edge: the last aligned element that fits.
+    return backward ? from % len : from + ((size - len - from) / len) * len;
 }
 
 /// ddhx diff-next/diff-prev: start of the next run of bytes differing between
-/// two documents compared offset for offset, `size` bytes read through `ctx`
-/// and `peerSize` through `peerRead`. Bytes past the shorter end differ.
+/// two documents compared offset for offset, `size` bytes of `ctx.editor`
+/// and `peerSize` of `peer`. Bytes past the shorter end differ.
 ///
 /// Only a run's first byte is a stop, so a modified region takes one jump.
 /// Backward from inside a run lands on its own start.
 /// Returns: Run start after (or before) `from`, or -1 if none.
 long search_diff(long from, long size, long peerSize, bool backward,
-    SearchReadFn peerRead, void* peerUser, ref SearchContext ctx)
+    IDocumentEditor peer, ref SearchContext ctx)
 {
-    if (ctx.read is null || peerRead is null || from < 0)
+    if (ctx.editor is null || peer is null || from < 0)
         return -1;
 
     long common = size < peerSize ? size : peerSize;
     long limit  = size < peerSize ? peerSize : size;
-    size_t cap = ctx.window.length < ctx.runWindow.length
-        ? ctx.window.length : ctx.runWindow.length;
+    size_t cap = min(ctx.window.length, ctx.peerWindow.length);
     ctx.done = 0;
 
     if (backward)
@@ -418,8 +382,8 @@ long search_diff(long from, long size, long peerSize, bool backward,
             long take = end > cast(long) cap ? cast(long) cap : end;
             long pos = end - take;
             size_t n = cast(size_t) take;
-            ubyte[] mine   = ctx.read(pos, ctx.window[0 .. n], ctx.user);
-            ubyte[] theirs = peerRead(pos, ctx.runWindow[0 .. n], peerUser);
+            ubyte[] mine   = ctx.editor.view(pos, ctx.window[0 .. n]);
+            ubyte[] theirs = peer.view(pos, ctx.peerWindow[0 .. n]);
             if (mine.length < n || theirs.length < n)
                 return -1; // changed underneath
             search_advance(ctx, take);
@@ -449,8 +413,8 @@ long search_diff(long from, long size, long peerSize, bool backward,
             return -1;
         long room = common - pos;
         size_t n = room > cast(long) cap ? cap : cast(size_t) room;
-        ubyte[] mine   = ctx.read(pos, ctx.window[0 .. n], ctx.user);
-        ubyte[] theirs = peerRead(pos, ctx.runWindow[0 .. n], peerUser);
+        ubyte[] mine   = ctx.editor.view(pos, ctx.window[0 .. n]);
+        ubyte[] theirs = peer.view(pos, ctx.peerWindow[0 .. n]);
         if (mine.length < n || theirs.length < n)
             return -1;
         search_advance(ctx, cast(long) n);
@@ -469,6 +433,7 @@ long search_diff(long from, long size, long peerSize, bool backward,
 
 private:
 
+/// Whether the walk was canceled.
 bool search_halted(ref SearchContext ctx)
 {
     return ctx.cancel && atomicLoad(*ctx.cancel);
@@ -492,132 +457,57 @@ bool search_matchable(ref const(Needle) needle)
     return false;
 }
 
-/// Run-free stretch: `length` elements from `at`, each one byte. Runs never
-/// fall inside ranges.
-struct Segment
+/// Thrown from a ddhx progress hook to end its search early.
+class SearchHalt : Exception
 {
-    size_t at;
-    size_t length;
+    this() { super("search halted"); }
 }
 
-/// Needle split at runs: fixed-length stretches matched in order, any distance
-/// apart.
-struct Segments
+/// ddhx pattern copied from `needle`.
+Pattern search_pattern(ref const(Needle) needle)
 {
-    Segment[SEARCH_MAX / 2 + 1] seg; /// Runs between each, so at most this many.
-    size_t count;
-    /// Pattern starts with a run: the first stretch isn't anchored either.
-    bool lead;
-}
-
-Segments search_split(ref const(Needle) needle)
-{
-    Segments segs;
-    size_t i;
-    while (i < needle.length)
-    {
-        if (needle.data[i] == SEARCH_RUN)
-        {
-            if (i == 0)
-                segs.lead = true;
-            ++i;
-            continue;
-        }
-        size_t start = i;
-        while (i < needle.length && needle.data[i] != SEARCH_RUN)
-            ++i;
-        segs.seg[segs.count++] = Segment(start, i - start);
-    }
-    return segs;
-}
-
-/// Whether `seg` matches `have[at .. at + seg.length]`; caller ensures bounds.
-bool search_fits(ref const(Needle) needle, Segment seg, const(ubyte)[] have, size_t at)
-{
-    size_t i;
-    while (i < seg.length)
-    {
-        ushort element = needle.data[seg.at + i];
+    Pattern pat;
+    pat.data = needle.data[0 .. needle.length].dup;
+    size_t heads; // range heads are numbered in order
+    foreach (ushort element; pat.data)
         if (element >= SEARCH_RANGE)
-        {
-            const(PatternRange)* range = &needle.ranges[element - SEARCH_RANGE];
-            if (range.contains(have[at + i .. $]) == false)
-                return false;
-            i += range.width;
-            continue;
-        }
-        if (element != SEARCH_ANY && have[at + i] != cast(ubyte) element)
-            return false;
-        ++i;
-    }
-    return true;
+            ++heads;
+    pat.ranges = needle.ranges[0 .. heads].dup;
+    pat.flags  = needle.flags;
+    return pat;
 }
 
-/// Lowest offset in [from, hi] where the stretch matches, windows overlapping
-/// by a stretch so no match is split.
-/// Returns: The offset, or -1.
-long search_seek(ref const(Needle) needle, Segment seg, long from, long hi,
-    ubyte[] buf, ref SearchContext ctx)
+/// ddhx search from `start` for matches ending by `end`, given to `onhit`.
+/// Ends once every start past `limit` (below it, `backward`) is scanned.
+/// Returns: The match, or a not-found result if none or halted.
+SearchResult search_pass(Pattern pat, long start, long end, bool backward, long limit,
+    ref SearchContext ctx, SearchAction delegate(SearchResult) onhit = null)
 {
-    long pos = from < 0 ? 0 : from;
-    while (pos <= hi)
-    {
-        if (search_halted(ctx))
-            return -1;
-        long want = (hi - pos) + cast(long) seg.length;
-        if (want > cast(long) buf.length)
-            want = cast(long) buf.length;
-
-        ubyte[] have = ctx.read(pos, buf[0 .. cast(size_t) want], ctx.user);
-        if (have.length < seg.length)
-            return -1;
-
-        size_t limit = have.length - seg.length;
-        foreach (size_t i; 0 .. limit + 1)
-        {
-            if (pos + cast(long) i > hi)
-                return -1;
-            if (search_fits(needle, seg, have, i))
-                return pos + cast(long) i;
-        }
-        pos += cast(long)(limit + 1);
-    }
-    return -1;
+    try return ddhx_search(ctx.editor, pat, start, backward ? SEARCH_REVERSE : 0,
+        onhit, end, 1, search_meter(&ctx, start, backward, limit));
+    catch (SearchHalt)
+        return SearchResult(SEARCH_RESULT_NOT_FOUND, 0);
 }
 
-/// Result of matching a chain of stretches.
-struct Chain
+/// ddhx progress hook for a search from `start`: counts its scanned bytes into
+/// `ctx`, throws SearchHalt on cancel or once the scan passes `limit`.
+void delegate(long, long) search_meter(SearchContext* ctx, long start, bool backward,
+    long limit)
 {
-    /// Where the first stretch matched. Used to tell if the result still applies
-    /// for another start: see search_range.
-    long at;
-    /// One past the match end, or -1 if a stretch wasn't found.
-    long end;
+    long counted;
+    return (long done, long total) {
+        // ddhx reports the next start to scan forward, and the bytes from the
+        // lowest scanned start to the end backward.
+        long at = backward ? total - done : done;
+        long scanned = backward ? start - at + 1 : at - start;
+        search_advance(*ctx, scanned - counted);
+        counted = scanned;
+        if (search_halted(*ctx) || (backward ? at <= limit : at >= limit))
+            throw new SearchHalt;
+    };
 }
 
-/// Match stretches from `first` on, each at the lowest offset after the
-/// previous: runs are as short as possible, like ddhx's '*'.
-///
-/// A failure fails all later starts too: they'd search from further along.
-Chain search_chain(ref const(Needle) needle, ref const(Segments) segs, size_t first,
-    long pos, long size, ref SearchContext ctx)
-{
-    Chain chain = { pos, -1 };
-    foreach (size_t s; first .. segs.count)
-    {
-        Segment seg = segs.seg[s];
-        long hit = search_seek(needle, seg, pos, size - cast(long) seg.length,
-            ctx.runWindow, ctx);
-        if (hit < 0)
-            return chain;
-        if (s == first)
-            chain.at = hit;
-        pos = hit + cast(long) seg.length;
-    }
-    chain.end = pos;
-    return chain;
-}
-
+/// `text` without leading and trailing blanks.
 const(char)[] search_strip(const(char)[] text)
 {
     size_t start;
@@ -627,118 +517,6 @@ const(char)[] search_strip(const(char)[] text)
     while (end > start && (text[end - 1] == ' ' || text[end - 1] == '\t'))
         --end;
     return text[start .. end];
-}
-
-/// Try every offset in [lo, hi]; return the first match, or the last if
-/// `wantLast` (backward search; the walk is still forward).
-/// With `each`, every match not overlapping the previous one goes to it
-/// instead, until it returns false. Matches end by `stop` (exclusive).
-///
-/// Not ddhx's `matchPattern`: it takes a haystack, so runs couldn't reach past
-/// the buffer. Stretches are streamed separately, so runs span the document.
-long search_range(ref const(Needle) needle, long lo, long hi, long size,
-    bool wantLast, out size_t length, ref SearchContext ctx,
-    scope bool delegate(long at, size_t length) each = null, long stop = long.max)
-{
-    if (lo > hi)
-        return -1;
-
-    Segments segs = search_split(needle);
-    if (segs.count == 0)
-        return -1; // runs only: see search_matchable
-
-    // Leading run: matches from any start if the rest is ahead, same answer for
-    // all starts up to where the rest begins. One attempt settles it.
-    if (segs.lead)
-    {
-        long at = wantLast ? hi : lo;
-        Chain chain = search_chain(needle, segs, 0, at, size, ctx);
-        if (chain.end >= 0 && chain.end <= stop)
-        {
-            length = cast(size_t)(chain.end - at);
-            return at;
-        }
-        if (wantLast == false)
-            return -1;
-        // For the last match: the scan below finds where the first stretch last
-        // begins.
-    }
-
-    Segment head = segs.seg[0];
-    long best = -1;
-    size_t bestlen;
-
-    // Last chain result, reused for later candidates. A candidate before the
-    // chain's first stretch reaches that same stretch, so the result stands.
-    // Otherwise resume past it. Stretches are swept once in total, not per
-    // candidate.
-    Chain chain = { -1, -1 };
-    long next = lo; // first start past the last match given to `each`
-
-    long pos = lo;
-    scan: while (pos <= hi)
-    {
-        if (search_halted(ctx))
-            return -1;
-        // Enough for the remaining candidates, up to a window. Only the first stretch
-        // is scanned here; stretches after runs use their own window.
-        long want = (hi - pos) + cast(long) head.length;
-        if (want > cast(long) ctx.window.length)
-            want = cast(long) ctx.window.length;
-
-        ubyte[] have = ctx.read(pos, ctx.window[0 .. cast(size_t) want], ctx.user);
-        if (have.length < head.length)
-            break; // remainder too short
-
-        size_t limit = have.length - head.length; // last start index
-        foreach (size_t i; 0 .. limit + 1)
-        {
-            if (pos + cast(long) i > hi)
-                break;
-            if (search_fits(needle, head, have, i) == false)
-                continue;
-
-            long at   = pos + cast(long) i;
-            if (at < next)
-                continue;
-            long from = at + cast(long) head.length;
-            long end  = from;
-            if (segs.count > 1)
-            {
-                if (chain.end < 0 || from > chain.at)
-                {
-                    chain = search_chain(needle, segs, 1, from, size, ctx);
-                    if (chain.end < 0)
-                        break scan; // all later candidates fail too
-                }
-                end = chain.end;
-            }
-            if (end > stop)
-                break scan; // later starts end later too
-
-            if (each)
-            {
-                if (each(at, cast(size_t)(end - at)) == false)
-                    return at;
-                next = end;
-                continue;
-            }
-
-            if (wantLast == false)
-            {
-                length = cast(size_t)(end - at);
-                return at;
-            }
-            best = at;
-            bestlen = cast(size_t)(end - at);
-        }
-
-        // Advance past tried candidates, keeping the overlap for the next window.
-        pos += cast(long)(limit + 1);
-        search_advance(ctx, cast(long)(limit + 1));
-    }
-    length = bestlen;
-    return best;
 }
 
 unittest
@@ -862,354 +640,324 @@ unittest
     assert(search_prefix_of("") is null);
 }
 
+version (unittest)
+{
+    import ddhx.editor.dummy : DummyDocumentEditor;
+    import searches : SEARCH_CHUNKSIZE;
+
+    /// Context over a copy of `data`.
+    SearchContext* test_context(const(ubyte)[] data)
+    {
+        return search_context(new DummyDocumentEditor(data.idup));
+    }
+
+    /// Dummy editor counting its reads.
+    class CountingEditor : DummyDocumentEditor
+    {
+        size_t reads;
+        this(immutable(ubyte)[] data) { super(data); }
+        alias view = DummyDocumentEditor.view;
+        override ubyte[] view(long position, ubyte[] buffer)
+        {
+            ++reads;
+            return super.view(position, buffer);
+        }
+    }
+}
+
 unittest
 {
-    // Same hook shape the panel uses.
-    static ubyte[] data = [
+    static immutable ubyte[] data = [
         0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0xde, 0xad,
         0xbe, 0xef, 0x22, 0x33, 0xde, 0xad, 0x44, 0x55,
     ];
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        if (pos >= data.length)
-            return null;
-        size_t n = data.length - cast(size_t) pos;
-        if (n > buf.length) n = buf.length;
-        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
+    SearchContext* ctx = test_context(data);
 
     Needle n;
     size_t len;
     assert(search_parse("0xdeadbeef", n));
     long size = cast(long) data.length;
 
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 0);
+    assert(search_find(n, 0, size, false, len, *ctx) == 0);
     assert(len == 4);
-    assert(search_find(n, 1, size, false, len, *search_context(&reader, null)) == 6);
-    assert(search_find(n, 7, size, false, len, *search_context(&reader, null)) == 0);  // wrapped
-    assert(search_find(n, 6, size, true,  len, *search_context(&reader, null)) == 6);
-    assert(search_find(n, 5, size, true,  len, *search_context(&reader, null)) == 0);
-    assert(search_find(n, 0, size, true,  len, *search_context(&reader, null)) == 0);  // 0 matches
-    assert(search_find(n, -1, size, true, len, *search_context(&reader, null)) == 6);  // wrapped backward
+    assert(search_find(n, 1, size, false, len, *ctx) == 6);
+    assert(search_find(n, 7, size, false, len, *ctx) == 0);  // wrapped
+    assert(search_find(n, 6, size, true,  len, *ctx) == 6);
+    assert(search_find(n, 5, size, true,  len, *ctx) == 0);
+    assert(search_find(n, 0, size, true,  len, *ctx) == 0);  // 0 matches
+    assert(search_find(n, -1, size, true, len, *ctx) == 6);  // wrapped backward
 
     // Trailing "de ad" without "be ef": no match.
     assert(search_parse("0xdead", n));
-    assert(search_find(n, 7, size, false, len, *search_context(&reader, null)) == 12);
+    assert(search_find(n, 7, size, false, len, *ctx) == 12);
 
     assert(search_parse("0xde ? 0xbe", n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 0);
+    assert(search_find(n, 0, size, false, len, *ctx) == 0);
     assert(len == 3);
 
     // Runs are minimal: from 0, the nearest 0xef (3) gives 4 bytes, not 10.
     assert(search_parse("0xde * 0xef", n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 0);
+    assert(search_find(n, 0, size, false, len, *ctx) == 0);
     assert(len == 4);
     // Empty run.
     assert(search_parse("0xde * 0xad", n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 0);
+    assert(search_find(n, 0, size, false, len, *ctx) == 0);
     assert(len == 2);
     // Last match, for backward search.
     assert(search_parse("0xbe * 0x33", n));
-    assert(search_find(n, size - 1, size, true, len, *search_context(&reader, null)) == 8);
+    assert(search_find(n, size - 1, size, true, len, *ctx) == 8);
     assert(len == 4);
 
     // Ranges use the prefix's width and byte order.
     assert(search_parse("u8:32..64", n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 10);
+    assert(search_find(n, 0, size, false, len, *ctx) == 10);
     assert(len == 1);
     assert(search_parse("i8:-40..-30", n)); // 0xde is -34
-    assert(search_find(n, 1, size, false, len, *search_context(&reader, null)) == 6);
+    assert(search_find(n, 1, size, false, len, *ctx) == 6);
     assert(search_parse("x:de u8:170..175", n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 0);
+    assert(search_find(n, 0, size, false, len, *ctx) == 0);
     assert(len == 2);
     assert(search_parse("u16:57000..57100", n, Endian.bigEndian)); // de ad
-    assert(search_find(n, 1, size, false, len, *search_context(&reader, null)) == 6);
+    assert(search_find(n, 1, size, false, len, *ctx) == 6);
     assert(len == 2);
     assert(search_parse("u16:57000..57100", n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == -1);
+    assert(search_find(n, 0, size, false, len, *ctx) == -1);
     assert(search_parse("u8:34..34 * u8:85", n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == 10);
+    assert(search_find(n, 0, size, false, len, *ctx) == 10);
     assert(len == 6);
 
     // Absent, and longer than the document.
     assert(search_parse("0xc0ffee", n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == -1);
+    assert(search_find(n, 0, size, false, len, *ctx) == -1);
     assert(len == 0);
     assert(search_parse("0xde * 0xc0ffee", n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == -1);
+    assert(search_find(n, 0, size, false, len, *ctx) == -1);
     assert(search_parse(`utf8:'hello world, and then some more text than fits'`, n));
-    assert(search_find(n, 0, size, false, len, *search_context(&reader, null)) == -1);
+    assert(search_find(n, 0, size, false, len, *ctx) == -1);
 }
 
 // Backward end bound: matches before the selection must end by its start.
 unittest
 {
-    static immutable(ubyte)[] data;
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        if (pos >= data.length)
-            return null;
-        size_t n = data.length - cast(size_t) pos;
-        if (n > buf.length) n = buf.length;
-        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
-
     Needle n;
     size_t len;
-    data = cast(immutable(ubyte)[]) "AAAAAAAA";
-    long size = cast(long) data.length;
+    SearchContext* ctx = test_context(cast(const(ubyte)[]) "AAAAAAAA");
+    long size = 8;
     assert(search_parse("utf8:AAA", n));
     // "AAA" selected at 4: 3 overlaps it, 1 is the first that ends by 4.
-    assert(search_find(n, 3, size, true, len, *search_context(&reader, null)) == 3);
-    assert(search_find(n, 3, size, true, len, *search_context(&reader, null), 4) == 1);
+    assert(search_find(n, 3, size, true, len, *ctx) == 3);
+    assert(search_find(n, 3, size, true, len, *ctx, 4) == 1);
     // Nothing ends by 2, so it wraps to the last match.
-    assert(search_find(n, 1, size, true, len, *search_context(&reader, null), 2) == 5);
+    assert(search_find(n, 1, size, true, len, *ctx, 2) == 5);
 
-    data = cast(immutable(ubyte)[]) "AXYBAXB.";
-    size = cast(long) data.length;
+    ctx = test_context(cast(const(ubyte)[]) "AXYBAXB.");
     assert(search_parse("utf8:A * utf8:B", n));
-    assert(search_find(n, 3, size, true, len, *search_context(&reader, null), 4) == 0);
+    assert(search_find(n, 3, size, true, len, *ctx, 4) == 0);
     assert(len == 4);
-    assert(search_find(n, 3, size, true, len, *search_context(&reader, null), 3) == 4); // wrapped
+    assert(search_find(n, 3, size, true, len, *ctx, 3) == 4); // wrapped
     assert(len == 3);
     // Leading run: the last start whose match ends by the bound.
     assert(search_parse("* utf8:B", n));
-    assert(search_find(n, 5, size, true, len, *search_context(&reader, null), 5) == 3);
+    assert(search_find(n, 5, size, true, len, *ctx, 5) == 3);
     assert(len == 1);
 }
 
 unittest
 {
     // Three runs with single bytes around them.
-    static ubyte[] runs = [
+    static immutable ubyte[] runs = [
         0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x02, 0x02, 0x02, 0xff, 0xff, 0x01,
     ];
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        if (pos >= runs.length)
-            return null;
-        size_t n = runs.length - cast(size_t) pos;
-        if (n > buf.length) n = buf.length;
-        buf[0 .. n] = runs[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
+    SearchContext* ctx = test_context(runs);
     long size = cast(long) runs.length;
 
     // Forward: past the run, from anywhere in it.
-    assert(search_skip(4, 1, size, false, *search_context(&reader, null)) == 10);
-    assert(search_skip(9, 1, size, false, *search_context(&reader, null)) == 10);
-    assert(search_skip(10, 1, size, false, *search_context(&reader, null)) == 13);
-    assert(search_skip(0, 1, size, false, *search_context(&reader, null)) == 1); // single-byte run
+    assert(search_skip(4, 1, size, false, *ctx) == 10);
+    assert(search_skip(9, 1, size, false, *ctx) == 10);
+    assert(search_skip(10, 1, size, false, *ctx) == 13);
+    assert(search_skip(0, 1, size, false, *ctx) == 1); // single-byte run
 
     // Backward: last byte before the run.
-    assert(search_skip(9, 1, size, true, *search_context(&reader, null)) == 3);
-    assert(search_skip(4, 1, size, true, *search_context(&reader, null)) == 3);
-    assert(search_skip(12, 1, size, true, *search_context(&reader, null)) == 9);
+    assert(search_skip(9, 1, size, true, *ctx) == 3);
+    assert(search_skip(4, 1, size, true, *ctx) == 3);
+    assert(search_skip(12, 1, size, true, *ctx) == 9);
 
     // No difference until the end: still moves. Append slot reads as last byte.
-    assert(search_skip(0, 1, size, true, *search_context(&reader, null)) == 0);
-    assert(search_skip(15, 1, size, false, *search_context(&reader, null)) == 15);
-    assert(search_skip(size, 1, size, true, *search_context(&reader, null)) == 14);
-    assert(search_skip(0, 1, 0, false, *search_context(&reader, null)) == -1); // empty
+    assert(search_skip(0, 1, size, true, *ctx) == 0);
+    assert(search_skip(15, 1, size, false, *ctx) == 15);
+    assert(search_skip(size, 1, size, true, *ctx) == 14);
+    assert(search_skip(0, 1, 0, false, *ctx) == -1); // empty
 
     // Longer element (selection). Aligned to the start offset: from 4 back, pairs
     // on even offsets, stops at 2.
-    assert(search_skip(4, 2, size, false, *search_context(&reader, null)) == 10);
-    assert(search_skip(4, 2, size, true, *search_context(&reader, null)) == 2);
-    assert(search_skip(3, 2, size, true, *search_context(&reader, null)) == 1);
-    assert(search_skip(10, 3, size, false, *search_context(&reader, null)) == 13); // 02 02 02, then ff ff 01
+    assert(search_skip(4, 2, size, false, *ctx) == 10);
+    assert(search_skip(4, 2, size, true, *ctx) == 2);
+    assert(search_skip(3, 2, size, true, *ctx) == 1);
+    assert(search_skip(10, 3, size, false, *ctx) == 13); // 02 02 02, then ff ff 01
 
     // Element too long for the document, and past the limit.
-    assert(search_skip(0, size + 1, size, false, *search_context(&reader, null)) == -1);
-    assert(search_skip(0, cast(long) SEARCH_ELEMENT_MAX + 1, size, false, *search_context(&reader, null)) == -1);
+    assert(search_skip(0, size + 1, size, false, *ctx) == -1);
+    assert(search_skip(0, cast(long) SEARCH_ELEMENT_MAX + 1, size, false, *ctx) == -1);
 }
 
 unittest
 {
     // Match across a window boundary.
-    enum size_t SIZE = SEARCH_WINDOW + 1024;
-    static __gshared ubyte[SIZE] big;
-    enum long AT = SEARCH_WINDOW - 2; // spans first and second window
+    enum size_t SIZE = SEARCH_CHUNKSIZE + 1024;
+    enum long AT = SEARCH_CHUNKSIZE - 2; // spans first and second window
+    ubyte[] big = new ubyte[SIZE];
     big[AT .. AT + 4] = [ 0xca, 0xfe, 0xba, 0xbe ];
-
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        if (pos >= SIZE)
-            return null;
-        size_t n = SIZE - cast(size_t) pos;
-        if (n > buf.length) n = buf.length;
-        buf[0 .. n] = big[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
+    SearchContext* ctx = test_context(big);
 
     Needle n;
     size_t len;
     assert(search_parse("0xcafebabe", n));
-    assert(search_find(n, 0, SIZE, false, len, *search_context(&reader, null)) == AT);
+    assert(search_find(n, 0, SIZE, false, len, *ctx) == AT);
     assert(len == 4);
-    assert(search_find(n, SIZE - 1, SIZE, true, len, *search_context(&reader, null)) == AT);
+    assert(search_find(n, SIZE - 1, SIZE, true, len, *ctx) == AT);
 }
 
 unittest
 {
-    // Runs spanning multiple windows.
-    enum size_t SIZE = 3 * SEARCH_WINDOW;
-    enum long HEAD = 100;                        // first window
-    enum long MID  = SEARCH_WINDOW + 5000;       // second
-    enum long TAIL = 2 * SEARCH_WINDOW + 9000;   // third
-    static __gshared ubyte[SIZE] big;
+    // Runs spanning windows, within ddhx's reach.
+    enum size_t SIZE = 3 * SEARCH_CHUNKSIZE;
+    enum long HEAD = SEARCH_CHUNKSIZE - 100;
+    enum long MID  = HEAD + 20_000;
+    enum long TAIL = MID + 30_000;
+    ubyte[] big = new ubyte[SIZE];
     big[HEAD .. HEAD + 2] = [ 0xca, 0xfe ];
     big[MID  .. MID  + 2] = [ 0xba, 0xbe ];
     big[TAIL .. TAIL + 2] = [ 0xde, 0xad ];
-
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        if (pos >= SIZE)
-            return null;
-        size_t n = SIZE - cast(size_t) pos;
-        if (n > buf.length) n = buf.length;
-        buf[0 .. n] = big[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
+    SearchContext* ctx = test_context(big);
 
     Needle n;
     size_t len;
 
     assert(search_parse("0xcafe * 0xbabe", n));
-    assert(search_find(n, 0, SIZE, false, len, *search_context(&reader, null)) == HEAD);
+    assert(search_find(n, 0, SIZE, false, len, *ctx) == HEAD);
     assert(len == MID + 2 - HEAD);
-    assert(search_find(n, SIZE - 1, SIZE, true, len, *search_context(&reader, null)) == HEAD);
+    assert(search_find(n, SIZE - 1, SIZE, true, len, *ctx) == HEAD);
     assert(len == MID + 2 - HEAD);
 
-    // Two runs, three stretches, each in a different window.
+    // Two runs, three stretches.
     assert(search_parse("0xcafe * 0xbabe * 0xdead", n));
-    assert(search_find(n, 0, SIZE, false, len, *search_context(&reader, null)) == HEAD);
+    assert(search_find(n, 0, SIZE, false, len, *ctx) == HEAD);
     assert(len == TAIL + 2 - HEAD);
 
     // Order matters.
     assert(search_parse("0xbabe * 0xcafe", n));
-    assert(search_find(n, 0, SIZE, false, len, *search_context(&reader, null)) == -1);
+    assert(search_find(n, 0, SIZE, false, len, *ctx) == -1);
     assert(len == 0);
 
     // Leading run: match starts at the search start.
     assert(search_parse("* 0xbabe", n));
-    assert(search_find(n, 0, SIZE, false, len, *search_context(&reader, null)) == 0);
-    assert(len == MID + 2);
+    assert(search_find(n, MID - 1000, SIZE, false, len, *ctx) == MID - 1000);
+    assert(len == 1002);
     // Backward: last offset with the rest still ahead.
-    assert(search_find(n, SIZE - 1, SIZE, true, len, *search_context(&reader, null)) == MID);
+    assert(search_find(n, SIZE - 1, SIZE, true, len, *ctx) == MID);
     assert(len == 2);
+
+    // Past the reach: two windows apart is too far.
+    big[] = 0;
+    big[0 .. 2] = [ 0xca, 0xfe ];
+    big[SIZE - 2 .. SIZE] = [ 0xba, 0xbe ];
+    ctx = test_context(big);
+    assert(search_parse("0xcafe * 0xbabe", n));
+    assert(search_find(n, 0, SIZE, false, len, *ctx) == -1);
 }
 
 unittest
 {
-    // Many first-stretch candidates, one distant tail: the cached chain avoids a
-    // walk to the tail per candidate.
+    // Many first-stretch candidates, distant tails.
     enum size_t SIZE = 2 * SEARCH_WINDOW;
     enum size_t RUN  = 4096; // 0x22 below this
-    static __gshared ubyte[SIZE] many;
+    ubyte[] many = new ubyte[SIZE];
     many[0 .. RUN] = 0x22;
     many[SIZE - 1] = 0x33;
 
-    // Plus a nearer tail with a candidate past it, so the cached chain must be
-    // dropped there.
+    // Plus a nearer tail with a candidate past it.
     enum long NEAR = SEARCH_WINDOW + 1000;
     enum long FAR  = NEAR + 2000;
     many[SEARCH_WINDOW] = 0x22;
     many[NEAR] = 0x33;
     many[FAR]  = 0x22;
-
-    static __gshared size_t reads;
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        ++reads;
-        if (pos >= SIZE)
-            return null;
-        size_t n = SIZE - cast(size_t) pos;
-        if (n > buf.length) n = buf.length;
-        buf[0 .. n] = many[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
+    SearchContext* ctx = test_context(many);
 
     Needle n;
     size_t len;
     assert(search_parse("x:22 * x:33", n));
 
     // Forward: first 0x22 to the first 0x33 after it.
-    assert(search_find(n, 0, SIZE, false, len, *search_context(&reader, null)) == 0);
+    assert(search_find(n, 0, SIZE, false, len, *ctx) == 0);
     assert(len == NEAR + 1);
 
     // Backward: the last candidate, past the near tail, has its own.
-    reads = 0;
-    assert(search_find(n, SIZE - 1, SIZE, true, len, *search_context(&reader, null)) == FAR);
+    assert(search_find(n, SIZE - 1, SIZE, true, len, *ctx) == FAR);
     assert(len == SIZE - FAR);
-    // Document is 4 windows; without the cache it'd be a walk per candidate.
-    assert(reads < 16);
 
     // Last candidate in the run shares the near tail.
-    assert(search_find(n, SEARCH_WINDOW - 1, SIZE, true, len, *search_context(&reader, null)) == RUN - 1);
+    assert(search_find(n, SEARCH_WINDOW - 1, SIZE, true, len, *ctx) == RUN - 1);
     assert(len == NEAR + 1 - (RUN - 1));
 }
 
-/// Progress reaches 100; cancel stops at the next window.
+/// Progress reaches 100; cancel stops at the next window, wraps included.
 unittest
 {
-    enum size_t SIZE = 4 * SEARCH_WINDOW;
-    static __gshared ubyte[SIZE] data;
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        size_t n = cast(size_t)(SIZE - pos < buf.length ? SIZE - pos : buf.length);
-        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
+    enum size_t SIZE = 4 * SEARCH_CHUNKSIZE;
+    immutable(ubyte)[] data = new immutable(ubyte)[SIZE];
 
     Needle n;
     search_parse("x:aa bb", n);
     size_t len;
 
     int[] seen;
-    SearchContext* ctx = search_context(&reader, null);
+    SearchContext* ctx = test_context(data);
     ctx.progress = (int p) { seen ~= p; };
     assert(search_find(n, 0, SIZE, false, len, *ctx) == -1);
     assert(seen.length >= 4 && seen[$ - 1] == 100);
+    seen = null;
+    assert(search_find(n, SIZE / 2, SIZE, true, len, *ctx) == -1);
+    assert(seen.length >= 4 && seen[$ - 1] == 100);
 
-    static __gshared size_t reads;
-    static ubyte[] counting(long pos, ubyte[] buf, void* user)
-    {
-        ++reads;
-        return reader(pos, buf, user);
-    }
+    CountingEditor counting = new CountingEditor(data);
     shared bool stop;
-    ctx = search_context(&counting, null);
+    ctx = search_context(counting);
     ctx.cancel = &stop;
     ctx.progress = (int p) { stop = true; }; // cancel after the first window
-    search_find(n, 0, SIZE, false, len, *ctx);
-    assert(reads == 1);
+    assert(search_find(n, SIZE / 2, SIZE, false, len, *ctx) == -1);
+    assert(counting.reads == 1);
 
-    reads = 0;
+    counting.reads = 0;
     stop = false;
     assert(search_skip(0, 1, SIZE, false, *ctx) == -1);
-    assert(reads == 2); // element, then one window
+    assert(counting.reads == 2); // element, then one window
+}
+
+// The wrap stops where the first half began.
+unittest
+{
+    enum size_t SIZE = 4 * SEARCH_CHUNKSIZE;
+    CountingEditor counting = new CountingEditor(new immutable(ubyte)[SIZE]);
+    SearchContext* ctx = search_context(counting);
+
+    Needle n;
+    search_parse("x:aa bb", n);
+    size_t len;
+    assert(search_find(n, SIZE / 2, SIZE, false, len, *ctx) == -1);
+    assert(counting.reads <= 6, "forward rescanned past the start");
+    counting.reads = 0;
+    assert(search_find(n, SIZE / 2, SIZE, true, len, *ctx) == -1);
+    assert(counting.reads <= 6, "backward rescanned past the start");
 }
 
 unittest
 {
-    static ubyte[] data = [
+    static immutable ubyte[] data = [
         0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0xde, 0xad,
         0xbe, 0xef, 0x22, 0x33, 0xde, 0xad, 0x44, 0x55,
         0xaa, 0xaa, 0xaa,
     ];
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        if (pos >= data.length)
-            return null;
-        size_t n = data.length - cast(size_t) pos;
-        if (n > buf.length) n = buf.length;
-        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
 
     long size = cast(long) data.length;
     long[2][] all(string text, size_t stop = size_t.max)
@@ -1220,7 +968,7 @@ unittest
         search_all(n, size, (long at, size_t length) {
             hits ~= [ at, cast(long) length ];
             return hits.length < stop;
-        }, *search_context(&reader, null));
+        }, *test_context(data));
         return hits;
     }
 
@@ -1236,22 +984,10 @@ unittest
 
 unittest
 {
-    // Reads the slice `user` points at.
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        const(ubyte)[] data = *cast(const(ubyte)[]*) user;
-        if (pos >= data.length)
-            return null;
-        size_t n = data.length - cast(size_t) pos;
-        if (n > buf.length) n = buf.length;
-        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
     long diff(const(ubyte)[] mine, const(ubyte)[] theirs, long from, bool backward)
     {
-        SearchContext* ctx = search_context(&reader, cast(void*) &mine);
         return search_diff(from, mine.length, theirs.length, backward,
-            &reader, cast(void*) &theirs, *ctx);
+            new DummyDocumentEditor(theirs.idup), *test_context(mine));
     }
     import std.string : representation;
     alias B = representation;
@@ -1293,20 +1029,13 @@ unittest
     // A run across a window boundary is one run.
     enum size_t SIZE = SEARCH_WINDOW * 2;
     enum size_t RUN = SEARCH_WINDOW - 2;
-    static __gshared ubyte[SIZE] mine, theirs;
+    ubyte[] theirs = new ubyte[SIZE];
     theirs[RUN .. SEARCH_WINDOW + 2] = 0xff;
-    static ubyte[] reader(long pos, ubyte[] buf, void* user)
-    {
-        ubyte[] data = (cast(ubyte[SIZE]*) user)[0][];
-        size_t n = buf.length;
-        if (pos + n > data.length) n = data.length - cast(size_t) pos;
-        buf[0 .. n] = data[cast(size_t) pos .. cast(size_t) pos + n];
-        return buf[0 .. n];
-    }
+    DummyDocumentEditor peer = new DummyDocumentEditor(theirs.idup);
     long diff(long from, bool backward)
     {
-        SearchContext* ctx = search_context(&reader, &mine);
-        return search_diff(from, SIZE, SIZE, backward, &reader, &theirs, *ctx);
+        return search_diff(from, SIZE, SIZE, backward, peer,
+            *test_context(new ubyte[SIZE]));
     }
     assert(diff(0, false) == RUN);
     assert(diff(RUN, false) == -1);

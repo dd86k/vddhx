@@ -56,6 +56,8 @@ Rules:
 - Shortcuts need their exact modifiers: Ctrl+Alt+N no longer acts as Ctrl+N.
 - **Find**: Find Previous skips matches overlapping the selection, and Find
   Next resumes past the whole selection, like ddhx.
+- **Find**: Find, Bookmark All Matches and skips use ddhx's search. A `*` run
+  reaches at least 64 KiB, like ddhx, no longer the whole file.
 
 ## v0.1.1
 

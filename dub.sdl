@@ -7,7 +7,7 @@ license "MIT"
 dependency "bindbc-sdl" version="==2.4.4"
 dependency "ddui" repository="git+https://github.com/dd86k/ddui.git" version="c9bff8942f85fbb282e5b9e3a3f74db213031ccf"
 dependency "ddlogger" repository="git+https://github.com/dd86k/ddlogger.git" version="dcab663a80d496c1d3c7fee4c406ed7f763e5fdb"
-dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="75cd3167d36082c6bf72872b799b455dfdd289ba"
+dependency "ddhx" repository="git+https://github.com/dd86k/ddhx.git" version="0357e06d5e388b1ed6e00c64372ebc8ef904ff13"
 
 # Windows: GUI subsystem (--console attaches one, see source/main.d).
 # D main is wmain under LDC, main under DMD.

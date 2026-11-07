@@ -1054,8 +1054,7 @@ void ui_wakeup() nothrow
     SDL_PushEvent(&wake);
 }
 
-/// Panel byte source: reads via the editor in hex.readUser. Takes the editor,
-/// not the view, since search uses it too (ui_find_step).
+/// Panel byte source: reads via the editor in hex.readUser.
 ubyte[] hexRead(long pos, ubyte[] buf, void* user)
 {
     IDocumentEditor ed = cast(IDocumentEditor) user;
@@ -1668,7 +1667,7 @@ public void ui_diff_step(bool backward)
     long size = mine.size(), peerSize = theirs.size();
     long at = -1;
     ui_job(v, (ref SearchContext ctx) {
-        at = search_diff(from, size, peerSize, backward, &hexRead, cast(void*) theirs, ctx);
+        at = search_diff(from, size, peerSize, backward, theirs, ctx);
     }, (View* w) {
         if (at < 0)
         {
@@ -3751,7 +3750,7 @@ void ui_job(View* v, void delegate(ref SearchContext) walk, void delegate(View*)
         d.job = new BackgroundWorker;
     BackgroundWorker job = d.job;
 
-    SearchContext* ctx = search_context(&hexRead, cast(void*) d.editor);
+    SearchContext* ctx = search_context(d.editor);
     ctx.cancel   = job.cancelToken();
     ctx.progress = (int percent) { job.reportProgress(percent); };
 
