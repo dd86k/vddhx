@@ -9,6 +9,7 @@ version (Screenshots):
 import std.file : exists, read, remove, write, mkdirRecurse, tempDir;
 import std.path : buildPath;
 import std.stdio : File;
+import std.format : format;
 import std.string : toStringz;
 
 import bindbc.sdl;
@@ -50,6 +51,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     Files files = keys_files();
     keys_open(files);
     keys_navigate();
+    keys_replace();
     keys_marks_file(files);
     keys_write(files);
     keys_file_write(files);
@@ -578,6 +580,74 @@ void keys_navigate()
     type("0xcafebabe");
     press(SDLK_RETURN);
     expect(low() == NEEDLE_A && ui_probe().marks == marks + 2, "Ctrl+F finds again");
+}
+
+/// Find and Replace, Replace Next and Replace All over `nav`'s two needles,
+/// undone after.
+void keys_replace()
+{
+    size_t low() { Probe p = ui_probe(); return p.cursor < p.anchor ? p.cursor : p.anchor; }
+    /// Byte at `at`, scrolled into view first.
+    int peek(size_t at)
+    {
+        goto_(format("%#x", at));
+        return ui_peek(at);
+    }
+
+    press(SDLK_HOME, CTRL);
+    press(SDLK_R, CTRL);
+    Probe p = ui_probe();
+    expect(p.omni && p.mode == OmniMode.find, "Ctrl+R raises find to replace");
+    type("0xcafebabe -- x:11 22");
+    press(SDLK_RETURN);
+    p = ui_probe();
+    expect(p.omni == false && low() == NEEDLE_A && p.size == NAV_SIZE,
+        "...overwrites the first match in place and selects it");
+    press(SDLK_R, CTRL | SHIFT);
+    expect(low() == NEEDLE_B, "Ctrl+Shift+R replaces the next");
+    press(SDLK_R, CTRL | SHIFT);
+    expect(low() == NEEDLE_B, "...and stops at the last, without wrapping");
+    expect(peek(NEEDLE_A) == 0x11 && ui_peek(NEEDLE_A + 3) == 0x22,
+        "the replacement repeats over the match");
+    expect(peek(NEEDLE_B) == 0x11, "...both of them");
+    press(SDLK_Z, CTRL);
+    press(SDLK_Z, CTRL);
+    expect(peek(NEEDLE_A) == 0xca && peek(NEEDLE_B) == 0xca, "a Ctrl+Z per replace");
+
+    // One-byte matches leave no selection to start past.
+    press(SDLK_HOME, CTRL);
+    press(SDLK_R, CTRL);
+    type("x:ca -- x:ca");
+    press(SDLK_RETURN);
+    expect(low() == NEEDLE_A, "Ctrl+R on one byte");
+    press(SDLK_R, CTRL | SHIFT);
+    expect(low() == NEEDLE_B, "...then Ctrl+Shift+R moves on");
+    press(SDLK_Z, CTRL);
+    press(SDLK_Z, CTRL);
+
+    press(SDLK_HOME, CTRL);
+    press(SDLK_P, CTRL | SHIFT);
+    type("Replace All");
+    press(SDLK_RETURN);
+    type("0xcafebabe -- utf8:z");
+    press(SDLK_RETURN);
+    expect(peek(NEEDLE_A + 3) == 'z' && peek(NEEDLE_B) == 'z', "Replace All... overwrites every match");
+    expect(ui_probe().edited, "...editing the document");
+    press(SDLK_Z, CTRL);
+    expect(peek(NEEDLE_A) == 0xca && peek(NEEDLE_B + 3) == 0xbe, "one Ctrl+Z undoes them all");
+    expect(ui_probe().edited == false, "...back to the saved bytes");
+
+    // In a selection: only NEEDLE_B.
+    goto_("0x200");
+    for (size_t i; i < 0x110 / 0x10; ++i)
+        press(SDLK_DOWN, SHIFT);
+    press(SDLK_P, CTRL | SHIFT);
+    type("Replace All");
+    press(SDLK_RETURN);
+    type("0xcafebabe -- x:00");
+    press(SDLK_RETURN);
+    expect(peek(NEEDLE_A) == 0xca && peek(NEEDLE_B) == 0, "...or every match in the selection");
+    press(SDLK_Z, CTRL);
 }
 
 void keys_marks_file(ref const(Files) f)

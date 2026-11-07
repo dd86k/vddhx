@@ -17,6 +17,9 @@ Rules:
   Search data and mark new bookmarks using a pattern. Esc cancels it.
 - **Bookmarks**: "Save Bookmarks..." and "Load Bookmarks...", in ddhx's format.
   Names are kept.
+- **Find**: "Find and Replace..." (`Ctrl+R`), "Replace Next" (`Ctrl+Shift+R`) and
+  "Replace All...", as ddhx's `find-replace` and `find-replace-all`. Replace All
+  undoes in one step.
 - "Replace..." and "Insert..." commands with their Range equivalent.
   Same syntax as ddhx.
 - "Insert File..." and "Replace with File..." commands, as ddhx's `insert-file`

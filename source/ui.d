@@ -31,7 +31,7 @@ import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector
 import ddlogger;
 import ddui;
 import disks : DISKS_LISTED, Disk, disks_list, disks_size;
-import edit : EditRequest, edit_parse, edit_range;
+import edit : EditRequest, edit_parse, edit_parse_replace, edit_range;
 import elevate : Elevated, elevate_denied, elevate_poll, elevate_request;
 import elite : elite_frame, elite_animating;
 import hexview;
@@ -2627,6 +2627,7 @@ public enum
     CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_REPLACE_FILE, CMD_INSERT_FILE,
     CMD_GOTO, CMD_SELECT_RANGE,
     CMD_FIND, CMD_FIND_BACK, CMD_FIND_NEXT, CMD_FIND_PREV, CMD_MARK_ALL, CMD_INSPECT, CMD_STRUCTURE,
+    CMD_FIND_REPLACE, CMD_FIND_REPLACE_ALL, CMD_FIND_REPLACE_NEXT,
     CMD_SKIP_NEXT, CMD_SKIP_PREV, CMD_SKIP_SEL_NEXT, CMD_SKIP_SEL_PREV,
     CMD_MARK, CMD_MARK_NAME, CMD_MARK_NEXT, CMD_MARK_PREV, CMD_MARK_LIST, CMD_MARK_CLEAR,
     CMD_MARK_LOAD, CMD_MARK_SAVE,
@@ -2676,6 +2677,9 @@ public immutable Entry[] COMMANDS = [
     Entry("Find Next",              "", CMD_FIND_NEXT,     "search again forward"),
     Entry("Find Previous",          "", CMD_FIND_PREV,     "search back backward"),
     Entry("Bookmark All Matches...","", CMD_MARK_ALL,      "find search mark every each highlight count occurrences"),
+    Entry("Find and Replace...",    "", CMD_FIND_REPLACE,  "search substitute overwrite swap change pattern"),
+    Entry("Replace Next",           "", CMD_FIND_REPLACE_NEXT, "find search substitute again repeat"),
+    Entry("Replace All...",         "", CMD_FIND_REPLACE_ALL, "find search substitute every each global"),
     Entry("Inspect Bytes...",       "", CMD_INSPECT,       "data types decode value integer float"),
     Entry("Go to Field...",         "", CMD_STRUCTURE,     "structure layout chunk record section symbol header"),
     Entry("Skip Forward",           "", CMD_SKIP_NEXT,     "run element next word"),
@@ -3091,28 +3095,37 @@ void ui_goto_preview(out string label, out string detail)
             "%u of %u bytes, %d%%", a.pos, total, percent));
 }
 
-/// The find box's parsed pattern. Cached across frames since the parser
-/// allocates; reparsed only when the text changes.
+/// The find box's parsed pattern, the part before `--` when replacing. Cached
+/// across frames since the parser allocates; reparsed only when the text
+/// changes.
 bool ui_find_needle(out Needle needle)
 {
     const(char)[] query = omni_query(omni);
-    if (query.length > findText.length) // too long to cache
-    {
-        findTextLen = size_t.max;
-        return search_parse(query, needle, focusedDoc.endian);
-    }
+    bool replacing = ui_find_replacing();
 
     // Byte order affects the result: reparse on change.
-    if (findTextLen != query.length || findEndian != focusedDoc.endian
-        || findText[0 .. findTextLen] != query)
+    bool fits = query.length <= findText.length;
+    if (fits == false || findTextLen != query.length || findEndian != focusedDoc.endian
+        || findReplacing != replacing || findText[0 .. findTextLen] != query)
     {
-        findTextLen = query.length;
-        findEndian  = focusedDoc.endian;
-        findText[0 .. findTextLen] = query;
-        findHave = search_parse(query, findNeedle, findEndian);
+        findTextLen   = fits ? query.length : size_t.max;
+        findEndian    = focusedDoc.endian;
+        findReplacing = replacing;
+        if (fits)
+            findText[0 .. findTextLen] = query;
+        if (replacing)
+            findError = edit_parse_replace(query, findEndian, findNeedle, findHave, findWith);
+        else
+            findHave = search_parse(query, findNeedle, findEndian);
     }
     needle = findNeedle;
     return findHave;
+}
+
+/// Whether the find box takes a replacement too.
+bool ui_find_replacing()
+{
+    return findGoal == FindGoal.replace || findGoal == FindGoal.replaceAll;
 }
 
 /// Row id for "run the search" (readout and notices). Other '/' ids index
@@ -3195,6 +3208,16 @@ bool ui_find_preview(out string label, out string detail)
     char[64] count = void;
     label  = ui_row_text(buf[0 .. at]);
     string where = FIND_WHERE[findGoal];
+    if (ui_find_replacing())
+    {
+        if (findGoal == FindGoal.replaceAll && focusedView.hex.anchor != focusedView.hex.cursor)
+            where = "over every match in the selection";
+        char[48] head = void;
+        char[96] line = void;
+        detail = ui_row_text(findError ? findError
+            : sformat(line, "%s repeated, %s", ui_hex_head(findWith, head), where));
+        return true;
+    }
     detail = ui_row_text(sformat(count, least == needle.length
         ? "%u byte(s), %s" : "%u byte(s) or more, %s", least, where));
     return true;
@@ -3607,12 +3630,23 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         // Prefix rows complete, like Tab.
         if (ui_omni_complete(mode, id))
             break;
-        // Remember the pattern for Find Next.
+        // Remember the pattern for Find Next, like ddhx's find-replace.
         Needle needle;
-        if (ui_find_needle(needle))
+        bool found = ui_find_needle(needle);
+        if (found && ui_find_replacing() && findError)
+        {
+            ui_status("replace: %s", findError);
+            found = false;
+        }
+        if (found)
         {
             lastNeedle = needle;
             haveNeedle = true;
+            if (ui_find_replacing())
+            {
+                replaceNeedle = needle;
+                replaceWith   = findWith;
+            }
             final switch (ui_find_goal(transfer))
             {
             case FindGoal.next:
@@ -3623,6 +3657,12 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
                 break;
             case FindGoal.markAll:
                 ui_mark_all();
+                break;
+            case FindGoal.replace:
+                ui_replace_step(focusedView);
+                break;
+            case FindGoal.replaceAll:
+                ui_replace_all(focusedView);
                 break;
             }
         }
@@ -3738,6 +3778,29 @@ __gshared size_t findTextLen = size_t.max;
 __gshared char[192] findText;
 /// Ditto, byte order used.
 __gshared Endian findEndian;
+/// Ditto, parsed as find-replace.
+__gshared bool findReplacing;
+/// Ditto, replacement bytes.
+__gshared ubyte[] findWith;
+/// Ditto, what's wrong with the replacement, or null.
+__gshared string findError;
+
+/// Last find-replace, for Replace Next.
+__gshared Needle replaceNeedle;
+/// Ditto.
+__gshared ubyte[] replaceWith;
+
+/// Where Replace Next resumes while `view`'s selection is still the last
+/// replaced match. A one-byte match leaves no selection to start past.
+struct ReplaceResume
+{
+    const(View)* view;     /// View the replace was in.
+    size_t anchor, cursor; /// Its selection after.
+    uint revision; /// Document revision after the replace.
+    long next;     /// Past the match.
+}
+/// Ditto.
+__gshared ReplaceResume replaceResume;
 
 /// Whether a job is walking `d` (edits refused).
 bool ui_busy(const(Document)* d)
@@ -3886,6 +3949,8 @@ enum FindGoal
     next,    /// Find forward from the caret
     back,    /// Find backward from the caret
     markAll, /// Bookmark every match
+    replace,    /// Overwrite the next match, `NEEDLE -- REPLACEMENT`
+    replaceAll, /// Ditto, every match
 }
 
 /// Find box readout per goal. The tag says the direction, so this says how to flip it.
@@ -3893,10 +3958,14 @@ immutable string[FindGoal.max + 1] FIND_WHERE = [
     "Shift+Enter goes back",
     "Shift+Enter goes forward",
     "bookmarks every match",
+    "over the next match",
+    "over every match from the caret on",
 ];
 
 /// Find box tag per goal, shown at the right end of the box.
-immutable string[FindGoal.max + 1] FIND_TAG = [ "forward", "backward", "bookmark all" ];
+immutable string[FindGoal.max + 1] FIND_TAG = [
+    "forward", "backward", "bookmark all", "replace", "replace all",
+];
 
 /// Find box goal. Back to next on any other opening.
 __gshared FindGoal findGoal;
@@ -3904,7 +3973,7 @@ __gshared FindGoal findGoal;
 /// Goal Enter takes, `shift` swapping next and back.
 FindGoal ui_find_goal(bool shift)
 {
-    if (shift == false || findGoal == FindGoal.markAll)
+    if (shift == false || (findGoal != FindGoal.next && findGoal != FindGoal.back))
         return findGoal;
     return findGoal == FindGoal.next ? FindGoal.back : FindGoal.next;
 }
@@ -3952,7 +4021,7 @@ void ui_mark_all()
     Bookmark[] hits;
     bool full;
     ui_job(v, (ref SearchContext ctx) {
-        search_all(needle, size, (long at, size_t length) {
+        search_all(needle, 0, size, (long at, size_t length) {
             if (hits.length == MARK_ALL_MAX)
             {
                 full = true;
@@ -3971,6 +4040,138 @@ void ui_mark_all()
         ui_status(full ? "bookmarked the first %u matches" : "bookmarked %u match(es)",
             hits.length);
     });
+}
+
+/// Open the find box for ddhx's `NEEDLE -- REPLACEMENT`, to overwrite the next
+/// match, or every match (`all`).
+public void ui_replace_prompt(bool all)
+{
+    if (ui_on_settings())
+        return;
+    if (focusedDoc.editor is null || ui_refuse_edit(&focusedDoc()))
+        return;
+    ui_find_prompt(all ? FindGoal.replaceAll : FindGoal.replace);
+}
+
+/// Repeat the last find-replace in the focused view.
+public void ui_replace_repeat()
+{
+    if (ui_on_settings())
+        return;
+    ui_replace_step(focusedView);
+}
+
+/// A match to overwrite.
+struct Match
+{
+    long at;     /// Offset.
+    long length; /// Bytes.
+}
+
+/// Overwrite the next match of the last find-replace and select it. Like ddhx,
+/// from past the selection or at the caret, without wrapping.
+void ui_replace_step(ref View v)
+{
+    if (replaceWith.length == 0)
+    {
+        ui_status("no find-replace to repeat yet");
+        return;
+    }
+    if (v.doc.editor is null || ui_refuse_edit(v.doc))
+        return;
+
+    Needle needle = replaceNeedle;
+    const(ubyte)[] data = replaceWith;
+    long size = cast(long) hex_total(v.hex);
+    long from = v.hex.anchor != v.hex.cursor
+        ? cast(long) hex_sel_high(v.hex) + 1 : cast(long) v.hex.cursor;
+    ReplaceResume* r = &replaceResume;
+    if (r.view is &v && r.anchor == v.hex.anchor && r.cursor == v.hex.cursor
+        && r.revision == v.doc.revision)
+        from = r.next;
+
+    Match hit = Match(-1, 0);
+    ui_job(&v, (ref SearchContext ctx) {
+        search_all(needle, from, size, (long at, size_t length) {
+            hit = Match(at, cast(long) length);
+            return false;
+        }, ctx);
+    }, (View* w) {
+        if (hit.at < 0)
+        {
+            ui_status("no match from here to the end");
+            return;
+        }
+        if (ui_replace_hits(w, (&hit)[0 .. 1], data) == false)
+            return;
+        ui_select_range(*w, cast(size_t) hit.at, cast(size_t) hit.length);
+        replaceResume = ReplaceResume(w, w.hex.anchor, w.hex.cursor, w.doc.revision,
+            hit.at + hit.length);
+        ui_status("replaced at %s", ui_offset(hit.at));
+    });
+}
+
+/// Overwrite every match of the last find-replace in the selection, or from
+/// the caret on, like ddhx's find-replace-all. Matches land together once the
+/// walk is done, so canceling replaces none.
+void ui_replace_all(ref View v)
+{
+    if (replaceWith.length == 0)
+    {
+        ui_status("no find-replace to repeat yet");
+        return;
+    }
+    if (v.doc.editor is null || ui_refuse_edit(v.doc))
+        return;
+
+    Needle needle = replaceNeedle;
+    const(ubyte)[] data = replaceWith;
+    bool selected = v.hex.anchor != v.hex.cursor;
+    long size = cast(long) hex_total(v.hex);
+    long from = cast(long)(selected ? hex_sel_low(v.hex) : v.hex.cursor);
+    long end  = selected ? min(cast(long) hex_sel_high(v.hex) + 1, size) : size;
+    Match[] hits;
+    ui_job(&v, (ref SearchContext ctx) {
+        search_all(needle, from, end, (long at, size_t length) {
+            hits ~= Match(at, cast(long) length);
+            return true;
+        }, ctx);
+    }, (View* w) {
+        if (hits.length == 0)
+            ui_status(selected ? "not found in the selection" : "no match from here to the end");
+        else if (ui_replace_hits(w, hits, data))
+            ui_status("replaced %u match(es)", hits.length);
+    });
+}
+
+/// Overwrite `hits` in `v`'s document with `data`, repeated or cut to each, as
+/// one undo step. Returns: false if refused or failed, nothing changed.
+bool ui_replace_hits(View* v, const(Match)[] hits, const(ubyte)[] data)
+{
+    Document* d = v.doc;
+    if (ui_refuse_edit(d)) // turned read-only during the walk
+        return false;
+
+    ui_end_typing(d);
+    bool ok;
+    d.editor.beginGroup();
+    try
+    {
+        foreach (ref const(Match) m; hits)
+            d.editor.patternReplace(m.at, m.length, data.ptr, data.length);
+        d.editor.endGroup();
+        ok = true;
+    }
+    catch (Exception e)
+    {
+        logError("replace failed: %s", e.msg);
+        ui_status("replace failed: %s", ui_clip(e.msg, 44));
+        d.editor.abortGroup();
+    }
+    // Refresh even on failure, like paste.
+    ++d.revision;
+    structureEdited(d, hits[0].at);
+    return ok;
 }
 
 /// Repeat the last search past the selection, so it doesn't refind the same
@@ -4611,24 +4812,29 @@ void ui_write_preview(out string label, out string detail)
     }
 
     label = ui_row_text(sformat(buf, "%s %d byte(s) at %s", verb, req.length, ui_offset(req.start, true)));
+    char[48] hex = void;
+    detail = ui_row_text(sformat(buf, "%s, repeated", ui_hex_head(req.data, hex)));
+}
 
-    // Leading pattern bytes, like bookmark rows.
+/// Leading bytes of `data` in hex into `buf` (27 chars at least), like
+/// bookmark rows.
+const(char)[] ui_hex_head(const(ubyte)[] data, char[] buf)
+{
     static immutable string digits = "0123456789abcdef";
     enum SHOWN = 8;
-    char[SHOWN * 3 + 3] hex = void;
     size_t n;
-    foreach (size_t i, ubyte b; req.data[0 .. req.data.length < SHOWN ? $ : SHOWN])
+    foreach (size_t i, ubyte b; data[0 .. data.length < SHOWN ? $ : SHOWN])
     {
-        if (i) hex[n++] = ' ';
-        hex[n++] = digits[b >> 4];
-        hex[n++] = digits[b & 0x0f];
+        if (i) buf[n++] = ' ';
+        buf[n++] = digits[b >> 4];
+        buf[n++] = digits[b & 0x0f];
     }
-    if (req.data.length > SHOWN)
+    if (data.length > SHOWN)
     {
-        hex[n .. n + 4] = " ...";
+        buf[n .. n + 4] = " ...";
         n += 4;
     }
-    detail = ui_row_text(sformat(buf, "%s, repeated", hex[0 .. n]));
+    return buf[0 .. n];
 }
 
 /// Apply the write prompt's `typed` text. Selects what was written.
@@ -5093,6 +5299,7 @@ public void ui_omni_run(int id)
     case CMD_ENDIAN:    ui_endian_toggle();    break;
     case CMD_FIND_NEXT: ui_find_repeat(false); break;
     case CMD_FIND_PREV: ui_find_repeat(true);  break;
+    case CMD_FIND_REPLACE_NEXT: ui_replace_repeat(); break;
     case CMD_SKIP_NEXT: ui_skip_element(false); break;
     case CMD_SKIP_PREV: ui_skip_element(true);  break;
     case CMD_SKIP_SEL_NEXT: ui_skip_element(false, true); break;
@@ -5117,6 +5324,8 @@ public void ui_omni_run(int id)
     case CMD_FIND:      ui_omni_open(OMNI_FIND);     return;
     case CMD_FIND_BACK: ui_find_back_prompt();       return;
     case CMD_MARK_ALL:  ui_mark_all_prompt();        return;
+    case CMD_FIND_REPLACE:     ui_replace_prompt(false); return;
+    case CMD_FIND_REPLACE_ALL: ui_replace_prompt(true);  return;
     case CMD_INSPECT:   ui_omni_open(OMNI_INSPECT);  return;
     case CMD_MARK_LIST: ui_omni_open(OMNI_BOOKMARK); return;
     case CMD_STRUCTURE: ui_omni_open(OMNI_STRUCTURE); return;
@@ -5978,6 +6187,10 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Find Next", bind_keys(CMD_FIND_NEXT).ptr, 0, 0)) ui_find_repeat(false);
         if (mu_menu_item_ex(ctx, "Find Previous", bind_keys(CMD_FIND_PREV).ptr, 0, 0)) ui_find_repeat(true);
         if (mu_menu_item_ex(ctx, "Bookmark All Matches...", bind_keys(CMD_MARK_ALL).ptr, 0, 0)) ui_mark_all_prompt();
+        mu_menu_separator(ctx);
+        if (mu_menu_item_ex(ctx, "Find and Replace...", bind_keys(CMD_FIND_REPLACE).ptr, 0, 0)) ui_replace_prompt(false);
+        if (mu_menu_item_ex(ctx, "Replace Next", bind_keys(CMD_FIND_REPLACE_NEXT).ptr, 0, 0)) ui_replace_repeat();
+        if (mu_menu_item_ex(ctx, "Replace All...", bind_keys(CMD_FIND_REPLACE_ALL).ptr, 0, 0)) ui_replace_prompt(true);
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Go to Offset...", bind_keys(CMD_GOTO).ptr, 0, 0)) ui_omni_open(OMNI_ADDRESS);
         if (mu_menu_item_ex(ctx, "Go to Field...", bind_keys(CMD_STRUCTURE).ptr, 0, 0)) ui_omni_open(OMNI_STRUCTURE);

@@ -112,6 +112,13 @@ bool search_parse(const(char)[] text, out Needle needle,
     try args = arguments(text);
     catch (Exception)
         return false; // bad quote or escape
+    return search_parse_args(args, needle, endian);
+}
+
+/// Ditto, from tokens (find-replace splits the line first).
+bool search_parse_args(Argument[] args, out Needle needle,
+    Endian endian = Endian.littleEndian)
+{
     if (args.length == 0)
         return false;
 
@@ -278,18 +285,19 @@ long search_find(ref const(Needle) needle, long from, long size, bool backward,
     return hit.pos;
 }
 
-/// Pass every match of `needle` to `each`, first to last, without overlaps.
-/// `each` returns false to stop.
-void search_all(ref const(Needle) needle, long size,
+/// Pass every match of `needle` from `from` and ending by `end` to `each`, first
+/// to last, without overlaps. `each` returns false to stop.
+void search_all(ref const(Needle) needle, long from, long end,
     bool delegate(long at, size_t length) each, ref SearchContext ctx)
 {
-    if (needle.length == 0 || ctx.editor is null || search_least(needle) == 0)
+    if (needle.length == 0 || ctx.editor is null || search_least(needle) == 0
+        || from >= end)
         return;
 
-    ctx.total = size;
+    ctx.total = end - from;
     ctx.done  = 0;
     Pattern pat = search_pattern(needle);
-    search_pass(pat, 0, size, false, long.max, ctx, (SearchResult hit) =>
+    search_pass(pat, from, end, false, long.max, ctx, (SearchResult hit) =>
         each(hit.pos, cast(size_t) hit.len) ? SearchAction.next : SearchAction.stop);
 }
 
@@ -960,12 +968,12 @@ unittest
     ];
 
     long size = cast(long) data.length;
-    long[2][] all(string text, size_t stop = size_t.max)
+    long[2][] all(string text, size_t stop = size_t.max, long from = 0, long end = long.max)
     {
         Needle n;
         assert(search_parse(text, n), text);
         long[2][] hits;
-        search_all(n, size, (long at, size_t length) {
+        search_all(n, from, end == long.max ? size : end, (long at, size_t length) {
             hits ~= [ at, cast(long) length ];
             return hits.length < stop;
         }, *test_context(data));
@@ -980,6 +988,10 @@ unittest
     assert(all("0xde * 0xef") == [ [ 0, 4 ], [ 6, 4 ] ]);
     assert(all("* 0xef") == [ [ 0, 4 ], [ 4, 6 ] ]);
     assert(all("0x99").length == 0);
+
+    // Bounded: starts from 1, ends by 13.
+    assert(all("0xdead", size_t.max, 1) == [ [ 6, 2 ], [ 12, 2 ] ]);
+    assert(all("0xdead", size_t.max, 1, 13) == [ [ 6, 2 ] ]);
 }
 
 unittest

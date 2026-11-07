@@ -9,6 +9,9 @@
 ///
 /// Patterns follow find's rules (see search) minus wildcards and value ranges,
 /// which name no bytes.
+///
+/// Find-replace takes ddhx's `NEEDLE -- REPLACEMENT`: each match is overwritten
+/// with the replacement, repeated or cut to the match length, so sizes hold.
 /// Authors: dd86k <dd@dax.moe>
 module edit;
 
@@ -17,7 +20,7 @@ import std.system : Endian;
 
 import patterns : pattern, Pattern, PATTERN_NOT_BYTES;
 import ranges : range, Range, RangeSentinel, RANGE_RELATIVE;
-import search : search_prefixed;
+import search : Needle, search_parse_args, search_prefixed;
 import utils : Argument, arguments;
 
 /// Parsed write: where, how far, and the repeated bytes.
@@ -55,6 +58,12 @@ string edit_parse(const(char)[] text, bool ranged, Endian endian, long cursor,
             return "type a pattern after the range";
     }
 
+    return edit_bytes(args, endian, req.data);
+}
+
+/// Bytes named by pattern `args` into `data`. Returns: null, or what's wrong.
+string edit_bytes(Argument[] args, Endian endian, out ubyte[] data)
+{
     // Same rule as find: the first token names its encoding.
     if (search_prefixed(cast(const(char)[]) args[0].data) == false)
         return "a pattern needs a prefix: x:, utf8:, u16:, ...";
@@ -67,8 +76,30 @@ string edit_parse(const(char)[] text, bool ranged, Endian endian, long cursor,
         return "wildcards and value ranges can't be written";
     if (p.data.length == 0)
         return "type a pattern";
-    req.data = p.toBytes();
+    data = p.toBytes();
     return null;
+}
+
+/// Parse find-replace `text`, `NEEDLE -- REPLACEMENT`. `found`: the needle
+/// parsed, even if the replacement didn't.
+/// Returns: null on success, else what's wrong.
+string edit_parse_replace(const(char)[] text, Endian endian, out Needle needle,
+    out bool found, out ubyte[] data)
+{
+    Argument[] args;
+    try args = arguments(strip(text));
+    catch (Exception e)
+        return e.msg;
+
+    size_t sep;
+    while (sep < args.length && args[sep].data != "--")
+        ++sep;
+    found = search_parse_args(args[0 .. sep], needle, endian);
+    if (found == false)
+        return "not a pattern yet";
+    if (sep + 1 >= args.length)
+        return "type -- then the replacement";
+    return edit_bytes(args[sep + 1 .. $], endian, data);
 }
 
 /// Resolve range `text` into `req.start` and `req.length`, like ddhx's
@@ -138,4 +169,26 @@ unittest
     assert(edit_parse("0x20:0x10 x:00", true, Endian.littleEndian, 0, 100, req) !is null);
     assert(edit_parse("200:+4 x:00", true, Endian.littleEndian, 0, 100, req) !is null);
     assert(edit_parse("100:+4 x:00", true, Endian.littleEndian, 0, 100, req) is null); // append slot
+}
+
+unittest
+{
+    Needle n;
+    bool found;
+    ubyte[] data;
+    assert(edit_parse_replace("x:de ad -- utf8:ab", Endian.littleEndian, n, found, data) is null);
+    assert(found && n.length == 2 && data == [ 'a', 'b' ]);
+    assert(edit_parse_replace("x:de * ad -- u16:1", Endian.bigEndian, n, found, data) is null);
+    assert(data == [ 0, 1 ]);
+
+    // Needle alone, or a replacement that names no bytes.
+    assert(edit_parse_replace("x:de", Endian.littleEndian, n, found, data) !is null);
+    assert(found);
+    assert(edit_parse_replace("x:de --", Endian.littleEndian, n, found, data) !is null);
+    assert(found);
+    assert(edit_parse_replace("x:de -- x:00 ?", Endian.littleEndian, n, found, data) !is null);
+    assert(edit_parse_replace("x:de -- ab", Endian.littleEndian, n, found, data) !is null);
+    assert(found);
+    assert(edit_parse_replace("de -- x:00", Endian.littleEndian, n, found, data) !is null);
+    assert(found == false);
 }
