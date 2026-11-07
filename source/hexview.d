@@ -125,6 +125,10 @@ alias HexUndoFn = long function(void* user);
 /// Ditto.
 alias HexRedoFn = long function(void* user);
 
+/// Open (`open`) or close a typing run, so the owner can undo it in one step.
+/// See HexView.groupFn.
+alias HexGroupFn = void function(bool open, void* user);
+
 private enum
 {
     MINIMAP_WIDTH = 16,         // pixels
@@ -259,6 +263,11 @@ struct HexView
     /// Ditto.
     HexRedoFn redoFn;
 
+    /// Typing run hook: opens before the first typed digit, closes at the first
+    /// caret move, mode toggle, delete or undo. Scrolling keeps it open. Takes
+    /// writeUser.
+    HexGroupFn groupFn;
+
     /// Insert splices bytes in; overwrite (default) edits in place.
     bool insertMode;
 
@@ -299,6 +308,8 @@ struct HexView
     // high nibble's result.
     bool editLow;
     ubyte editByte;
+    // groupFn opened a run that is still open.
+    bool typing;
 
     // Button went down inside this grid. Focus alone isn't enough: it can arrive
     // between frames (takeFocus) while a button is held for something else (tab
@@ -336,6 +347,8 @@ struct HexView
 HexView hex_split(ref HexView src)
 {
     HexView v = src;
+
+    v.typing      = false; // the run stays with src
 
     v.windowBuf   = null;
     v.windowStart = 0;
@@ -540,6 +553,7 @@ void hex_set_caret(ref HexView v, size_t pos)
         pos = total;
     v.cursor  = pos;
     v.anchor  = pos;
+    hex_end_typing(v);
     v.active  = true;
     v.editLow = false; // cancels a half-typed byte
     hex_reveal(v, pos, v.columns > 0 ? v.columns : 16, v.visRows);
@@ -552,6 +566,7 @@ void hex_extend_caret(ref HexView v, size_t pos)
     size_t total = hex_total(v);
     if (pos > total)
         pos = total;
+    hex_end_typing(v);
     v.cursor  = pos;
     v.active  = true;
     v.editLow = false;
@@ -1342,6 +1357,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
                 v.anchor = v.cursor;
             v.active = true;
             v.editLow = false; // high nibble first
+            hex_end_typing(v);
             res |= MU_RES_CHANGE;
         }
     }
@@ -1368,6 +1384,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         {
             v.cursor = cast(size_t) hit;
             v.editLow = false;
+            hex_end_typing(v);
             res |= MU_RES_CHANGE;
         }
     }
@@ -1423,6 +1440,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         dst = mu_clamp(dst, 0L, caretMax);
         if (cast(size_t) dst != v.cursor || low != v.editLow)
         {
+            hex_end_typing(v);
             v.cursor  = cast(size_t) dst;
             v.editLow = low;
             if (extend == false)
@@ -1439,6 +1457,7 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         {
             v.insertMode = v.insertMode == false;
             v.editLow = false;
+            hex_end_typing(v);
         }
 
         // Delete/Backspace: the selection, else one byte.
@@ -1472,6 +1491,8 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
         bool undoKey = (ctx.key_pressed & HEX_KEY_UNDO) != 0;
         bool redoKey = (ctx.key_pressed & HEX_KEY_REDO) != 0;
 
+        if (undoKey || redoKey)
+            hex_end_typing(v);
         long at = -1;
         if (undoKey && shiftHeld == false && v.undoFn)
             at = v.undoFn(v.writeUser);
@@ -1494,6 +1515,15 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     return res;
 }
 
+/// Close the panel's typing run, if open. For changes made outside the panel.
+public void hex_end_typing(ref HexView v)
+{
+    if (v.typing == false)
+        return;
+    v.typing = false;
+    v.groupFn(false, v.writeUser);
+}
+
 // Whether all write hooks are set.
 bool hex_editable(ref const(HexView) v)
 {
@@ -1505,6 +1535,11 @@ bool hex_editable(ref const(HexView) v)
 void hex_edit_nibble(ref HexView v, int nib, int cols, int visibleRows)
 {
     long pos = cast(long) v.cursor;
+    if (v.typing == false && v.groupFn)
+    {
+        v.typing = true;
+        v.groupFn(true, v.writeUser);
+    }
 
     if (v.editLow == false)
     {
@@ -1540,6 +1575,7 @@ void hex_edit_nibble(ref HexView v, int nib, int cols, int visibleRows)
 // Delete the selection or one byte. `back`: Backspace, else Delete.
 void hex_delete(ref HexView v, bool back, int cols, int visibleRows)
 {
+    hex_end_typing(v);
     size_t total = hex_total(v);
     if (total == 0)
         return;
@@ -1574,6 +1610,63 @@ void hex_delete(ref HexView v, bool back, int cols, int visibleRows)
     v.anchor  = v.cursor;
     v.editLow = false;
     hex_reveal(v, v.cursor, cols, visibleRows);
+}
+
+// A typing run undoes in one step. Caret moves and deletes end it.
+unittest
+{
+    import ddhx.document.memory : MemoryDocument;
+    import ddhx.editor.base : IDocumentEditor;
+    import ddhx.editor.piecev5 : PieceV5DocumentEditor;
+
+    static IDocumentEditor ed(void* user) { return cast(IDocumentEditor) user; }
+    static ubyte[] read(long pos, ubyte[] buf, void* user) { return ed(user).view(pos, buf); }
+    static void put(long pos, ubyte b, void* user) { ed(user).replace(pos, &b, 1); }
+    static void add(long pos, ubyte b, void* user) { ed(user).insert(pos, &b, 1); }
+    static void cut(long pos, long len, void* user) { ed(user).remove(pos, len); }
+    static void group(bool open, void* user)
+    {
+        if (open)
+            ed(user).beginGroup();
+        else
+            ed(user).endGroup();
+    }
+
+    IDocumentEditor editor = new PieceV5DocumentEditor().open(
+        new MemoryDocument(cast(const(ubyte)[]) "ABCDEFGH"));
+    ubyte[16] buf;
+    const(ubyte)[] bytes() { return editor.view(0, buf[]); }
+
+    HexView v = { active: true, insertMode: true };
+    v.readFn    = &read;
+    v.readUser  = cast(void*) editor;
+    v.replaceFn = &put;
+    v.insertFn  = &add;
+    v.removeFn  = &cut;
+    v.groupFn   = &group;
+    v.writeUser = cast(void*) editor;
+    v.dataSize  = editor.size();
+
+    // Insert "11 22 33", then overwrite F with 44 after a caret jump
+    foreach (int nib; [ 1, 1, 2, 2, 3 ])
+        hex_edit_nibble(v, nib, 16, 4);
+    assert(hex_split(v).typing == false, "the run stays with the source panel");
+    hex_edit_nibble(v, 3, 16, 4);
+    hex_set_caret(v, 8);
+    v.insertMode = false;
+    hex_edit_nibble(v, 4, 16, 4);
+    hex_edit_nibble(v, 4, 16, 4);
+    assert(bytes() == "\x11\x22\x33ABCDE\x44GH");
+    hex_delete(v, true, 16, 4); // Backspace: its own step
+    assert(bytes() == "\x11\x22\x33ABCDEGH");
+
+    assert(editor.undo() >= 0);
+    assert(bytes() == "\x11\x22\x33ABCDE\x44GH");
+    assert(editor.undo() >= 0);
+    assert(bytes() == "\x11\x22\x33ABCDEFGH");
+    assert(editor.undo() >= 0);
+    assert(bytes() == "ABCDEFGH");
+    assert(editor.undo() < 0);
 }
 
 // Scroll the caret into view after a keyboard move; hex_view re-clamps.

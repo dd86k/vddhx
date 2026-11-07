@@ -58,6 +58,9 @@ Rules:
   Next resumes past the whole selection, like ddhx.
 - **Find**: Find, Bookmark All Matches and skips use ddhx's search. A `*` run
   reaches at least 64 KiB, like ddhx, no longer the whole file.
+- **Edit**: Undo takes back a whole run of typing, up to the last caret move,
+  delete or mode switch. Pasting over a selection undoes in one step.
+- Documents use ddhx's piecev5 editor.
 
 ## v0.1.1
 

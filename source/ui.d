@@ -26,7 +26,7 @@ import ddhx.charset : Charset, charsets, ASCII;
 import ddhx.document : DocCaps, FileDocument, IDocument, OFlags;
 import ddhx.editor : IDocumentEditor;
 import ddhx.editor.base : PieceInfo;
-import ddhx.editor.piecev4 : PieceV4DocumentEditor;
+import ddhx.editor.piecev5 : PieceV5DocumentEditor;
 import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector;
 import ddlogger;
 import ddui;
@@ -110,6 +110,10 @@ struct Document
     /// Other document the job reads (a diff's peer), or null. Edits to it are
     /// refused too.
     Document* jobPeer;
+
+    /// View whose typing run holds the editor's open edit group, or null.
+    /// See hexGroup.
+    View* typing;
 
     /// Text lane charset. Find patterns specify their own encoding.
     immutable(Charset)* charset = &ASCII;
@@ -525,7 +529,7 @@ public void ui_new_tab()
     ++untitled;
 
     Document* d = newDocument();
-    d.editor = new PieceV4DocumentEditor(true); // in-memory, empty
+    d.editor = new PieceV5DocumentEditor(true); // in-memory, empty
     d.title  = untitled == 1 ? "untitled" : format("untitled %u", untitled);
 
     View* v = newView(d);
@@ -686,8 +690,9 @@ void ui_drop_document(Document* d)
     }
     if (d.editor)
     {
+        ui_end_typing(d);
         hex_map_release(cast(void*) d.editor); // minimap readers, before the editor goes
-        IDocument[] held = (cast(PieceV4DocumentEditor) d.editor).documents();
+        IDocument[] held = (cast(PieceV5DocumentEditor) d.editor).documents();
         d.editor.close();
         foreach (IDocument doc; held)
             doc.close();
@@ -1427,11 +1432,39 @@ void hexRemove(long pos, long len, void* user)
         logError("remove failed: %s", e.msg);
 }
 
+/// Panel typing run hook: one edit group per document, held by the typing
+/// view. A run opening in another view of the document closes the old one.
+void hexGroup(bool open, void* user)
+{
+    View* v = cast(View*) user;
+    Document* d = v.doc;
+    if (open)
+    {
+        ui_end_typing(d);
+        d.editor.beginGroup();
+        d.typing = v;
+    }
+    else if (d.typing is v)
+    {
+        d.editor.endGroup();
+        d.typing = null;
+    }
+}
+
+/// Close `d`'s typing run, if any. Before edits, saves and reloads made
+/// outside the panel, so they stay out of the run's undo step.
+void ui_end_typing(Document* d)
+{
+    if (d.typing)
+        hex_end_typing(d.typing.hex);
+}
+
 /// Panel history hooks: undo/redo and return the change position for the
 /// caret. Updates `user`'s view size; other views update in ui_frame.
 long hexUndo(void* user)
 {
     View* v = cast(View*) user;
+    ui_end_typing(v.doc);
     long at = -1;
     try
         at = v.doc.editor.undo();
@@ -1446,6 +1479,7 @@ long hexUndo(void* user)
 long hexRedo(void* user)
 {
     View* v = cast(View*) user;
+    ui_end_typing(v.doc);
     long at = -1;
     try
         at = v.doc.editor.redo();
@@ -1470,6 +1504,7 @@ void wireView(View* v)
     v.hex.removeFn  = &hexRemove;
     v.hex.undoFn    = &hexUndo;
     v.hex.redoFn    = &hexRedo;
+    v.hex.groupFn   = &hexGroup;
     v.hex.writeUser = cast(void*) v;
     v.hex.colorFn   = &hexColor;
     v.hex.colorUser = cast(void*) v; // the view: holds the diff and marks
@@ -1748,6 +1783,7 @@ bool ui_show(Document* doc, bool here)
         // Reuse the view; the scratch document goes only if this was its last view.
         // New document, so any diff is over.
         diff_unlink(v);
+        ui_end_typing(scratch);
         v.doc = doc;
         if (ui_view_count(scratch) == 0)
             ui_drop_document(scratch);
@@ -1829,7 +1865,7 @@ Document* ui_load(string path, bool elevate = false)
 /// New document over `src`, opened at `path`.
 Document* ui_adopt(string path, IDocument src)
 {
-    IDocumentEditor ed = new PieceV4DocumentEditor(true);
+    IDocumentEditor ed = new PieceV5DocumentEditor(true);
     ed.open(src);
 
     Document* d = newDocument();
@@ -1866,6 +1902,7 @@ bool saveTo(ref Document d, string path)
 {
     if (d.editor is null)
         return false;
+    ui_end_typing(&d); // undo stops at the save
 
     bool fixed = ui_fixed(&d);
     if (fixed && path == d.path)
@@ -2090,6 +2127,7 @@ void ui_elevated(ref Elevated answer)
 /// Point `d`'s editor at `src`, a new handle to the same bytes.
 void ui_swap_source(Document* doc, IDocument src)
 {
+    ui_end_typing(doc);
     IDocument old = doc.editor.document();
     doc.editor.open(src);
     if (old)
@@ -2307,6 +2345,7 @@ void cutSelection(bool asText)
     if (copySelection(asText) == false)
         return;
 
+    ui_end_typing(doc);
     try
         doc.editor.remove(cast(long) low, cast(long)(high - low + 1));
     catch (Exception e)
@@ -2362,36 +2401,43 @@ public void ui_paste()
     if (high > total) high = total;
     long pos = cast(long) low;
 
+    // Remove the selection, then insert, as one undo step.
+    long cut;
+    if (high > low)
+    {
+        cut = cast(long)(high - low + 1);
+        if (high >= total) cut = cast(long) total - pos; // exclude the append slot
+    }
+    // Past EOF: append regardless of mode.
+    bool inserting = cut > 0 || view.hex.insertMode || low >= total;
+
+    ui_end_typing(doc);
     bool ok;
+    editor.beginGroup();
     try
     {
-        // Remove the selection, then insert. Two history entries, so two undos.
-        bool replacing = high > low;
-        if (replacing)
-        {
-            long cut = cast(long)(high - low + 1);
-            if (high >= total) cut = cast(long) total - pos; // exclude the append slot
-            if (cut > 0)
-            {
-                editor.remove(pos, cut);
-                bookmark_shift(doc.marks, pos, -cut);
-            }
-            else replacing = false;
-        }
-        // Past EOF: append regardless of mode.
-        if (replacing || view.hex.insertMode || low >= total)
-        {
+        if (cut > 0)
+            editor.remove(pos, cut);
+        if (inserting)
             editor.insert(pos, bytes.ptr, bytes.length);
-            bookmark_shift(doc.marks, pos, cast(long) bytes.length);
-        }
         else
             editor.replace(pos, bytes.ptr, bytes.length);
+        editor.endGroup();
         ok = true;
     }
     catch (Exception e)
+    {
         logError("paste failed: %s", e.msg);
+        editor.abortGroup();
+    }
+    if (ok)
+    {
+        bookmark_shift(doc.marks, pos, -cut);
+        if (inserting)
+            bookmark_shift(doc.marks, pos, cast(long) bytes.length);
+    }
 
-    // Refresh even on failure; the remove may have happened.
+    // Refresh even on failure: without history, the remove stays.
     ++doc.revision;
     structureEdited(doc, pos);
     view.hex.dataSize = editor.size();
@@ -3212,7 +3258,7 @@ public void ui_settings_open()
     }
 
     Document* d = newDocument();
-    d.editor = new PieceV4DocumentEditor(true);
+    d.editor = new PieceV5DocumentEditor(true);
     d.title  = "Settings";
     d.restricted   = true;
     d.settingsPage = true;
@@ -4603,6 +4649,7 @@ void ui_write_commit(const(char)[] typed)
     if (ui_refuse_edit(d))
         return;
 
+    ui_end_typing(d);
     try
     {
         if (w.insert)
@@ -4742,6 +4789,7 @@ void ui_file_write(string path, bool insert)
         src = new CappedDocument(src, high - at + 1);
     long len = src.size();
 
+    ui_end_typing(d);
     try
     {
         if (insert)
