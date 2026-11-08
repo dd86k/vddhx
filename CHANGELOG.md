@@ -64,6 +64,7 @@ Rules:
 - **Edit**: Undo takes back a whole run of typing, up to the last caret move,
   delete or mode switch. Pasting over a selection undoes in one step.
 - Documents use ddhx's piecev5 editor.
+- **Minimap**: Built in the background, with a rough first pass first.
 
 ## v0.1.1
 
