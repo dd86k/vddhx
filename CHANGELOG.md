@@ -13,6 +13,7 @@ Rules:
 
 ### Added
 
+- **Packaging**: macOS `.dmg` for Apple Silicon and Intel.
 - **Bookmarks**: "Bookmark All Matches..." command.
   Search data and mark new bookmarks using a pattern. Esc cancels it.
 - **Bookmarks**: "Save Bookmarks..." and "Load Bookmarks...", in ddhx's format.
