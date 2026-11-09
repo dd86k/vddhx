@@ -25,7 +25,15 @@ else
 
     // bindbc only tries the unversioned SONAME (libSDL3.so, from -dev packages);
     // also try the ABI-versioned names from runtime packages.
-    version (Posix)
+    // macOS: bindbc covers Homebrew and frameworks, not MacPorts.
+    version (OSX)
+    {
+        private immutable string[] sdlNames = [
+            "libSDL3.0.dylib", "/opt/local/lib/libSDL3.0.dylib" ];
+        private immutable string[] ttfNames = [
+            "libSDL3_ttf.0.dylib", "/opt/local/lib/libSDL3_ttf.0.dylib" ];
+    }
+    else version (Posix)
     {
         private immutable string[] sdlNames = [ "libSDL3.so.0" ];
         private immutable string[] ttfNames = [ "libSDL3_ttf.so.0" ];

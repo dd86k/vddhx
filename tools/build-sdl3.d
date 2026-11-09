@@ -9,7 +9,7 @@
 // (or ldmd2/gdmd -run; gdc has no -run, so compile it first)
 module build_sdl3;
 
-import std.algorithm : canFind, filter, map, splitter, startsWith;
+import std.algorithm : canFind, endsWith, filter, map, splitter, startsWith;
 import std.array : array, join, split;
 import std.file : copy, dirEntries, DirEntry, exists, isFile, readText,
     rmdirRecurse, SpanMode;
@@ -554,9 +554,15 @@ void checkDubLibs(string root, string libDir)
                 continue;
             foreach (string token; line.split)
             {
-                if (token.startsWith("-l") == false)
+                // macOS frameworks come as -Wl,-framework,NAME
+                string[] wl = token.split(",");
+                string lib;
+                if (wl.length == 3 && wl[0] == "-Wl" && wl[1].endsWith("framework"))
+                    lib = wl[2];
+                else if (token.startsWith("-l"))
+                    lib = token[2 .. $];
+                else
                     continue;
-                string lib = token[2 .. $];
                 if (libs.canFind(lib) == false && implicit.canFind(lib) == false)
                     libs ~= lib;
             }
