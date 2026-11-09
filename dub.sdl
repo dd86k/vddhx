@@ -42,6 +42,18 @@ configuration "static" {
 	libs "SDL3_ttf" "harfbuzz" "freetype" "SDL3" platform="posix"
 	lflags "-L$HOME/.local/lib" platform="posix"
 
+	// macOS: SDL3's frameworks (from sdl3.pc), libc has no iconv.
+	libs "iconv" platform="osx"
+	lflags "-framework" "Cocoa" "-framework" "Carbon" "-framework" "Foundation" \
+	       "-framework" "CoreVideo" "-framework" "CoreMedia" \
+	       "-framework" "IOKit" "-framework" "ForceFeedback" \
+	       "-framework" "CoreAudio" "-framework" "AudioToolbox" \
+	       "-framework" "AVFoundation" "-framework" "GameController" \
+	       "-framework" "Metal" "-framework" "QuartzCore" \
+	       "-weak_framework" "CoreHaptics" \
+	       "-weak_framework" "UniformTypeIdentifiers" \
+	       platform="osx"
+
 	// Windows: from tools/build-sdl3.d, in ./install. MSVC names the static
 	// libs *-static.lib. Order matters: SDL3_ttf, harfbuzz, freetype, then SDL3
 	// and its system deps (from sdl3.pc; usp10, rpcrt4 for harfbuzz).
