@@ -29,6 +29,11 @@ enum SDL_TTF_TAG = "release-3.2.2"; // matches the SDL_TTF_3_2_2 version in dub.
 
 version (Windows) enum bool WINDOWS = true;
 else              enum bool WINDOWS = false;
+version (OSX)     enum bool MACOS = true;
+else              enum bool MACOS = false;
+
+/// Oldest macOS the archives target, unless MACOSX_DEPLOYMENT_TARGET is set.
+enum string MACOS_TARGET = "11.0";
 
 enum Family { unknown, debian, fedora, el }
 
@@ -77,7 +82,7 @@ int main(string[] args)
     GetoptResult opts = getopt(args,
         "dry-run|n", "Print what would run; only read-only checks execute", &dryRun,
         "skip-packages", "Report missing distro packages instead of installing them", &skipPackages,
-        "vendored", "Build freetype/harfbuzz into SDL_ttf (default: true; Windows always)", &vendored,
+        "vendored", "Build freetype/harfbuzz into SDL_ttf (default: true; Windows and macOS always)", &vendored,
         "enable-crb", "EL: install from the CRB repo without asking (this run only)", &enableCrb,
         "prefix", "Install prefix (default: ~/.local, or <repo>/install on Windows)", &prefix,
         "no-clean", "Keep existing build directories", &noClean,
@@ -96,7 +101,7 @@ int main(string[] args)
 
     try
     {
-        build(root, prefix, noClean == false, dynamicCrt, skipPackages, vendored || WINDOWS);
+        build(root, prefix, noClean == false, dynamicCrt, skipPackages, vendored || WINDOWS || MACOS);
     }
     catch (Exception ex)
     {
@@ -133,6 +138,13 @@ void build(string root, string prefix, bool clean, bool dynamicCrt, bool skipPac
         // cl.exe cannot create its .pch on a VM shared folder (C1083).
         common ~= "CMAKE_DISABLE_PRECOMPILE_HEADERS=ON";
         writeln("CRT: ", dynamicCrt ? "dynamic (/MD)" : "static (/MT)");
+    }
+    else if (MACOS)
+    {
+        installMacTools(skipPackages);
+        // dub build must see the same target, else ld warns and the binary
+        // needs the macOS release it was built on.
+        common ~= "CMAKE_OSX_DEPLOYMENT_TARGET=" ~ macosTarget();
     }
     else
     {
@@ -190,6 +202,8 @@ void build(string root, string prefix, bool clean, bool dynamicCrt, bool skipPac
         writeln("warning: expected ", sdlLib, " but it is missing; check the install output above");
 
     checkDubLibs(root, libDir);
+    if (MACOS && ("MACOSX_DEPLOYMENT_TARGET" in environment) == false)
+        writeln("note: export MACOSX_DEPLOYMENT_TARGET=", MACOS_TARGET, " before dub build");
 }
 
 void run(string[] args)
@@ -365,6 +379,35 @@ void installPackages(bool skip, bool vendored)
     {
         throw new Exception(ex.msg ~ "\n" ~ request);
     }
+}
+
+/// macOS release the archives target: MACOSX_DEPLOYMENT_TARGET, or MACOS_TARGET.
+string macosTarget()
+{
+    return environment.get("MACOSX_DEPLOYMENT_TARGET", MACOS_TARGET);
+}
+
+/// Checks for the Xcode command line tools and installs missing cmake/ninja
+/// through Homebrew, or only reports them when skip is set.
+void installMacTools(bool skip)
+{
+    // The SDK carries Cocoa, Metal, and CoreAudio, so only tools can be missing.
+    bool clt;
+    try clt = execute(["xcode-select", "-p"]).status == 0;
+    catch (Exception) {}
+    if (clt == false && dryRun == false)
+        throw new Exception("Xcode command line tools missing; run: xcode-select --install");
+
+    string[] missing = ["cmake", "ninja"].filter!(tool => findTool(tool) is null).array;
+    if (missing.length == 0)
+        return;
+    string[] install = ["brew", "install"] ~ missing;
+    if (skip || findTool("brew") is null)
+    {
+        writeln("warning: missing tools; install them with:\n  ", escapeShellCommand(install));
+        return;
+    }
+    run(install);
 }
 
 bool crbEnabled()
