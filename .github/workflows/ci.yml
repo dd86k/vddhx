@@ -223,3 +223,44 @@ jobs:
         name: vddhx-windows-${{ matrix.arch }}
         path: stage/*
         if-no-files-found: error
+
+  # Static .app in a .dmg, signed ad hoc (see tools/package.d).
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-26, arch: arm64 }
+          - { os: macos-26-intel, arch: x86_64 }
+    needs: test
+    runs-on: ${{ matrix.os }}
+    # Read by build-sdl3.d, LDC, and the Info.plist. SDL and vddhx must agree.
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: dlang-community/setup-dlang@a6f7969b8b5dc3ff448c30f2c6749150795814f3 # v2 branch
+      with:
+        compiler: ldc
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.dub
+        key: dub-${{ matrix.os }}-${{ hashFiles('dub.sdl') }}
+    # Only the install, so other tools in ~/.local stay out of the cache.
+    - id: sdl3
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.local/lib
+          ~/.local/include
+        key: sdl3-${{ matrix.os }}-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('tools/build-sdl3.d') }}
+    - name: Build SDL3
+      if: steps.sdl3.outputs.cache-hit != 'true'
+      run: ldc2 -run tools/build-sdl3.d
+    - name: Build .dmg
+      run: ldc2 -run tools/package.d --dmg --compiler=ldc2
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: vddhx-macos-${{ matrix.arch }}
+        path: dist/*.dmg
+        if-no-files-found: error
