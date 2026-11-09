@@ -709,7 +709,8 @@ void keys_write(ref const(Files) f)
     uiPickAuto = f.fresh;
     press(SDLK_S, CTRL);
     frame();
-    expect(exists(f.fresh) && cast(ubyte[]) read(f.fresh) == [ cast(ubyte) 0x12 ], "Ctrl+S on a scratch buffer saves as");
+    expect(exists(f.fresh) && cast(ubyte[]) read(f.fresh) == [ cast(ubyte) 0x12 ],
+        "Ctrl+S on a scratch buffer saves as");
     expect(ui_probe().path == f.fresh, "...and the tab adopts the path");
 }
 

@@ -24,7 +24,7 @@ import preferences : FONT_SIZE, FONT_SIZE_MAX, FONT_SIZE_MIN;
 private __gshared float fontSize = FONT_SIZE;
 
 // Output pixels per point. ddui works in points; geometry is mapped here and
-// faces are sized to match, so glyphs rasterise at output resolution.
+// faces are sized to match, so glyphs rasterize at output resolution.
 private __gshared float density = 1;
 
 private __gshared TTF_TextEngine* engine;

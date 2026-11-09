@@ -118,7 +118,7 @@ instead; the bar had already grown past the window's width once.
 
 Every level is held by pointer, never by value, because the hex panel's callbacks park a `Document*`
 and a `View*` for ddui to hand back on every read, color and edit, and those
-have to survive their neighbours closing. A pane is likewise named by its pointer
+have to survive their neighbors closing. A pane is likewise named by its pointer
 everywhere, so splitting or closing elsewhere in the grid cannot silently turn a
 reference to one pane into a reference to another.
 
@@ -143,7 +143,7 @@ That is what lets the panel be unit-tested against a plain array, and what makes
 the diff coloring a hook rather than a mode.
 
 Scrolling is tracked in **rows, not pixels**, so a multi-gigabyte file cannot
-overflow the offset, and rows are virtualised: only what is on screen is ever
+overflow the offset, and rows are virtualized: only what is on screen is ever
 read.
 
 `hex_split` copies a panel onto the same bytes for a new pane. It is not a struct

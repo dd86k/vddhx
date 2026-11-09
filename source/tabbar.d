@@ -125,7 +125,7 @@ int tab_bar_height(mu_Context* ctx)
 /// [minWidth, maxWidth]; on overflow they share evenly, then scroll past
 /// minWidth, keeping `selected` visible.
 ///
-/// Dragging reorders: TabAction.move is returned per neighbour passed; the
+/// Dragging reorders: TabAction.move is returned per neighbor passed; the
 /// caller must apply it, since the next frame lays out from the new items.
 /// Returns: The action (one per frame), with `index` the tab (else -1) and
 ///          `target` the destination for a move.
@@ -298,7 +298,7 @@ TabAction tab_bar(mu_Context* ctx, const(char)* name, ref TabBar bar,
             closeW, inset, th, font);
     }
 
-    // Report the move as soon as it passes a neighbour, so the strip always shows
+    // Report the move as soon as it passes a neighbor, so the strip always shows
     // the order it would drop into.
     if (bar.dragging && bar.held >= 0 && bar.held < count)
     {

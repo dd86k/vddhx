@@ -178,7 +178,8 @@ void omni_prompt(ref Omnibar o, string hint = null, const(char)[] seed = null)
     o.hint = hint;
 
     // o.text is fixed-size, subtraction is safe.
-    size_t n = seed.length < o.text.length ? seed.length : o.text.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
+    size_t n = seed.length < o.text.length ? seed.length
+        : o.text.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
     o.text[0 .. n] = seed[0 .. n];
     o.text[n] = 0;
 }

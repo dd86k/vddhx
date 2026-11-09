@@ -560,7 +560,7 @@ int screenshot_run(string[] args)
         shot("tab-tip.bmp");
     }
 
-    // Drag reorders, one step per neighbour middle passed. The middle shot shows
+    // Drag reorders, one step per neighbor middle passed. The middle shot shows
     // the tab drawn at the pointer, overlapping.
     mu_Vec2 grab = find("mid.bin");
     int grabY = grab.y + 3;
@@ -636,7 +636,7 @@ int screenshot_run(string[] args)
     mu_input_mouseup(&ctx, 250, 300, MU_MOUSE_LEFT); frame(); frame();
     shot("tab-handed-over.bmp");
 
-    // Dragging a pane's last tab out closes the pane; a neighbour takes its width.
+    // Dragging a pane's last tab out closes the pane; a neighbor takes its width.
     // The rightmost pane's strip is at x~630.
     mu_input_mousemove(&ctx, 630, leavingY); frame(); frame();
     mu_input_mousedown(&ctx, 630, leavingY, MU_MOUSE_LEFT); frame();

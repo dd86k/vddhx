@@ -726,10 +726,10 @@ void ui_focus_document(const(Document)* d)
     }
 }
 
-/// Remove `p` from the grid, giving its space to a neighbour. Close its views
+/// Remove `p` from the grid, giving its space to a neighbor. Close its views
 /// first (ui_close_tab_in does).
 ///
-/// The neighbour is the one above, or below if at the top, so the column total
+/// The neighbor is the one above, or below if at the top, so the column total
 /// is unchanged. A lone pane removes its column, same rule one level up.
 void ui_drop_pane(Pane* p)
 {
@@ -742,7 +742,7 @@ void ui_drop_pane(Pane* p)
 
     if (c.panes.length > 1)
     {
-        // Take the neighbour pointer before removal shifts indices.
+        // Take the neighbor pointer before removal shifts indices.
         heir = c.panes[pi > 0 ? pi - 1 : pi + 1];
         heir.weight += p.weight;
         c.panes = c.panes[0 .. pi] ~ c.panes[pi + 1 .. $];
@@ -755,7 +755,7 @@ void ui_drop_pane(Pane* p)
         heir = into.panes[0];
     }
 
-    // Focus moves to the neighbour that took the space.
+    // Focus moves to the neighbor that took the space.
     if (focused is p)
     {
         focused = heir;
@@ -2648,7 +2648,8 @@ public enum
 public immutable Entry[] COMMANDS = [
     Entry("New Tab",                "", CMD_NEW_TAB,       "create buffer"),
     Entry("Open File...",           "", CMD_OPEN,          "load edit read"),
-    Entry(OPEN_DEVICE_LABEL,        "", CMD_OPEN_DEVICE,   "disk drive device volume partition physical raw block path type"),
+    Entry(OPEN_DEVICE_LABEL,        "", CMD_OPEN_DEVICE,   "disk drive device volume partition physical raw block "
+        ~ "path type"),
     Entry("Compare With...",        "", CMD_COMPARE,       "diff difference against versus changes"),
     Entry("Stop Comparing",         "", CMD_COMPARE_STOP,  "undiff end diff close comparison"),
     Entry("Next Difference",        "", CMD_DIFF_NEXT,     "diff compare change hunk forward"),
@@ -2656,12 +2657,14 @@ public immutable Entry[] COMMANDS = [
     Entry("Save",                   "", CMD_SAVE,          "write store commit"),
     Entry("Save As...",             "", CMD_SAVE_AS,       "write export copy to"),
     Entry("Close Tab",              "", CMD_CLOSE_TAB,     "shut document"),
-    Entry("Toggle Read-Only",       "", CMD_READONLY,      "readonly lock unlock writable allow editing restricted protect elevate admin root"),
+    Entry("Toggle Read-Only",       "", CMD_READONLY,      "readonly lock unlock writable allow editing restricted "
+        ~ "protect elevate admin root"),
     Entry("Refresh",                "", CMD_REFRESH,       "reread redraw repaint disk changed outside"),
     Entry("Undo",                   "", CMD_UNDO,          "back revert history step"),
     Entry("Redo",                   "", CMD_REDO,          "forward again history step"),
     Entry("Cut",                    "", CMD_CUT,           "clipboard remove delete"),
-    Entry("Cut as Text",            "", CMD_CUT_TEXT,      "clipboard remove delete ascii string chars characters column lane"),
+    Entry("Cut as Text",            "", CMD_CUT_TEXT,      "clipboard remove delete ascii string chars characters "
+        ~ "column lane"),
     Entry("Copy",                   "", CMD_COPY,          "clipboard yank hex"),
     Entry("Copy as Text",           "", CMD_COPY_TEXT,     "clipboard yank ascii string chars characters column lane"),
     Entry("Paste",                  "", CMD_PASTE,         "clipboard insert put"),
@@ -2705,10 +2708,13 @@ public immutable Entry[] COMMANDS = [
     Entry("Reset Zoom",             "", CMD_ZOOM_RESET,    "font text size default normal actual restore"),
     Entry("Toggle Minimap",         "", CMD_MINIMAP,       "ribbon overview scrollbar sidebar"),
     Entry("Toggle Breadcrumbs",     "", CMD_CRUMBS,        "crumbs path field structure format layout trail"),
-    Entry("Toggle Byte Order",      "", CMD_ENDIAN,        "endian endianness little big le be swap order inspector pattern"),
+    Entry("Toggle Byte Order",      "", CMD_ENDIAN,        "endian endianness little big le be swap order inspector "
+        ~ "pattern"),
     Entry("Columns...",             "", CMD_COLUMNS,       "width row bytes per line wrap 8 16 24 32 auto fit resize"),
-    Entry("Character Set...",       "", CMD_CHARSET,       "charset encoding text lane ascii cp437 ibm dos oem ebcdic mainframe mac roman latin1 iso 8859 win1252 windows"),
-    Entry("Offset Format...",       "", CMD_ADDRESS,       "address offsets base radix hex hexadecimal dec decimal oct octal"),
+    Entry("Character Set...",       "", CMD_CHARSET,       "charset encoding text lane ascii cp437 ibm dos oem "
+        ~ "ebcdic mainframe mac roman latin1 iso 8859 win1252 windows"),
+    Entry("Offset Format...",       "", CMD_ADDRESS,       "address offsets base radix hex hexadecimal dec decimal "
+        ~ "oct octal"),
     Entry("Settings",               "", CMD_SETTINGS,      "preferences options configure defaults rc vddhxrc"),
     Entry("Keyboard Shortcuts...",  "", CMD_KEYS,          "keys chords bindings help cheat sheet"),
     Entry("About vddhx",            "", CMD_ABOUT,         "version credits license help"),
@@ -6188,7 +6194,8 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Find Previous", bind_keys(CMD_FIND_PREV).ptr, 0, 0)) ui_find_repeat(true);
         if (mu_menu_item_ex(ctx, "Bookmark All Matches...", bind_keys(CMD_MARK_ALL).ptr, 0, 0)) ui_mark_all_prompt();
         mu_menu_separator(ctx);
-        if (mu_menu_item_ex(ctx, "Find and Replace...", bind_keys(CMD_FIND_REPLACE).ptr, 0, 0)) ui_replace_prompt(false);
+        if (mu_menu_item_ex(ctx, "Find and Replace...", bind_keys(CMD_FIND_REPLACE).ptr, 0, 0))
+            ui_replace_prompt(false);
         if (mu_menu_item_ex(ctx, "Replace Next", bind_keys(CMD_FIND_REPLACE_NEXT).ptr, 0, 0)) ui_replace_repeat();
         if (mu_menu_item_ex(ctx, "Replace All...", bind_keys(CMD_FIND_REPLACE_ALL).ptr, 0, 0)) ui_replace_prompt(true);
         mu_menu_separator(ctx);
@@ -6197,8 +6204,10 @@ void ui_menubar(mu_Context* ctx)
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Skip Forward", bind_keys(CMD_SKIP_NEXT).ptr, 0, 0)) ui_skip_element(false);
         if (mu_menu_item_ex(ctx, "Skip Back", bind_keys(CMD_SKIP_PREV).ptr, 0, 0)) ui_skip_element(true);
-        if (mu_menu_item_ex(ctx, "Select Run Forward", bind_keys(CMD_SKIP_SEL_NEXT).ptr, 0, 0)) ui_skip_element(false, true);
-        if (mu_menu_item_ex(ctx, "Select Run Back", bind_keys(CMD_SKIP_SEL_PREV).ptr, 0, 0)) ui_skip_element(true, true);
+        if (mu_menu_item_ex(ctx, "Select Run Forward", bind_keys(CMD_SKIP_SEL_NEXT).ptr, 0, 0))
+            ui_skip_element(false, true);
+        if (mu_menu_item_ex(ctx, "Select Run Back", bind_keys(CMD_SKIP_SEL_PREV).ptr, 0, 0))
+            ui_skip_element(true, true);
         if (mu_menu_item_ex(ctx, "Select Range...", bind_keys(CMD_SELECT_RANGE).ptr, 0, 0)) ui_select_prompt();
         ctx.style.padding = basePadding;
         mu_end_menu(ctx);

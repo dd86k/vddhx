@@ -2,7 +2,7 @@
 ///
 // The mark is vector geometry in a 64-unit design space: a rounded plate with a
 // 3x3 of rounded cells on it. `vddhx.svg` is that geometry written out directly;
-// the PNGs and BMPs are the same numbers rasterised here with 4x4 supersampling,
+// the PNGs and BMPs are the same numbers rasterized here with 4x4 supersampling,
 // so every output comes from one source and no external converter is needed.
 ///
 // Colors are copied from hex_classify and ui.d

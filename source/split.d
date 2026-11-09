@@ -192,7 +192,8 @@ void split_layout(const(int)[] weights, int avail, int[] sizes)
     {
         int even = avail / cast(int) weights.length;
         sizes[0 .. weights.length] = even;
-        sizes[weights.length - 1] = avail - even * (cast(int) weights.length - 1); // @suppress(dscanner.suspicious.length_subtraction)
+        const size_t last = weights.length - 1; // @suppress(dscanner.suspicious.length_subtraction)
+        sizes[last] = avail - even * cast(int) last;
         return;
     }
 

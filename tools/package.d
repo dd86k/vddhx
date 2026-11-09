@@ -122,7 +122,8 @@ int main(string[] args)
         string binary = buildPath(root, NAME);
         if (noBuild == false)
         {
-            string[] cmd = ["dub", "build", "-c", linkStatic ? "static" : "application", "-b", "release", "--root", root];
+            string[] cmd = ["dub", "build", "-c", linkStatic ? "static" : "application",
+                "-b", "release", "--root", root];
             if (compiler.length)
                 cmd ~= "--compiler=" ~ compiler;
             run(cmd);

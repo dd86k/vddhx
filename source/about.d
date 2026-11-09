@@ -204,7 +204,7 @@ private immutable mu_Color[3][3] MARK_CELLS = [
 ];
 
 /// Draw the application icon into `box`, from tools/mkicon.d's geometry.
-/// Rasterising the real one costs ~28ms at 256px, too slow for startup; the
+/// Rasterizing the real one costs ~28ms at 256px, too slow for startup; the
 /// only difference at this size is antialiasing.
 private void about_mark(mu_Context* ctx, mu_Rect box)
 {

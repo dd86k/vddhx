@@ -2509,7 +2509,7 @@ int hex_caret_nib(ref const(HexView) v)
     return v.editLow ? 1 : 0;
 }
 
-// Fill washed cells, merging same-color neighbours (gaps included) into one
+// Fill washed cells, merging same-color neighbors (gaps included) into one
 // rect.
 void hex_wash_fill(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     HexBackFn backFn, int originX, int y, size_t rowStart, int count, int charW,
@@ -2532,7 +2532,7 @@ void hex_wash_fill(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) l
 }
 
 // Outline washed cells with a stronger wash color (hex_wash_edge); survives the selection fill
-// (see hex_draw_row). Edges are dropped between same-wash neighbours, so runs
+// (see hex_draw_row). Edges are dropped between same-wash neighbors, so runs
 // outline as one region across rows. Rows above and below are queried via
 // backSpanFn (offset-only; hex_byte is invalid off-window). No backSpanFn, no
 // outline.
@@ -2589,7 +2589,7 @@ void hex_wash_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout
 // each span's edge color. Like hex_wash_outline but joined by span start, not
 // color (see HexSpanFn).
 // NOTE: One hook call per cell per side; if it gets slow, carry each row's
-// answers to the next as its top neighbours.
+// answers to the next as its top neighbors.
 void hex_span_outline(mu_Context* ctx, ref const(HexView) v, ref const(HexLayout) lay,
     int originX, int y, size_t rowStart, int count, int cols, int charW, int rowH,
     int level)
@@ -2693,7 +2693,7 @@ unittest
     assert(hex_coleq(hex_wash_edge(mu_Color(250, 170, 44, 255), WHITE), mu_Color(125, 85, 22, 255)));
 }
 
-// Draw the cell edges not shared with neighbours, `weight` px, inset by
+// Draw the cell edges not shared with neighbors, `weight` px, inset by
 // `padX`/`padY` (negative pushes outward). Padding only applies to drawn
 // sides so runs don't notch. Cells too small to pad draw flush.
 void hex_draw_edges(mu_Context* ctx, int x0, int x1, int y, int rowH,
