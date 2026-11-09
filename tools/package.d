@@ -155,9 +155,9 @@ Meta readMeta(string root)
     string about = readText(buildPath(root, "source", "about.d"));
     string field(string name)
     {
-        Captures!string m = matchFirst(about, regex(`enum ` ~ name ~ ` = "([^"]+)"`));
+        Captures!string m = matchFirst(about, regex(`enum\s+` ~ name ~ `\s*=\s*"([^"]+)"`));
         if (m.empty)
-            throw new Exception("source/about.d: no " ~ name);
+            throw new Exception("source/about.d: Could not capture " ~ name);
         return m[1];
     }
     Meta meta;
