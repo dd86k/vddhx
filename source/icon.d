@@ -24,6 +24,16 @@ private enum int ICON_SIZE = 256;
 /// Find the icon and set it on the window. Not fatal if none is found.
 void icon_apply(SDL_Window* window)
 {
+    // macOS: SDL sets the Dock icon, which would replace the app bundle's.
+    version (OSX)
+    {
+        if (exists(buildPath(exeDir(), "..", "Info.plist")))
+        {
+            logDebugging("window icon: app bundle's");
+            return;
+        }
+    }
+
     SDL_Surface* icon = load();
     if (icon is null)
     {

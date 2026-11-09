@@ -1,10 +1,11 @@
-// Builds vddhx and wraps it into .deb, .rpm, and/or AppImage packages.
+// Builds vddhx and wraps it into .deb, .rpm, AppImage, and/or macOS .dmg packages.
 //
 // dpkg-shlibdeps and rpmbuild only see NEEDED entries. SDL itself (loader.d,
 // unless --static), its video backends, and render.d's fontconfig are all
 // dlopened, so they are listed by hand. Build each format on its own distro
 // family so that glibc requirements match what users have.
 // The AppImage is always static and built on the oldest distro CI covers.
+// The .dmg is always static, its app bundle signed ad hoc.
 //
 // Usage: dmd -run tools/package.d [--help] [options...]
 module package_;
@@ -32,6 +33,13 @@ enum SUMMARY = "Graphical hex editor";
 enum DESCRIPTION = "A graphical hex editor built on ddhx, for files and disks.";
 
 immutable uint[] ICON_SIZES = [16, 32, 48, 64, 128, 256];
+
+/// Reverse-DNS bundle ID for the macOS app.
+enum BUNDLE_ID = "moe.dax.vddhx";
+
+/// Oldest macOS the .dmg supports, unless MACOSX_DEPLOYMENT_TARGET is set.
+/// Matches MACOS_TARGET in tools/build-sdl3.d.
+enum MACOS_TARGET = "11.0";
 
 // The dynamic build's SDL: soname, Debian package, and the floor dub.sdl sets
 // (bindbc-sdl's 3.2.0 baseline, SDL_TTF_3_2_2). rpm sonames carry no version.
@@ -77,12 +85,13 @@ struct Meta
 
 int main(string[] args)
 {
-    bool deb, rpm, appimage, noBuild, linkStatic;
+    bool deb, rpm, appimage, dmg, noBuild, linkStatic;
     string compiler, outDir, runtime, release = "1";
     GetoptResult opts = getopt(args,
         "deb", "Build a .deb (default: every format whose tools are on PATH)", &deb,
         "rpm", "Build an .rpm", &rpm,
         "appimage", "Build an AppImage (implies --static; needs appimagetool)", &appimage,
+        "dmg", "Build a macOS .app in a .dmg (implies --static)", &dmg,
         "runtime", "AppImage runtime passed to appimagetool (default: it downloads one)", &runtime,
         "static", "Link SDL3 in rather than depend on the distro's", &linkStatic,
         "compiler", "D compiler passed to dub (default: dub's choice)", &compiler,
@@ -91,7 +100,7 @@ int main(string[] args)
         "no-build", "Package the existing ./vddhx (must match --static)", &noBuild);
     if (opts.helpWanted)
     {
-        defaultGetoptPrinter("Package vddhx as .deb, .rpm, and/or AppImage.", opts.options);
+        defaultGetoptPrinter("Package vddhx as .deb, .rpm, AppImage, and/or .dmg.", opts.options);
         return 0;
     }
 
@@ -99,20 +108,30 @@ int main(string[] args)
     outDir = absolutePath(outDir.length ? outDir : buildPath(root, "dist"));
 
     // No flag: build whatever this host can, so a bare run just works.
-    if (deb == false && rpm == false && appimage == false)
+    if (deb == false && rpm == false && appimage == false && dmg == false)
     {
-        deb = findTool("dpkg-deb") !is null;
-        rpm = findTool("rpmbuild") !is null;
-        if (deb == false && rpm == false)
+        version (OSX)
+            dmg = true;
+        else
         {
-            stderr.writeln("error: neither dpkg-deb nor rpmbuild found on PATH");
-            return 1;
+            deb = findTool("dpkg-deb") !is null;
+            rpm = findTool("rpmbuild") !is null;
+            if (deb == false && rpm == false)
+            {
+                stderr.writeln("error: neither dpkg-deb nor rpmbuild found on PATH");
+                return 1;
+            }
         }
     }
 
-    // SDL3 is too new for the distros an AppImage is meant for.
-    if (appimage)
+    // SDL3 is too new for the distros an AppImage is meant for. A .app carries
+    // no libraries next to its binary.
+    if (appimage || dmg)
         linkStatic = true;
+
+    // Without it, LDC targets the build host's macOS release.
+    if (dmg && ("MACOSX_DEPLOYMENT_TARGET" in environment) == false)
+        environment["MACOSX_DEPLOYMENT_TARGET"] = MACOS_TARGET;
 
     try
     {
@@ -139,6 +158,8 @@ int main(string[] args)
             writeln("Built ", packageRpm(root, outDir, binary, arch, meta));
         if (appimage)
             writeln("Built ", packageAppImage(root, outDir, binary, arch, meta, runtime));
+        if (dmg)
+            writeln("Built ", packageDmg(root, outDir, binary, arch, meta));
     }
     catch (Exception ex)
     {
@@ -388,6 +409,91 @@ string packageAppImage(string root, string outDir, string binary, string arch, M
     environment["ARCH"] = arch;
     run(cmd ~ [appDir, image]);
     return image;
+}
+
+/// Build vddhx.app, sign it ad hoc, and wrap it in a .dmg. Returns the .dmg path.
+string packageDmg(string root, string outDir, string binary, string arch, Meta meta)
+{
+    foreach (string tool; ["codesign", "hdiutil", "strip"])
+        if (findTool(tool) is null)
+            throw new Exception(tool ~ " not found on PATH (Xcode command line tools)");
+
+    string stage = buildPath(outDir, "dmg");
+    if (exists(stage))
+        rmdirRecurse(stage);
+    scope (exit) rmdirRecurse(stage);
+
+    string app = buildPath(stage, NAME ~ ".app");
+    string exe = buildPath(app, "Contents/MacOS", NAME);
+    install(binary, exe, octal!755);
+    run(["strip", exe]);
+    install(buildPath(root, "assets/icon", NAME ~ ".icns"),
+        buildPath(app, "Contents/Resources", NAME ~ ".icns"), octal!644);
+    write(buildPath(app, "Contents/Info.plist"), infoPlist(meta));
+    // arm64 refuses to run unsigned code, and strip dropped the linker's signature.
+    run(["codesign", "--force", "--sign", "-", app]);
+
+    // Drag-to-install layout: the app next to a link to /Applications.
+    symlink("/Applications", buildPath(stage, "Applications"));
+    install(buildPath(root, "LICENSE"), buildPath(stage, "LICENSE"), octal!644);
+
+    string image = buildPath(outDir, format("%s-%s-%s.dmg", NAME, meta.version_, arch));
+    run(["hdiutil", "create", "-volname", NAME ~ " " ~ meta.version_,
+        "-srcfolder", stage, "-ov", "-format", "UDZO", image]);
+    return image;
+}
+
+/// Info.plist for vddhx.app. Claims every file type at the lowest rank, so
+/// Finder offers vddhx under "Open With" without becoming the default.
+string infoPlist(Meta meta)
+{
+    return format(
+`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>%1$s</string>
+	<key>CFBundleIconFile</key>
+	<string>%1$s</string>
+	<key>CFBundleIdentifier</key>
+	<string>%2$s</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>%1$s</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>%3$s</string>
+	<key>CFBundleVersion</key>
+	<string>%3$s</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>%4$s</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>File</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
+`, NAME, BUNDLE_ID, meta.version_, environment.get("MACOSX_DEPLOYMENT_TARGET", MACOS_TARGET));
 }
 
 void run(string[] args)

@@ -62,6 +62,18 @@ enum Geo SMALL = Geo(0, 64, 14, 4, 16, 4, 3);
 
 Geo geometry(int size) { return size < 32 ? SMALL : NORMAL; }
 
+// Apple's icon grid puts the plate at 824 of 1024 pixels, so the Dock and
+// Finder expect a margin all around. NORMAL shrunk about the center to fit.
+enum Geo MACOS = scaled(NORMAL, (824.0 / 1024) / (NORMAL.plateSize / 64));
+
+/// Geometry g scaled by k about the center of the design space.
+Geo scaled(Geo g, double k)
+{
+    enum double C = 32;
+    return Geo(C - (C - g.plateInset) * k, g.plateSize * k, g.plateR * k,
+        C - (C - g.cellOrigin) * k, g.cellSize * k, g.cellGap * k, g.cellR * k);
+}
+
 // Coverage test for one rounded rectangle, by clamping the point to the rect of
 // corner centers: inside the straight edges that lands on the point itself.
 bool in_round_rect(double px, double py, double x, double y, double w, double h, double r)
@@ -99,13 +111,13 @@ struct Image
 // where the whole radius is barely three pixels across.
 enum int SUPERSAMPLE = 4;
 
-Image render(int size)
+/// Rasterize the mark at size pixels with geometry geo.
+Image render(int size, Geo geo)
 {
     Image img;
     img.size = size;
     img.px = new RGBA[size * size];
 
-    const Geo geo = geometry(size);
     const double unit = size / 64.0;
     const double step = 1.0 / SUPERSAMPLE;
 
@@ -166,7 +178,8 @@ void chunk(ref ubyte[] o, string type, const(ubyte)[] data)
     o ~= nativeToBigEndian(crc32(0, body_))[];
 }
 
-void write_png(string path, const ref Image img)
+/// PNG file bytes for img.
+ubyte[] encode_png(const ref Image img)
 {
     ubyte[] raw;
     raw.reserve(img.size * (1 + img.size * 4));
@@ -189,7 +202,12 @@ void write_png(string path, const ref Image img)
     chunk(png, "IHDR", ihdr);
     chunk(png, "IDAT", cast(ubyte[])compress(raw, 9));
     chunk(png, "IEND", null);
-    write(path, png);
+    return png;
+}
+
+void write_png(string path, const ref Image img)
+{
+    write(path, encode_png(img));
 }
 
 // 32-bit bottom-up BMP with a BITMAPV4HEADER, which is what the app loads.
@@ -235,6 +253,39 @@ void write_bmp(string path, const ref Image img)
     write(path, o);
 }
 
+// icns entry types and their pixel sizes. The @2x types are the Retina
+// variants of the point size below them. Every type takes a PNG payload.
+immutable string[] ICNS_TYPES = [
+    "icp4", "icp5", "ic11", "ic12", "ic07", "ic13", "ic08", "ic14", "ic09", "ic10",
+];
+immutable int[] ICNS_SIZES = [
+    16,     32,     32,     64,     128,    256,    256,    512,    512,    1024,
+];
+
+/// Write the macOS app icon (.icns) for the app bundle in tools/package.d.
+void write_icns(string path)
+{
+    ubyte[][int] pngs;
+    ubyte[] entries;
+    foreach (size_t i, string type; ICNS_TYPES)
+    {
+        int size = ICNS_SIZES[i];
+        if ((size in pngs) is null)
+        {
+            Image img = render(size, MACOS);
+            pngs[size] = encode_png(img);
+        }
+        entries ~= cast(const(ubyte)[])type;
+        entries ~= nativeToBigEndian(cast(uint)(8 + pngs[size].length))[];
+        entries ~= pngs[size];
+    }
+
+    ubyte[] o = cast(ubyte[])"icns".dup;
+    o ~= nativeToBigEndian(cast(uint)(8 + entries.length))[];
+    o ~= entries;
+    write(path, o);
+}
+
 // Every size gets a PNG, for the desktop's own icon lookup and the Windows
 // .ico. Only the one size source/icon.d hands to SDL gets a BMP.
 enum int WINDOW_ICON_SIZE = 256;
@@ -249,7 +300,7 @@ void emit_icon()
 
     foreach (int size; SIZES)
     {
-        Image img = render(size);
+        Image img = render(size, geometry(size));
         string stem = "assets/icon/vddhx-" ~ text(size);
 
         writeln("write: ", stem, ".png");
@@ -261,6 +312,9 @@ void emit_icon()
         writeln("write: ", stem, ".bmp");
         write_bmp(stem ~ ".bmp", img);
     }
+
+    writeln("write: assets/icon/vddhx.icns");
+    write_icns("assets/icon/vddhx.icns");
     writeln("done");
 }
 
