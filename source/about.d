@@ -19,12 +19,11 @@ import hexview : hex_classify;
 import logging : logging_folder;
 import theme : Scheme, theme_fg;
 
-/// Application version. Lives here only; dub.sdl has none (dub uses git tags).
-enum VERSION = "0.1.1";
-
-enum AUTHOR = "dd <dd@dax.moe>";                    // @suppress(dscanner.style.undocumented_declaration)
-enum HOMEPAGE = "https://github.com/dd86k/vddhx";   // @suppress(dscanner.style.undocumented_declaration)
-enum LICENSE = "MIT";                               // @suppress(dscanner.style.undocumented_declaration)
+/// Application version, dub uses git tags.
+enum VERSION    = "0.2.0";
+enum AUTHOR     = "dd <dd@dax.moe>";                // @suppress(dscanner.style.undocumented_declaration)
+enum HOMEPAGE   = "https://github.com/dd86k/vddhx"; // @suppress(dscanner.style.undocumented_declaration)
+enum LICENSE    = "MIT";                            // @suppress(dscanner.style.undocumented_declaration)
 
 /// Compiler that built this binary, e.g. "LDC (frontend 2.111)".
 /// NOTE: __VENDOR__/__VERSION__ don't give the compiler's own version (e.g.

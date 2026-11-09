@@ -9,7 +9,7 @@ Rules:
 - Better to keep entries closest to the actual intent: "Bookmarks survive closing
   the tab" is clearer than "Bookmarks are written to a sidecar file".
 
-## Unreleased
+## v0.2.0
 
 ### Added
 
