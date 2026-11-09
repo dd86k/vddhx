@@ -10,7 +10,7 @@
 // Usage: dmd -run tools/package.d [--help] [options...]
 module package_;
 
-import std.algorithm : canFind, map, sort, splitter;
+import std.algorithm : canFind, endsWith, map, sort, splitter;
 import std.array : array, join;
 import std.conv : octal;
 import std.digest : toHexString, LetterCase;
@@ -23,7 +23,7 @@ import std.path : absolutePath, buildPath, dirName, pathSeparator, relativePath;
 import std.process : Config, environment, escapeShellCommand, execute, spawnProcess, wait;
 import std.regex : matchFirst, regex, Captures;
 import std.stdio : stderr, writeln;
-import std.string : startsWith, strip;
+import std.string : lastIndexOf, startsWith, strip;
 import std.typecons : Tuple;
 
 private: // shuts up dscanner
@@ -414,7 +414,7 @@ string packageAppImage(string root, string outDir, string binary, string arch, M
 /// Build vddhx.app, sign it ad hoc, and wrap it in a .dmg. Returns the .dmg path.
 string packageDmg(string root, string outDir, string binary, string arch, Meta meta)
 {
-    foreach (string tool; ["codesign", "hdiutil", "strip"])
+    foreach (string tool; ["codesign", "hdiutil", "otool", "strip"])
         if (findTool(tool) is null)
             throw new Exception(tool ~ " not found on PATH (Xcode command line tools)");
 
@@ -432,6 +432,7 @@ string packageDmg(string root, string outDir, string binary, string arch, Meta m
     write(buildPath(app, "Contents/Info.plist"), infoPlist(meta));
     // arm64 refuses to run unsigned code, and strip dropped the linker's signature.
     run(["codesign", "--force", "--sign", "-", app]);
+    auditApp(app, exe);
 
     // Drag-to-install layout: the app next to a link to /Applications.
     symlink("/Applications", buildPath(stage, "Applications"));
@@ -441,6 +442,66 @@ string packageDmg(string root, string outDir, string binary, string arch, Meta m
     run(["hdiutil", "create", "-volname", NAME ~ " " ~ meta.version_,
         "-srcfolder", stage, "-ov", "-format", "UDZO", image]);
     return image;
+}
+
+/// Throw unless exe loads only OS libraries, carries no rpath, targets the
+/// deployment target, and app has a sealed ad-hoc signature from codesign.
+void auditApp(string app, string exe)
+{
+    string[] problems, dylibs;
+    string cmd, minos;
+    foreach (string line; capture(["otool", "-l", exe]).splitter('\n'))
+    {
+        string l = line.strip;
+        if (l.startsWith("cmd "))
+        {
+            cmd = l[4 .. $].strip;
+            continue;
+        }
+        if (l.startsWith("minos ") && cmd == "LC_BUILD_VERSION")
+        {
+            minos = l[6 .. $].strip;
+            continue;
+        }
+        if (l.startsWith("name ") == false && l.startsWith("path ") == false)
+            continue;
+        // "name /usr/lib/libSystem.B.dylib (offset 24)"
+        string value = l[5 .. $].strip;
+        ptrdiff_t off = value.lastIndexOf(" (offset ");
+        if (off >= 0)
+            value = value[0 .. off];
+        if (cmd == "LC_RPATH" || cmd == "LC_DYLD_ENVIRONMENT")
+            problems ~= cmd ~ " " ~ value;
+        else if (cmd.endsWith("_DYLIB"))
+        {
+            if (value.startsWith("/usr/lib/") || value.startsWith("/System/Library/"))
+                dylibs ~= value;
+            else
+                problems ~= cmd ~ " " ~ value;
+        }
+    }
+
+    string target = environment.get("MACOSX_DEPLOYMENT_TARGET", MACOS_TARGET);
+    if (target.canFind('.') == false)
+        target ~= ".0";
+    if (minos != target)
+        problems ~= format("LC_BUILD_VERSION minos %s, expected %s", minos.length ? minos : "missing", target);
+
+    run(["codesign", "--verify", "--strict", "--deep", "--verbose=2", app]);
+    string sig = capture(["codesign", "--display", "--verbose=2", app]);
+    foreach (string want; ["Identifier=" ~ BUNDLE_ID, "Signature=adhoc",
+        "Info.plist entries=", "Sealed Resources version=2"])
+        if (sig.canFind(want) == false)
+            problems ~= "codesign: no " ~ want;
+    if (sig.canFind("linker-signed"))
+        problems ~= "codesign: still the linker's signature";
+
+    writeln("Links:");
+    foreach (string d; dylibs)
+        writeln("  ", d);
+    if (problems.length)
+        throw new Exception("app audit failed:\n  " ~ problems.join("\n  "));
+    writeln("Audit: no rpaths, OS libraries only, minos ", minos, ", ad-hoc sealed");
 }
 
 /// Info.plist for vddhx.app. Claims every file type at the lowest rank, so
@@ -515,4 +576,13 @@ string findTool(string name)
             return path;
     }
     return null;
+}
+
+/// Output of args (stdout and stderr), or throw if it fails.
+string capture(string[] args)
+{
+    Tuple!(int, "status", string, "output") r = execute(args);
+    if (r.status != 0)
+        throw new Exception(format("%s failed (exit code %d): %s", args[0], r.status, r.output.strip));
+    return r.output;
 }
