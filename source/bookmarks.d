@@ -187,6 +187,17 @@ void bookmark_shift(ref Bookmark[] list, long at, long shift)
     bookmark_merge(list); // removal can make bookmarks touch
 }
 
+/// Drop bookmarks at or past `size`, trimming one that crosses it.
+void bookmark_truncate(ref Bookmark[] list, long size)
+{
+    size_t keep;
+    while (keep < list.length && list[keep].at < size)
+        ++keep;
+    list = list[0 .. keep];
+    if (keep && list[$ - 1].at + list[$ - 1].length > size)
+        list[$ - 1].length = size - list[$ - 1].at;
+}
+
 /// Bookmarks as ddhx's bookmark-save writes them, one "0xADDR\tLENGTH" per line.
 /// A name goes in a third field, which ddhx ignores on load.
 string bookmark_format(const(Bookmark)[] list)
@@ -410,6 +421,15 @@ unittest
     list = [ Bookmark(0x10, 4), Bookmark(0x18, 4) ];
     bookmark_shift(list, 0x14, -4);
     assert(list == [ Bookmark(0x10, 8) ]);
+
+    // Truncate: drops past the end, trims across it.
+    list = [ Bookmark(0x10, 4), Bookmark(0x1e, 4), Bookmark(0x30, 1) ];
+    bookmark_truncate(list, 0x20);
+    assert(list == [ Bookmark(0x10, 4), Bookmark(0x1e, 2) ]);
+    bookmark_truncate(list, 0x1e);
+    assert(list == [ Bookmark(0x10, 4) ]);
+    bookmark_truncate(list, 0);
+    assert(list.length == 0);
 }
 
 /// Names and merging.

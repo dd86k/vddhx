@@ -1515,6 +1515,13 @@ int hex_input(mu_Context* ctx, const(char)* name, ref HexView v,
     return res;
 }
 
+/// Forget a half-typed byte, so the next digit starts a new one. For bytes
+/// replaced outside the panel.
+public void hex_cancel_nibble(ref HexView v)
+{
+    v.editLow = false;
+}
+
 /// Close the panel's typing run, if open. For changes made outside the panel.
 public void hex_end_typing(ref HexView v)
 {

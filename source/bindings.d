@@ -67,6 +67,7 @@ immutable Command[] BINDABLE = [
     Command("tab-prev",         CMD_TAB_PREV,       "ctrl+shift+tab",       false, "Previous Tab"),
     Command("toggle-readonly",  CMD_READONLY,       ""),
     Command("refresh",          CMD_REFRESH,        "ctrl+l"),
+    Command("reload",           CMD_RELOAD,         ""),
     Command("diff-file",        CMD_COMPARE,        ""),
     Command("diff-stop",        CMD_COMPARE_STOP,   ""),
     Command("diff-next",        CMD_DIFF_NEXT,      "}"),

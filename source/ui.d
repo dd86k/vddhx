@@ -2058,10 +2058,11 @@ public void ui_toggle_readonly()
         ui_clip(doc.title, 40));
 }
 
-/// Request an elevated open of `path`; handled in ui_elevated.
-void ui_elevate(string path, bool write)
+/// Request an elevated open of `path`, for a reload of its document if
+/// `reload`. Handled in ui_elevated.
+void ui_elevate(string path, bool write, bool reload = false)
 {
-    if (elevate_request(path, write, &ui_wakeup) == false)
+    if (elevate_request(path, write, reload, &ui_wakeup) == false)
     {
         ui_status("a permission prompt is already up");
         return;
@@ -2070,8 +2071,8 @@ void ui_elevate(string path, bool write)
         ui_clip(baseName(path), 40));
 }
 
-/// Handle an elevated open: a new tab, or write access for the requesting
-/// document. Unwanted handles are closed.
+/// Handle an elevated open: a new tab, write access or a reload for the
+/// requesting document. Unwanted handles are closed.
 void ui_elevated(ref Elevated answer)
 {
     if (answer.error.length)
@@ -2093,6 +2094,19 @@ void ui_elevated(ref Elevated answer)
     }
 
     Document* d = ui_find_document(answer.path);
+    if (answer.reload)
+    {
+        // Edits made during the prompt weren't confirmed for discarding.
+        if (d is null || ui_busy(d) || d.revision != reloadRevision)
+        {
+            src.close();
+            if (d)
+                ui_status("%s changed during the prompt; reload again", ui_clip(d.title, 40));
+            return;
+        }
+        ui_reload_with(d, src);
+        return;
+    }
     if (answer.write)
     {
         // The tab may have closed or been edited during the prompt.
@@ -2139,8 +2153,7 @@ __gshared bool redrawWanted;
 
 /// Reread the shown bytes through the held handles and redraw everything, like
 /// ddhx's refresh (Ctrl+L). Edits and undo stay.
-/// NOTE: Misses size changes and files replaced on disk. A reload command would
-///       need a new handle and a fresh editor.
+/// NOTE: Misses size changes and files replaced on disk. See ui_reload.
 public void ui_refresh()
 {
     redrawWanted = true;
@@ -2151,6 +2164,79 @@ public void ui_refresh()
         ++d.revision;
         structureEdited(d, 0);
     }
+}
+
+/// Document revision when its elevated reload was requested. A mismatch on the
+/// answer means it was edited during the prompt.
+__gshared uint reloadRevision;
+
+/// Reopen the focused document's file with a new handle, dropping edits and
+/// undo after a Save / Don't Save / Cancel prompt. Picks up size changes and
+/// replaced files. Keeps the handle's access, asking for permission again if
+/// the open is refused.
+public void ui_reload()
+{
+    if (ui_on_settings())
+        return;
+    Document* doc = &focusedDoc();
+    if (doc.editor is null || doc.path.length == 0)
+    {
+        ui_status("%s has no file to reload", ui_clip(doc.title, 40));
+        return;
+    }
+    if (ui_refuse_busy(doc))
+        return;
+    if (ui_confirm_discard(doc, "Reload document") != Confirm.proceed)
+        return;
+
+    FileDocument old = cast(FileDocument) doc.editor.document();
+    bool write = old && old.writable();
+    FileDocument src;
+    try
+        src = new FileDocument(doc.path, (write ? OFlags.readWrite : OFlags.read) | OFlags.exists | OFlags.share);
+    catch (Exception e)
+    {
+        if (elevate_denied(e))
+        {
+            reloadRevision = doc.revision;
+            ui_elevate(doc.path, write, true);
+            return;
+        }
+        logError("reload failed: %s", e.msg);
+        ui_status("cannot reload %s: %s", ui_clip(doc.title, 32), ui_clip(e.msg, 44));
+        return;
+    }
+    ui_reload_with(doc, src);
+}
+
+/// Point `doc` at `src`, a new handle to its file, dropping edits and undo.
+/// Carets and bookmarks are cut to the new size, the structure detected again.
+void ui_reload_with(Document* doc, FileDocument src)
+{
+    ui_swap_source(doc, src);
+    ++doc.revision;
+    long size = doc.editor.size();
+    bookmark_truncate(doc.marks, size);
+
+    size_t total = cast(size_t) size;
+    foreach (Column* c; columns)
+        foreach (Pane* p; c.panes)
+            foreach (View* v; p.views)
+            {
+                if (v.doc !is doc)
+                    continue;
+                v.hex.dataSize = size;
+                v.hex.cursor = min(v.hex.cursor, total);
+                v.hex.anchor = min(v.hex.anchor, total);
+                hex_cancel_nibble(v.hex);
+            }
+
+    doc.structure = StructureCache.init;
+    doc.structureLen = 0;
+    detectStructure(doc);
+    redrawWanted = true;
+    logInfo("reloaded %s (%s bytes)", doc.path, size);
+    ui_status("reloaded %s", ui_clip(doc.title, 48));
 }
 
 /// Save the focused document. With a path: write, return success. Without:
@@ -2622,7 +2708,7 @@ public enum
 {
     CMD_NEW_TAB, CMD_OPEN, CMD_OPEN_DEVICE, CMD_COMPARE, CMD_COMPARE_STOP, CMD_DIFF_NEXT, CMD_DIFF_PREV,
     CMD_SAVE, CMD_SAVE_AS,
-    CMD_CLOSE_TAB, CMD_READONLY, CMD_REFRESH,
+    CMD_CLOSE_TAB, CMD_READONLY, CMD_REFRESH, CMD_RELOAD,
     CMD_UNDO, CMD_REDO, CMD_CUT, CMD_CUT_TEXT, CMD_COPY, CMD_COPY_TEXT, CMD_PASTE,
     CMD_REPLACE, CMD_INSERT, CMD_REPLACE_RANGE, CMD_INSERT_RANGE, CMD_REPLACE_FILE, CMD_INSERT_FILE,
     CMD_GOTO, CMD_SELECT_RANGE,
@@ -2660,6 +2746,7 @@ public immutable Entry[] COMMANDS = [
     Entry("Toggle Read-Only",       "", CMD_READONLY,      "readonly lock unlock writable allow editing restricted "
         ~ "protect elevate admin root"),
     Entry("Refresh",                "", CMD_REFRESH,       "reread redraw repaint disk changed outside"),
+    Entry("Reload",                 "", CMD_RELOAD,        "reopen revert discard disk changed outside replaced size"),
     Entry("Undo",                   "", CMD_UNDO,          "back revert history step"),
     Entry("Redo",                   "", CMD_REDO,          "forward again history step"),
     Entry("Cut",                    "", CMD_CUT,           "clipboard remove delete"),
@@ -5283,6 +5370,7 @@ public void ui_omni_run(int id)
     case CMD_OPEN:      ui_open_dialog();      break;
     case CMD_READONLY:  ui_toggle_readonly();  break;
     case CMD_REFRESH:   ui_refresh();          break;
+    case CMD_RELOAD:    ui_reload();           break;
     case CMD_COMPARE:   ui_compare_dialog();   break;
     case CMD_COMPARE_STOP: ui_compare_stop();  break;
     case CMD_DIFF_NEXT: ui_diff_step(false);   break;
@@ -6152,6 +6240,7 @@ void ui_menubar(mu_Context* ctx)
         if (mu_menu_item_ex(ctx, "Save", bind_keys(CMD_SAVE).ptr, 0, 0)) cast(void)ui_save();
         if (mu_menu_item_ex(ctx, "Save As...", bind_keys(CMD_SAVE_AS).ptr, 0, 0)) ui_save_as();
         if (mu_menu_item_ex(ctx, "Refresh", bind_keys(CMD_REFRESH).ptr, 0, 0)) ui_refresh();
+        if (mu_menu_item_ex(ctx, "Reload", bind_keys(CMD_RELOAD).ptr, 0, 0)) ui_reload();
         mu_menu_separator(ctx);
         if (mu_menu_item_ex(ctx, "Close Tab", bind_keys(CMD_CLOSE_TAB).ptr, 0, 0)) ui_close_current_tab();
         // Via SDL's queue; main owns the loop flag.

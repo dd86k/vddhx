@@ -56,6 +56,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     keys_write(files);
     keys_file_write(files);
     keys_refresh(files);
+    keys_reload(files);
     keys_diff(files);
     uiPickAuto = null;
 
@@ -803,6 +804,31 @@ void keys_refresh(ref const(Files) f)
     press(SDLK_L, CTRL);
     expect(ui_peek(1) == 0x5a, "Ctrl+L rereads bytes changed outside");
     expect(ui_peek(0) == 0xab && ui_probe().edited, "...keeping the edits");
+}
+
+/// Reload: a shrunk file, edits and undo dropped, caret pulled in.
+void keys_reload(ref const(Files) f)
+{
+    ui_open(f.drop);
+    frame();
+    press(SDLK_END, CTRL);
+    expect(ui_probe().edited, "reload: starts edited");
+
+    // Shrunk, which refresh misses. fopen shares the file on Windows.
+    {
+        ubyte[4] four = 0x77;
+        File fout = File(f.drop, "wb");
+        fout.rawWrite(four);
+    }
+    press(SDLK_P, CTRL | SHIFT);
+    type("Reload");
+    press(SDLK_RETURN);
+    frame();
+    Probe p = ui_probe();
+    expect(p.size == 4 && ui_peek(0) == 0x77, "Reload reads the shrunk file");
+    expect(p.edited == false && p.cursor <= 4, "...dropping the edits, caret within it");
+    press(SDLK_Z, CTRL);
+    expect(ui_peek(0) == 0x77, "...and the undo history");
 }
 
 void keys_diff(ref const(Files) f)

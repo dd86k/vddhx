@@ -17,10 +17,13 @@ import os.error : OSException;
 /// before SDL init.
 enum string ELEVATE_ARG = "--elevated-open";
 
+/// Elevated open request and its answer.
 struct Elevated
 {
     string path;
     bool write;
+    /// Replaces the handle of the open document at `path` (Reload).
+    bool reload;
     /// INVALID_OSHANDLE on failure; owned by the poller.
     OSHANDLE handle = INVALID_OSHANDLE;
     /// Failure reason for the status bar.
@@ -47,13 +50,13 @@ bool elevate_denied(Exception e)
 
 /// Request `path` opened by an elevated copy. Runs on its own thread since the
 /// OS prompt can wait indefinitely; `wake` is called once elevate_poll has an
-/// answer.
+/// answer. `reload` is passed back in the answer.
 /// Returns: false if a request is already pending.
-bool elevate_request(string path, bool write, void function() nothrow wake)
+bool elevate_request(string path, bool write, bool reload, void function() nothrow wake)
 {
     if (cas(&running, false, true) == false)
         return false;
-    pending = Elevated(path, write);
+    pending = Elevated(path, write, reload);
     Thread t = new Thread({
         try
             elevate_run(pending);

@@ -9,7 +9,16 @@ Rules:
 - Better to keep entries closest to the actual intent: "Bookmarks survive closing
   the tab" is clearer than "Bookmarks are written to a sidecar file".
 
+## Upcoming
+
+### Added
+
+- **File**: "Reload" reopens the file, picking up size changes and files
+  replaced on disk. Drops edits and undo, after asking.
+
 ## v0.2.0
+
+"Make it yours" update: Customizable font, colors, and many QOL enhancements.
 
 ### Added
 
