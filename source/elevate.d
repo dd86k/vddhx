@@ -20,7 +20,9 @@ enum string ELEVATE_ARG = "--elevated-open";
 /// Elevated open request and its answer.
 struct Elevated
 {
+    /// File or device to open.
     string path;
+    /// Open read-write, read-only otherwise.
     bool write;
     /// Replaces the handle of the open document at `path` (Reload).
     bool reload;

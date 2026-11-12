@@ -130,19 +130,23 @@ unittest
         }
 }
 
-/// A registered span. `parent`: index of the enclosing span, -1 at top level.
-/// `depth`: nesting level, cached for border drawing.
-///
-/// `shade` alternates across adjacent same-role fields (e.g. IHDR's scalars)
-/// so the theme can tell them apart.
+/// A registered span: a field or a container.
 struct StructureSpan
 {
+    /// Document offset of the first byte.
     long at;
+    /// Size in bytes, -1 until close() measures a container opened without one.
     long length;
+    /// Color role, `none` for containers.
     StructureRole role;
+    /// Field or container name, shown in the status bar.
     string name;
+    /// Nesting level, 0 at top level, cached for border drawing.
     int depth;
+    /// Index of the enclosing span in the span array, -1 at top level.
     int parent = -1;
+    /// Alternates across adjacent same-role fields (e.g. IHDR's scalars) so
+    /// the theme can tell them apart.
     bool shade;
 }
 
@@ -174,6 +178,7 @@ struct StructureBuilder
 {
     /// Next field position. field()/open() advance it; parsers may seek forward.
     long at;
+    /// Document size in bytes, updated by structure_resize() after edits.
     long size;
 
     /// Read `buf.length` bytes from `from`, short at end of document.

@@ -14,6 +14,7 @@ import core.thread : Thread;
 /// Must be thread-safe.
 __gshared void function() nothrow worker_wake;
 
+/// Represents a threaded background worker.
 final class BackgroundWorker
 {
     /// Worker thread. Must not touch UI state until workDone.
@@ -25,6 +26,7 @@ final class BackgroundWorker
     /// UI thread, once per run unless abandoned. `error` is what doWork threw.
     void delegate(bool canceled, Exception error) workDone;
 
+    /// Run task.
     void run()
     {
         assert(busy == false, "worker already running");
