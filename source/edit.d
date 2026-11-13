@@ -10,14 +10,19 @@
 /// Patterns follow find's rules (see search) minus wildcards and value ranges,
 /// which name no bytes.
 ///
+/// The inspector writes one scalar at the caret: a type name then its value,
+/// `u32 1234` or `f64 -0.5`, encoded as find would encode `u32:1234`.
+///
 /// Find-replace takes ddhx's `NEEDLE -- REPLACEMENT`: each match is overwritten
 /// with the replacement, repeated or cut to the match length, so sizes hold.
 /// Authors: dd86k <dd@dax.moe>
 module edit;
 
-import std.string : strip;
+import std.format : format;
+import std.string : icmp, indexOf, strip, stripLeft;
 import std.system : Endian;
 
+import ddhx.inspector : InspectorType;
 import patterns : pattern, Pattern, PATTERN_NOT_BYTES;
 import ranges : range, Range, RangeSentinel, RANGE_RELATIVE;
 import search : Needle, search_parse_args, search_prefixed;
@@ -78,6 +83,39 @@ string edit_bytes(Argument[] args, Endian endian, out ubyte[] data)
         return "type a pattern";
     data = p.toBytes();
     return null;
+}
+
+/// Split inspector query `text` into a type and its value ("u32 1234").
+/// Returns: false when `text` only filters the rows: no value yet, a byte order
+/// word ("u32 le"), or no type.
+bool edit_scalar_split(const(char)[] text, out InspectorType type, out const(char)[] value)
+{
+    text = strip(text);
+    ptrdiff_t space = indexOf(text, ' ');
+    if (space < 0)
+        return false;
+    value = stripLeft(text[space + 1 .. $]);
+    if (value.length <= 2 && (icmp(value, "le"[0 .. value.length]) == 0 ||
+        icmp(value, "be"[0 .. value.length]) == 0))
+        return false;
+
+    const(char)[] name = text[0 .. space];
+    foreach (string member; __traits(allMembers, InspectorType))
+    {
+        if (icmp(name, member) == 0)
+        {
+            type = __traits(getMember, InspectorType, member);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Bytes of `value` as a `type` scalar in `endian` into `data`.
+/// Returns: null, or what's wrong.
+string edit_scalar(InspectorType type, const(char)[] value, Endian endian, out ubyte[] data)
+{
+    return edit_bytes([ Argument(format("%s:%s", type, value)) ], endian, data);
 }
 
 /// Parse find-replace `text`, `NEEDLE -- REPLACEMENT`. `found`: the needle
@@ -191,4 +229,38 @@ unittest
     assert(found);
     assert(edit_parse_replace("de -- x:00", Endian.littleEndian, n, found, data) !is null);
     assert(found == false);
+}
+
+unittest
+{
+    InspectorType type;
+    const(char)[] value;
+    assert(edit_scalar_split("u32 1234", type, value));
+    assert(type == InspectorType.u32 && value == "1234");
+    assert(edit_scalar_split(" F64   -0.5 ", type, value));
+    assert(type == InspectorType.f64 && value == "-0.5");
+    assert(edit_scalar_split("i8 max", type, value) && type == InspectorType.i8);
+
+    // Still filtering: no value, a byte order word, or not a type.
+    assert(edit_scalar_split("u32", type, value) == false);
+    assert(edit_scalar_split("u32 ", type, value) == false);
+    assert(edit_scalar_split("u32 l", type, value) == false);
+    assert(edit_scalar_split("u32 BE", type, value) == false);
+    assert(edit_scalar_split("32 5", type, value) == false);
+    assert(edit_scalar_split("x32 5", type, value) == false);
+
+    ubyte[] data;
+    assert(edit_scalar(InspectorType.u32, "1234", Endian.littleEndian, data) is null);
+    assert(data == [ 0xd2, 0x04, 0, 0 ]);
+    assert(edit_scalar(InspectorType.u32, "1234", Endian.bigEndian, data) is null);
+    assert(data == [ 0, 0, 0x04, 0xd2 ]);
+    assert(edit_scalar(InspectorType.f64, "1", Endian.littleEndian, data) is null);
+    assert(data == [ 0, 0, 0, 0, 0, 0, 0xf0, 0x3f ]);
+    assert(edit_scalar(InspectorType.i8, "-1", Endian.littleEndian, data) is null);
+    assert(data == [ 0xff ]);
+
+    assert(edit_scalar(InspectorType.u8, "256", Endian.littleEndian, data) !is null);
+    assert(edit_scalar(InspectorType.u16, "-1", Endian.littleEndian, data) !is null);
+    assert(edit_scalar(InspectorType.u32, "1..5", Endian.littleEndian, data) !is null);
+    assert(edit_scalar(InspectorType.u32, "abc", Endian.littleEndian, data) !is null);
 }

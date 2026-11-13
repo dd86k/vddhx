@@ -887,6 +887,21 @@ int screenshot_run(string[] args)
     ui_omni_close();
     frame();
 
+    // A value after the type: one row saying what Enter writes.
+    ui_omni_toggle(OMNI_INSPECT);
+    frame();
+    mu_input_text(&ctx, "u32 1234");
+    frame(); frame();
+    shot("omni-inspect-write.bmp");
+    ui_omni_close();
+    ui_omni_toggle(OMNI_INSPECT);
+    frame();
+    mu_input_text(&ctx, "u8 256");
+    frame(); frame();
+    shot("omni-inspect-write-bad.bmp");
+    ui_omni_close();
+    frame();
+
     // The document's byte order sorts its half first; both are listed.
     ui_endian_toggle();
     ui_omni_toggle(OMNI_INSPECT);

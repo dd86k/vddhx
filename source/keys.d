@@ -55,6 +55,7 @@ int keys_run(mu_Context* context, void delegate() framer, string path)
     keys_marks_file(files);
     keys_write(files);
     keys_file_write(files);
+    keys_inspect();
     keys_refresh(files);
     keys_reload(files);
     keys_diff(files);
@@ -784,6 +785,63 @@ void keys_file_write(ref const(Files) f)
     press(SDLK_HOME, CTRL);
     run("Insert File", f.empty);
     expect(ui_probe().size == BASE.length, "an empty file is refused");
+}
+
+/// Inspector writes: a typed value lands at the caret in the document's order.
+void keys_inspect()
+{
+    void inspect(string query)
+    {
+        press(SDLK_I, ALT);
+        type(query);
+        press(SDLK_RETURN);
+    }
+
+    // Scratch tab holding 12 34 56 78.
+    press(SDLK_T, CTRL);
+    foreach (string digit; [ "1", "2", "3", "4", "5", "6", "7", "8" ])
+        type(digit);
+
+    press(SDLK_HOME, CTRL);
+    inspect("u16 513");
+    Probe p = ui_probe();
+    expect(p.omni == false && p.size == 4, "=u16 513 writes in place");
+    expect(ui_peek(0) == 0x01 && ui_peek(1) == 0x02 && ui_peek(2) == 0x56, "...little-endian");
+    expect(p.anchor == 0 && p.cursor == 1, "...and selects it");
+    press(SDLK_Z, CTRL);
+    expect(ui_peek(0) == 0x12 && ui_peek(1) == 0x34, "one Ctrl+Z undoes it");
+
+    // Right after typed bytes, still its own undo step.
+    press(SDLK_HOME, CTRL);
+    type("a");
+    type("b");
+    inspect("u8 255");
+    expect(ui_peek(0) == 0xab && ui_peek(1) == 0xff, "=u8 255 writes at the caret");
+    press(SDLK_Z, CTRL);
+    expect(ui_peek(0) == 0xab && ui_peek(1) == 0x34, "Ctrl+Z undoes the write alone");
+    press(SDLK_Z, CTRL);
+    expect(ui_peek(0) == 0x12, "...then the typed byte");
+
+    ui_endian_toggle();
+    press(SDLK_HOME, CTRL);
+    inspect("i16 -2");
+    expect(ui_peek(0) == 0xff && ui_peek(1) == 0xfe, "a big-endian document writes big-endian");
+    ui_endian_toggle();
+    press(SDLK_Z, CTRL);
+
+    press(SDLK_END, CTRL);
+    inspect("u32 1");
+    p = ui_probe();
+    expect(p.size == 8 && ui_peek(4) == 0x01 && ui_peek(7) == 0, "a write at the end grows the document");
+    press(SDLK_Z, CTRL);
+    expect(ui_probe().size == 4, "one Ctrl+Z undoes it");
+
+    // Neither writes: a value out of range, a byte order word (filters rows).
+    press(SDLK_HOME, CTRL);
+    inspect("u8 256");
+    expect(ui_peek(0) == 0x12, "=u8 256 is refused");
+    inspect("u32 le");
+    expect(ui_peek(0) == 0x12 && ui_peek(3) == 0x78, "=u32 le only filters");
 }
 
 void keys_refresh(ref const(Files) f)

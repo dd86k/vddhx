@@ -31,7 +31,8 @@ import ddhx.inspector : InspectorType, inspector_rows, byteSize, formatInspector
 import ddlogger;
 import ddui;
 import disks : DISKS_LISTED, Disk, disks_list, disks_size;
-import edit : EditRequest, edit_parse, edit_parse_replace, edit_range;
+import edit : EditRequest, edit_parse, edit_parse_replace, edit_range, edit_scalar,
+    edit_scalar_split;
 import elevate : Elevated, elevate_denied, elevate_poll, elevate_request;
 import elite : elite_frame, elite_animating;
 import hexview;
@@ -2816,6 +2817,7 @@ immutable Entry[] PREFIXES = [
     Entry("Omnibar: go to an offset",        "" ~ OMNI_ADDRESS),
     Entry("Omnibar: find a pattern",         "" ~ OMNI_FIND),
     Entry("Omnibar: inspect bytes at caret", "" ~ OMNI_INSPECT),
+    Entry("Omnibar: write a value at caret", OMNI_INSPECT ~ "u32 1234"),
     Entry("Omnibar: list bookmarks",         "" ~ OMNI_BOOKMARK),
     Entry("Omnibar: go to a field",          "" ~ OMNI_STRUCTURE),
     Entry("Omnibar: this sheet",             "" ~ OMNI_HELP),
@@ -2953,6 +2955,13 @@ const(OmniItem)[] ui_omni_items()
             put("no prefix starts with that", "Esc to give up on it", FIND_RUN, false, true);
         break;
     case OmniMode.inspect:
+        // A value after the type ("u32 1234"): one row saying what Enter writes.
+        string ilabel, idetail;
+        if (ui_inspect_preview(ilabel, idetail))
+        {
+            put(ilabel, idetail, 0, false, true);
+            break;
+        }
         ubyte[8] raw = void;
         ubyte[] bytes = ui_inspect_bytes(raw);
         char[64] value = void;
@@ -3669,6 +3678,136 @@ const(char)[] ui_inspect_value(int index, ubyte[] bytes, char[] buf)
     return formatInspector(buf, row.type, bytes, row.endian);
 }
 
+/// Inspector row label for `type` in the document's byte order ("u32 LE").
+string ui_inspect_label(InspectorType type)
+{
+    foreach (ref immutable Inspect row; INSPECT)
+        if (row.type == type && (byteSize(type) == 1 || row.endian == focusedDoc.endian))
+            return row.label;
+    return null;
+}
+
+/// Last parse of an inspector value, reused while the query and byte order
+/// hold (the pattern parser allocates).
+struct InspectParse
+{
+    string text;
+    Endian endian;
+    string error;
+    ubyte[] data;
+}
+/// Ditto.
+__gshared InspectParse inspectParse;
+
+/// The '=' query as a write: its type and bytes in the document's order, or
+/// what's wrong in `error`. Returns: false when the query only filters rows.
+bool ui_inspect_parse(out InspectorType type, out ubyte[] data, out string error)
+{
+    const(char)[] query = omni_query(omni);
+    const(char)[] value;
+    if (edit_scalar_split(query, type, value) == false)
+        return false;
+
+    InspectParse* p = &inspectParse;
+    if (p.text != query || p.endian != focusedDoc.endian)
+    {
+        p.text   = query.idup;
+        p.endian = focusedDoc.endian;
+        p.error  = edit_scalar(type, value, p.endian, p.data);
+    }
+    data  = p.data;
+    error = p.error;
+    return true;
+}
+
+/// Why `length` bytes can't be written at `at` in the focused document, or
+/// null.
+string ui_inspect_blocked(long at, size_t length)
+{
+    if (ui_on_settings() || focusedDoc.editor is null)
+        return "no bytes to write to";
+    if (focusedDoc.restricted)
+        return "read-only; turn off Edit > Read-Only";
+    long total = focusedDoc.editor.size();
+    if (at > total)
+        return "the caret is past the end";
+    if (ui_fixed(&focusedDoc()) && at + cast(long) length > total)
+        return "runs past the end of the device";
+    return null;
+}
+
+/// '=' row for a typed value: what Enter writes where, or what's wrong.
+/// Returns: false when the query only filters rows.
+bool ui_inspect_preview(out string label, out string detail)
+{
+    InspectorType type;
+    ubyte[] data;
+    string error;
+    if (ui_inspect_parse(type, data, error) == false)
+        return false;
+
+    char[96] buf = void;
+    long at = cast(long) hex_sel_low(focusedView.hex);
+    label = ui_row_text(sformat(buf, "Write %s at %s", ui_inspect_label(type), ui_offset(at, true)));
+    if (error is null)
+        error = ui_inspect_blocked(at, data.length);
+    if (error)
+    {
+        detail = error;
+        return true;
+    }
+
+    // Value it replaces, read in the same type and order.
+    ubyte[8] raw = void;
+    char[64] value = void;
+    char[48] hex = void;
+    string old = formatInspector(value, type, ui_inspect_bytes(raw), focusedDoc.endian);
+    detail = ui_row_text(old == "N/A"
+        ? sformat(buf, "%s, grows the document", ui_hex_head(data, hex))
+        : sformat(buf, "%s, replaces %s", ui_hex_head(data, hex), old));
+    return true;
+}
+
+/// Write the '=' query's value at the caret in the document's byte order, and
+/// select it. Returns: false when the query only filters rows.
+bool ui_inspect_write()
+{
+    InspectorType type;
+    ubyte[] data;
+    string error;
+    if (ui_inspect_parse(type, data, error) == false)
+        return false;
+
+    View* v = &focusedView();
+    Document* d = v.doc;
+    long at = cast(long) hex_sel_low(v.hex);
+    if (error is null)
+        error = ui_inspect_blocked(at, data.length);
+    if (error)
+    {
+        ui_status("write: %s", error);
+        return true;
+    }
+    if (ui_refuse_edit(d)) // busy
+        return true;
+
+    ui_end_typing(d);
+    // NOTE: replace() would merge this into the undo step of typed bytes.
+    try
+        d.editor.patternReplace(at, data.length, data.ptr, data.length);
+    catch (Exception e)
+    {
+        logError("write failed: %s", e.msg);
+        return true;
+    }
+    ++d.revision;
+    structureEdited(d, at);
+    v.hex.dataSize = d.editor.size();
+    ui_select_range(*v, cast(size_t) at, data.length);
+    logDebugging("wrote %s at %#x", ui_inspect_label(type), at);
+    return true;
+}
+
 /// Complete the highlighted row into the query (currently only '/' prefixes):
 /// replaces the partial word, keeps the rest, box stays open. Tab always; Enter
 /// falls back to running on other rows.
@@ -3763,7 +3902,13 @@ void ui_omni_accept(OmniMode mode, int id, bool transfer = false)
         focusedView.hex.takeFocus = true;
         break;
     case OmniMode.inspect:
-        // No target: copy the value to the clipboard.
+        // Reparsed: the rows lag the query by a frame.
+        if (ui_inspect_write())
+        {
+            focusedView.hex.takeFocus = true;
+            break;
+        }
+        // No value typed: copy the row's to the clipboard.
         ubyte[8] raw = void;
         char[64] buf = void;
         const(char)[] value = ui_inspect_value(id, ui_inspect_bytes(raw), buf);

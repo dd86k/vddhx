@@ -15,6 +15,8 @@ Rules:
 
 - **File**: "Reload" reopens the file, picking up size changes and files
   replaced on disk. Drops edits and undo, after asking.
+- **Inspector**: type a value after a type (`=u32 1234`) and Enter writes it at
+  the caret, in the document's byte order.
 
 ## v0.2.0
 
